@@ -1,0 +1,40 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Download wake word models (openWakeWord v0.5.1)
+        run: |
+          dir=app/src/main/assets/wakeword
+          mkdir -p "$dir"
+          base=https://github.com/dscripka/openWakeWord/releases/download/v0.5.1
+          for f in melspectrogram.onnx embedding_model.onnx hey_jarvis_v0.1.onnx alexa_v0.1.onnx hey_mycroft_v0.1.onnx; do
+            curl -fsSL --retry 3 -o "$dir/$f" "$base/$f"
+          done
+          ls -la "$dir"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: laptop-ai-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
