@@ -415,7 +415,7 @@ fun RemoteImage(ref: String, title: String, modifier: Modifier = Modifier.fillMa
         bmp != null -> Image(
             bmp.asImageBitmap(),
             contentDescription = title,
-            contentScale = if (crop) ContentScale.Crop else ContentScale.FitWidth,
+            contentScale = if (crop) ContentScale.Crop else ContentScale.FillWidth,
             modifier = modifier
                 .clip(shape)
                 .background(if (isPhoto) Color.Black else Color.White)

@@ -641,3 +641,5 @@ private fun ReasoningBlock(reasoning: String) {
             .padding(bottom = 6.dp),
     )
 }
+
+private val DIAGRAM_LINE = Regex("^!\\[([^\\]]*)\\]\\(diagram:([0-9a-f]{16})\\)$")
