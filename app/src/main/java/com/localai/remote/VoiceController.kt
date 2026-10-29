@@ -81,7 +81,7 @@ class VoiceController(private val app: App) {
     @Volatile
     private var postedPhase = VoicePhase.IDLE
 
-    private fun setPhase(p: VoicePhase) {
+    private fun updatePhase(p: VoicePhase) {
         if (p == postedPhase) return
         postedPhase = p
         main.post { phase = p }
@@ -124,7 +124,7 @@ class VoiceController(private val app: App) {
             while (true) {
                 val wake = wakeMode
                 if (!wake && !listenRequested.get()) break
-                setPhase(if (wake) VoicePhase.WAITING_FOR_WAKE else VoicePhase.IDLE)
+                updatePhase(if (wake) VoicePhase.WAITING_FOR_WAKE else VoicePhase.IDLE)
 
                 if (!readFully(recorder, chunk)) {
                     postError("Microphone stopped working")
@@ -168,7 +168,7 @@ class VoiceController(private val app: App) {
             }
             recorder?.release()
             detector?.close()
-            setPhase(VoicePhase.IDLE)
+            updatePhase(VoicePhase.IDLE)
             synchronized(lock) { thread = null }
             // A request may have arrived while we were shutting down (but don't spin on errors).
             if (!failed && (wakeMode || listenRequested.get())) ensureRunning()
@@ -180,7 +180,7 @@ class VoiceController(private val app: App) {
         cancelCapture = false
         main.post { app.speaker.stop() }
         beep(ToneGenerator.TONE_PROP_BEEP)
-        setPhase(VoicePhase.LISTENING)
+        updatePhase(VoicePhase.LISTENING)
 
         val pcm = recordUtterance(recorder, preRoll)
         if (pcm == null) {
@@ -188,7 +188,7 @@ class VoiceController(private val app: App) {
             return
         }
         beep(ToneGenerator.TONE_PROP_ACK)
-        setPhase(VoicePhase.TRANSCRIBING)
+        updatePhase(VoicePhase.TRANSCRIBING)
 
         val text = try {
             HubApi.transcribe(app.settings.serverUrl, app.settings.apiKey, pcm)
