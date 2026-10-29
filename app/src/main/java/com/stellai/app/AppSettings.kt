@@ -14,6 +14,7 @@ class AppSettings(context: Context) {
     var apiKey by stringPref("api_key", "")
     var thinking by boolPref("thinking", false)
     var assistantName by stringPref("assistant_name", "Stella")
+    var accentColor by stringPref("accent_color", "cyan")
 
     // Phone wake word + voice
     var wakeWordEnabled by boolPref("wake_enabled", false)

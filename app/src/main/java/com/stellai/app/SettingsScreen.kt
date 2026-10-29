@@ -8,7 +8,15 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -177,6 +185,15 @@ fun SettingsScreen(onDone: () -> Unit) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            Text("Theme color", style = MaterialTheme.typography.labelLarge)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ACCENTS.forEach { a ->
+                    ColorSwatch(a, selected = s.accentColor == a.id) { s.accentColor = a.id }
+                }
+            }
             SettingSwitch("Thinking mode", "Smarter on hard questions, but much slower without a GPU.", thinking) { thinking = it }
 
             HorizontalDivider()
@@ -253,7 +270,7 @@ fun SettingsScreen(onDone: () -> Unit) {
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text("✦ " + text.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Cyan)
+    Text("✦ " + text.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Accent)
 }
 
 @Composable
@@ -273,5 +290,25 @@ private fun SettingSwitch(title: String, detail: String, checked: Boolean, onCha
             )
         }
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** A round colour chip; the chosen one gets a white ring. Applies instantly. */
+@Composable
+private fun ColorSwatch(accent: Accent, selected: Boolean, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .size(38.dp)
+                .border(2.dp, if (selected) Color.White else Color.Transparent, CircleShape)
+                .padding(4.dp)
+                .background(Brush.linearGradient(listOf(accent.main, accent.glow)), CircleShape)
+                .clickable(onClick = onClick)
+        )
+        Text(
+            accent.label,
+            style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
+            color = if (selected) Color.White else Space.Muted,
+        )
     }
 }

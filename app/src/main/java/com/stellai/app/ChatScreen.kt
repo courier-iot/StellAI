@@ -127,14 +127,14 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                 Text(
                     "✦ MISSION LOG",
                     style = HudLabel.copy(fontSize = 14.sp, letterSpacing = 3.sp),
-                    color = Space.Cyan,
+                    color = Space.Accent,
                     modifier = Modifier.padding(20.dp, 22.dp, 20.dp, 12.dp),
                 )
                 val itemColors = NavigationDrawerItemDefaults.colors(
-                    selectedContainerColor = Space.Cyan.copy(alpha = 0.14f),
+                    selectedContainerColor = Space.Accent.copy(alpha = 0.14f),
                     unselectedContainerColor = Color.Transparent,
-                    selectedTextColor = Space.Cyan,
-                    selectedIconColor = Space.Cyan,
+                    selectedTextColor = Space.Accent,
+                    selectedIconColor = Space.Accent,
                 )
                 NavigationDrawerItem(
                     label = { Text("New chat") },
@@ -173,7 +173,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                     }
                     Text(label, style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 0.5.sp), color = Space.Muted,
                         modifier = Modifier.weight(1f), maxLines = 2)
-                    IconButton(onClick = { sync.request() }) { Icon(Icons.Filled.Refresh, contentDescription = "Sync now", tint = Space.Cyan) }
+                    IconButton(onClick = { sync.request() }) { Icon(Icons.Filled.Refresh, contentDescription = "Sync now", tint = Space.Accent) }
                 }
             }
         },
@@ -187,7 +187,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Space.Void.copy(alpha = 0.55f)),
                         navigationIcon = {
                             IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Filled.Menu, contentDescription = "Chats", tint = Space.Cyan)
+                                Icon(Icons.Filled.Menu, contentDescription = "Chats", tint = Space.Accent)
                             }
                         },
                         title = {
@@ -220,7 +220,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                         },
                         actions = {
                             IconButton(onClick = { engine.newChat() }) {
-                                Icon(Icons.Filled.Add, contentDescription = "New chat", tint = Space.Cyan)
+                                Icon(Icons.Filled.Add, contentDescription = "New chat", tint = Space.Accent)
                             }
                             IconButton(onClick = onOpenSettings) {
                                 Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = Space.Muted)
@@ -234,7 +234,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                             .background(Space.Void.copy(alpha = 0.7f))
                             .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                     ) {
-                        HorizontalDivider(color = Space.Cyan.copy(alpha = 0.18f))
+                        HorizontalDivider(color = Space.Accent.copy(alpha = 0.18f))
                         voice.lastError?.let { err ->
                             Text(
                                 "⚠ $err  (tap to dismiss)",
@@ -258,11 +258,11 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                                 maxLines = 5,
                                 shape = RoundedCornerShape(24.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Space.Cyan.copy(alpha = 0.8f),
+                                    focusedBorderColor = Space.Accent.copy(alpha = 0.8f),
                                     unfocusedBorderColor = Space.Line,
                                     focusedContainerColor = Space.Panel.copy(alpha = 0.85f),
                                     unfocusedContainerColor = Space.Panel.copy(alpha = 0.7f),
-                                    cursorColor = Space.Cyan,
+                                    cursorColor = Space.Accent,
                                 ),
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                                 keyboardActions = KeyboardActions(onSend = { submit() }),
@@ -273,8 +273,8 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                             Box(contentAlignment = Alignment.Center, modifier = Modifier.size(52.dp)) {
                                 if (listening) PulseRing()
                                 val glow = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = Space.Cyan,
-                                    contentColor = Color(0xFF00262B),
+                                    containerColor = Space.Accent,
+                                    contentColor = Space.OnAccent,
                                 )
                                 when {
                                     engine.busy -> FilledIconButton(onClick = { engine.stop() }, colors = glow) {
@@ -333,7 +333,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
 /** Small glowing dot: cyan when Stella is active or listening, dim when idle. */
 @Composable
 private fun StatusDot(online: Boolean) {
-    val color = if (online) Space.Cyan else Space.Muted
+    val color = if (online) Space.Accent else Space.Muted
     Box(
         Modifier
             .size(8.dp)
@@ -356,7 +356,7 @@ private fun PulseRing() {
         Modifier
             .size(48.dp)
             .scale(scale)
-            .background(Space.Cyan.copy(alpha = 0.22f), CircleShape)
+            .background(Space.Accent.copy(alpha = 0.22f), CircleShape)
     )
 }
 
@@ -364,7 +364,7 @@ private fun PulseRing() {
 private fun EmptyState(modifier: Modifier, app: App, name: String) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("✦", fontSize = 44.sp, color = Space.Cyan)
+            Text("✦", fontSize = 44.sp, color = Space.Accent)
             Spacer(Modifier.size(8.dp))
             Text(
                 "${name.uppercase()} ONLINE",
@@ -407,10 +407,10 @@ private fun MessageRow(msg: UiMessage, name: String) {
                     Modifier
                         .widthIn(max = 320.dp)
                         .background(
-                            Brush.linearGradient(listOf(Space.Cyan.copy(alpha = 0.30f), Space.Violet.copy(alpha = 0.30f))),
+                            Brush.linearGradient(listOf(Space.Accent.copy(alpha = 0.30f), Space.Glow.copy(alpha = 0.30f))),
                             shape,
                         )
-                        .border(1.dp, Space.Cyan.copy(alpha = 0.45f), shape)
+                        .border(1.dp, Space.Accent.copy(alpha = 0.45f), shape)
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                 ) {
                     SelectionContainer { Text(msg.text, color = Space.Text) }
@@ -424,18 +424,18 @@ private fun MessageRow(msg: UiMessage, name: String) {
                     Modifier
                         .widthIn(max = 320.dp)
                         .background(Space.Panel.copy(alpha = 0.82f), shape)
-                        .border(1.dp, Space.Cyan.copy(alpha = 0.22f), shape)
+                        .border(1.dp, Space.Accent.copy(alpha = 0.22f), shape)
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                 ) {
                     Text(
                         "✦ ${name.uppercase()}",
                         style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 2.sp),
-                        color = Space.Cyan.copy(alpha = 0.8f),
+                        color = Space.Accent.copy(alpha = 0.8f),
                     )
                     Spacer(Modifier.size(4.dp))
                     if (msg.reasoning.isNotBlank()) ReasoningBlock(msg.reasoning)
                     if (msg.text.isEmpty()) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Cyan)
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Accent)
                     } else {
                         SelectionContainer { Text(msg.text, color = Space.Text) }
                     }
@@ -452,7 +452,7 @@ private fun ReasoningBlock(reasoning: String) {
         text = if (expanded) reasoning.trim() else "◌ Thought process (tap to show)",
         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         fontStyle = FontStyle.Italic,
-        color = Space.Violet.copy(alpha = 0.85f),
+        color = Space.Glow.copy(alpha = 0.85f),
         modifier = Modifier
             .clickable { expanded = !expanded }
             .padding(bottom = 6.dp),
