@@ -7,7 +7,7 @@ Meet **Stella**, your personal voice assistant and chat app, powered by the AI m
 - **Phone actions**: alarms, timers, opening apps, maps, flashlight, volume, battery, plus drafting texts, dialing and calendar events (which you confirm).
 - **Spoken replies** through the phone's text-to-speech voice.
 - **Chats sync** across every phone and tablet, stored on your server.
-- **Space theme**: starfield background, HUD-style chat, glowing mic.
+- **Space theme**: starfield background, HUD-style chat, glowing mic, and 8 accent colors (Settings → Assistant → Theme color).
 
 ## Get the APK (no PC tools needed)
 
@@ -43,6 +43,24 @@ Wake word heard on the phone (beep) → you speak → it stops after a short pau
 ## Sync
 
 Each device keeps its own copy of the chats and syncs with the server when it opens, after every reply, and every minute while in use. Open the **☰ menu** to switch chats, start a new one, delete one (deleted everywhere), or sync now. Any phone or tablet with the same server address and API key sees the same chats.
+
+## Memory
+
+Stella keeps a list of lasting facts about you on the server, shared by all your devices: your projects, tools, preferences and routines. She saves facts when you say "remember…", and with **Learn from conversations** on (Settings → Memory) the server picks out new facts once a chat has been quiet for about a minute. Review, add or delete them under Settings → Memory → View and edit memories.
+
+## Photos
+
+Tap 📷 next to the message box to take a photo or choose one. Stella can read circuits, error screens, sketches and datasheet tables. This needs the vision add-on on the server: re-run `stellai-setup.sh` and answer yes when it asks. Photos are resized to 1280 px and shared with your other devices.
+
+## Message actions
+
+Long-press any message to **Copy**, **Share**, **Retry** (Stella's last reply) or **Edit & resend** (your messages). Editing replaces that message and everything after it, on all your devices.
+
+## Custom wake word ("Hey Stella")
+
+Train a model (see below), then copy the `.onnx` file into `~/llm/wakewords/` on the server. It shows up with a ✦ in Settings → Voice assistant → Wake word, and the app downloads it the first time you use it.
+
+Training: open the [openwakeword-colab-2026 notebook](https://colab.research.google.com/github/alfiedennen/openwakeword-colab-2026/blob/main/train_wakeword.ipynb) in Google Colab, set `TARGET_PHRASE = "hey stella"` and `MODEL_NAME = "hey_stella"`, choose a GPU runtime and **Run all**. It takes about 1.5 hours on Colab Pro, or about 2.5 hours on the free tier (keep the tab open), and downloads `hey_stella.onnx` at the end.
 
 ## Adding your own phone actions
 
