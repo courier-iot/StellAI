@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "LaptopAI"
+rootProject.name = "StellAI"
 include(":app")
