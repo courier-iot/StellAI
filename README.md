@@ -17,9 +17,23 @@ Meet **Stella**, your personal voice assistant and chat app, powered by the AI m
 
 To install a newer build over an older one, you may need to uninstall the old one first. Your chats are safe on the server and come back after a sync.
 
+## The server
+
+The AI runs on your computer. Pick one:
+
+- **Linux** (Linux Mint, Ubuntu): run `server/stellai-setup.sh`. It detects your hardware, builds llama.cpp for your GPU and creates the **StellAI Server** launcher.
+- **Windows 10/11 (preview)**: install `StellAI-Setup.exe` from the "Build Windows installer" Actions run. See [windows/README.md](windows/README.md).
+
+### Automatic updates
+
+Both servers keep themselves up to date from this GitHub repo, checking every 30 minutes. They only install an update when Stella has been idle for a couple of minutes, and your chats, memories, projects, models and settings are never touched.
+
+- **Linux**: the server program (`stellai_hub.py`) downloads the new version, tests it, then restarts itself. If a new version fails to start, it goes back to the previous one automatically and skips that version. To turn updates off: `touch ~/llm/no-auto-update`. Changes to the setup script itself (new engine builds, launchers) still need a re-run of `stellai-setup.sh`.
+- **Windows**: every build on the main branch is published as a release (`windows-v0.1.N`). The app downloads it, checks its checksum, and reinstalls itself silently, without an admin prompt. See *Options* in the app to check now or turn automatic installs off.
+
 ## Set up
 
-1. On the laptop or desktop (whichever is your server), run **StellAI Server** (created by `stellai-setup.sh`). The terminal shows the **server address** and **API key**.
+1. On the laptop or desktop (whichever is your server), start **StellAI Server**. It shows the **server address** and **API key** (on Windows, also a QR code: scan it with the phone's camera and tap **Connect**).
 2. In the app's **Settings**, enter both and tap **Test connection**. Both lines should show ✓.
 3. **Use the Tailscale address** (`http://100.x.x.x:8080`) so the app works both at home and away. Install Tailscale on the phone and sign in with the same account as the server.
 
@@ -39,6 +53,23 @@ A notification, "Listening for Hey Jarvis", stays while the wake word is on. And
 ### How a voice command flows
 
 Wake word heard on the phone (beep) → you speak → it stops after a short pause (second beep) → the audio goes to Whisper on the server → the text goes to the AI → the AI runs phone actions and answers out loud.
+
+## Projects
+
+Group related chats (say "Power supply PCB" or "StellAI app") and give them shared context. Open the menu ☰ → **PROJECTS +**.
+
+- **Instructions**: how Stella should work in this project ("3.3 V logic, KiCad 9, 0805 parts").
+- **Notes**: short facts she always knows here. She adds notes herself when you say things like "note that we picked the TPS5430".
+- **Files**: datasheets (PDF), code, text, Word documents and images. Tap a file to see the text Stella reads from it. Small files are given to her whole; for big ones she gets the parts related to your question and can search the rest herself.
+- **Chats**: start one from the project, or move any chat in with ⋮ → *Move to project…*. Project chats show a ◆ tag.
+
+Projects are stored on the server, so every phone and tablet sees the same ones.
+
+## Context meter and refresh
+
+Stella can only keep a limited amount of a chat in mind at once (her *context*: about 8K tokens on the laptop, 16K with the 35B model). The bar under the top bar shows how full it is.
+
+When it gets near full, she **refreshes** automatically: she summarizes the older part of the chat and continues from that summary, keeping the most recent messages word for word. A "Context refreshed" card marks the spot; tap it to read the summary. You can refresh any time with ⋮ → **Refresh context** (handy when switching topics). Every message stays visible and synced; only what Stella is sent gets shorter.
 
 ## Sync
 

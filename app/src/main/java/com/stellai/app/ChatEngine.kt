@@ -18,7 +18,12 @@ import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
-enum class Role { USER, ASSISTANT, TOOL, ERROR }
+enum class Role { USER, ASSISTANT, TOOL, ERROR, SUMMARY }
+
+/** How full Stella's context window is for the open chat, in tokens. */
+data class ContextInfo(val used: Int, val limit: Int, val nCtx: Int, val projectTokens: Int) {
+    val fraction: Float get() = if (limit <= 0) 0f else (used.toFloat() / limit).coerceIn(0f, 1f)
+}
 
 data class UiMessage(
     val id: String,
@@ -54,6 +59,23 @@ class ChatEngine(private val app: App) {
     /** Set while editing an earlier message: sending replaces it and everything after it. */
     var editingId by mutableStateOf<String?>(null)
         private set
+
+    /** Project for the next new chat (when no chat is open yet). */
+    var pendingProjectId by mutableStateOf("")
+        private set
+
+    /** Project of the open chat, or of the chat about to be started. "" = none. */
+    val currentProjectId: String
+        get() = currentId?.let { id -> conversations.firstOrNull { it.id == id }?.projectId } ?: pendingProjectId
+
+    /** Context window usage for the open chat (null until the server has measured it). */
+    var context by mutableStateOf<ContextInfo?>(null)
+        private set
+
+    /** Last problem refreshing the context, shown in the chat. */
+    var contextNotice by mutableStateOf<String?>(null)
+
+    private var meterJob: Job? = null
 
     /** Title of the open chat, or "" for a new one. */
     val currentTitle: String
@@ -103,18 +125,37 @@ class ChatEngine(private val app: App) {
     fun open(id: String) {
         abandonTurn()
         currentId = id
+        pendingProjectId = ""
         app.settings.lastConversation = id
         loadMessages(id)
+        context = null
+        updateMeter()
     }
 
-    fun newChat() {
+    /** Starts a new chat, optionally inside a project. */
+    fun newChat(projectId: String = "") {
         abandonTurn()
         currentId = null
+        pendingProjectId = projectId
         app.settings.lastConversation = ""
         messages.clear()
         draft = ""
         attachments.clear()
         editingId = null
+        context = null
+        contextNotice = null
+    }
+
+    /** Moves a chat into a project, or out of one with "". */
+    fun moveToProject(convId: String?, projectId: String) {
+        if (convId == null) {
+            pendingProjectId = projectId
+            return
+        }
+        app.store.setProject(convId, projectId, nextTs())
+        reloadConversations()
+        app.sync.request()
+        if (convId == currentId) updateMeter()
     }
 
     fun delete(id: String) {
@@ -195,7 +236,8 @@ class ChatEngine(private val app: App) {
         attachments.clear()
         val convId = currentId ?: UUID.randomUUID().toString().also { id ->
             val now = nextTs()
-            app.store.saveConversation(Conversation(id, titleFrom(trimmed.ifEmpty { "Photo" }), now, now))
+            app.store.saveConversation(Conversation(id, titleFrom(trimmed.ifEmpty { "Photo" }), now, now, projectId = pendingProjectId))
+            pendingProjectId = ""
             currentId = id
             app.settings.lastConversation = id
             reloadConversations()
@@ -214,31 +256,41 @@ class ChatEngine(private val app: App) {
 
     private suspend fun runConversation(convId: String, fromVoice: Boolean, newPhotos: List<String>) {
         val gen = generation
-        val snapshot = messages.toList()
         var memoryChanged = false
+        var projectChanged = false
         status = "Contacting server…"
-        val base = withContext(Dispatchers.IO) {
-            // Share new photos with your other devices (the model gets them directly below).
-            for (id in newPhotos) {
-                try {
-                    HubApi.uploadImage(app.settings.serverUrl, app.settings.apiKey, id, MediaCache.bytes(app, "image:$id"))
-                } catch (_: Exception) {
-                }
-            }
-            ServerTools.refresh(app)
-            buildHistory(snapshot)
-        }
-        app.memory.refresh()
+        val projectId = conversations.firstOrNull { it.id == convId }?.projectId.orEmpty()
         val turn = mutableListOf<JSONObject>() // this turn's tool calls and results, in API format
         var finalReply = ""
         try {
+            withContext(Dispatchers.IO) {
+                // Share new photos with your other devices (the model gets them directly below).
+                for (id in newPhotos) {
+                    try {
+                        HubApi.uploadImage(app.settings.serverUrl, app.settings.apiKey, id, MediaCache.bytes(app, "image:$id"))
+                    } catch (_: Exception) {
+                    }
+                }
+                ServerTools.refresh(app)
+            }
+            app.memory.refresh()
+            // Fit the chat into Stella's context window; when it's nearly full, refresh it with a summary.
+            var prepared = prepare(convId, projectId, newPhotos.size)
+            if (prepared.needsRefresh && !stopRequested && gen == generation) {
+                status = "Refreshing context…"
+                if (compact(convId, keepUserTurns = 2)) prepared = prepare(convId, projectId, newPhotos.size)
+            }
+            if (gen == generation && prepared.info != null) context = prepared.info
+            val base = prepared.history
+            val system = prepared.system
+            val tools = toolDefinitions(projectId.isNotEmpty())
             repeat(MAX_TOOL_ROUNDS) {
                 status = "Contacting server…"
                 val streamId = STREAMING_PREFIX + UUID.randomUUID()
                 messages.add(UiMessage(streamId, Role.ASSISTANT, ""))
 
                 val result = withContext(Dispatchers.IO) {
-                    client.streamChat(app.settings.serverUrl, app.settings.apiKey, buildRequest(base, turn)) { content, reasoning ->
+                    client.streamChat(app.settings.serverUrl, app.settings.apiKey, buildRequest(system, tools, base, turn)) { content, reasoning ->
                         main.post {
                             if (!busy || gen != generation) return@post
                             val visible = stripThink(content)
@@ -274,9 +326,18 @@ class ChatEngine(private val app: App) {
                 for (tc in result.toolCalls) {
                     val onServer = ServerTools.has(tc.name)
                     if (tc.name == "remember" || tc.name == "forget") memoryChanged = true
+                    if (tc.name == "project_note") projectChanged = true
                     status = (if (onServer) ServerTools.displayName(tc.name) else PhoneTools.displayName(tc.name)) + "…"
+                    // Project tools act on this chat's project
+                    val args = if (tc.name in PROJECT_TOOLS && projectId.isNotEmpty()) {
+                        try {
+                            JSONObject(tc.arguments.ifBlank { "{}" }).put("project_id", projectId).toString()
+                        } catch (_: Exception) {
+                            tc.arguments
+                        }
+                    } else tc.arguments
                     val outcome = if (onServer) {
-                        withContext(Dispatchers.IO) { ServerTools.execute(app, tc.name, tc.arguments) }
+                        withContext(Dispatchers.IO) { ServerTools.execute(app, tc.name, args) }
                     } else {
                         PhoneTools.execute(app, tc.name, tc.arguments)
                     }
@@ -308,6 +369,8 @@ class ChatEngine(private val app: App) {
             reloadConversations()
             app.sync.request()
             if (memoryChanged) app.scope.launch { app.memory.refresh() }
+            if (projectChanged) app.scope.launch { app.projects.refresh() }
+            if (gen == generation) updateMeter()
             app.memory.scheduleLearning(convId)
             if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.speakReplies) {
                 app.speaker.speak(finalReply)
@@ -361,14 +424,173 @@ class ChatEngine(private val app: App) {
                 Role.TOOL -> pending.append("(action result: ")
                     .append(m.text.replace(DIAGRAM_REF, "[diagram shown]").trim())
                     .append(")\n")
-                Role.ERROR -> {}
+                Role.ERROR, Role.SUMMARY -> {}
             }
         }
         flush()
+        return out
+    }
+
+    /** Fallback for older servers without token counting: keep the last messages by count. */
+    private fun trimByCount(out: List<JSONObject>): List<JSONObject> {
         if (out.size <= MAX_HISTORY) return out
         var start = out.size - MAX_HISTORY
         while (start < out.size && out[start].optString("role") != "user") start++
         return out.subList(start, out.size)
+    }
+
+    // ---- Context window ----------------------------------------------------------------------
+    private class Prepared(
+        val system: String,
+        val history: List<JSONObject>,
+        val needsRefresh: Boolean,
+        val info: ContextInfo?,
+    )
+
+    private fun textOf(o: JSONObject): String {
+        val c = o.opt("content")
+        if (c is JSONArray) {
+            return (0 until c.length()).joinToString(" ") { i ->
+                c.optJSONObject(i)?.let { if (it.optString("type") == "text") it.optString("text") else "" }.orEmpty()
+            }.trim()
+        }
+        return c?.toString().orEmpty()
+    }
+
+    /**
+     * Builds what Stella will see: instructions (with the project and any earlier summary) and as
+     * much recent history as fits. The server counts tokens exactly and picks relevant project files.
+     */
+    private suspend fun prepare(convId: String, projectId: String, images: Int): Prepared = withContext(Dispatchers.IO) {
+        val list = app.store.messages(convId).map { it.toUi() }
+        val lastSummary = list.indexOfLast { it.role == Role.SUMMARY }
+        val summary = if (lastSummary >= 0) list[lastSummary].text else ""
+        val history = buildHistory(list.drop(lastSummary + 1))
+        val tools = toolDefinitions(projectId.isNotEmpty())
+        val baseSystem = systemPrompt("", summary)
+        val query = list.filter { it.role == Role.USER }.takeLast(2)
+            .joinToString("\n") { it.text.replace(PHOTO_REF, "") }
+        val plan = try {
+            HubApi.context(app.settings.serverUrl, app.settings.apiKey, JSONObject()
+                .put("project_id", projectId)
+                .put("query", query)
+                .put("fixed", baseSystem + tools.toString())
+                .put("images", images)
+                .put("messages", JSONArray().apply {
+                    history.forEach { put(JSONObject().put("role", it.optString("role")).put("content", textOf(it))) }
+                }))
+        } catch (_: Exception) {
+            null
+        }
+        if (plan == null) return@withContext Prepared(baseSystem, trimByCount(history), false, null)
+
+        val nCtx = plan.optInt("n_ctx", 8192)
+        val limit = nCtx - plan.optInt("reply_reserve", 1024)
+        val projectTokens = plan.optInt("project_tokens")
+        val used = plan.optInt("fixed_tokens") + projectTokens + plan.optInt("history_tokens")
+        var start = plan.optInt("keep_from", 0).coerceIn(0, history.size)
+        while (start < history.size && history[start].optString("role") != "user") start++
+        if (start >= history.size) start = history.indexOfLast { it.optString("role") == "user" }.coerceAtLeast(0)
+        val userTurns = history.count { it.optString("role") == "user" }
+        Prepared(
+            system = systemPrompt(plan.optString("project_context"), summary),
+            history = history.subList(start, history.size),
+            needsRefresh = userTurns >= 2 && (start > 0 || used > limit * REFRESH_AT),
+            info = ContextInfo(used, limit, nCtx, projectTokens),
+        )
+    }
+
+    /** Re-measures the open chat's context use (for the meter). */
+    fun updateMeter() {
+        val id = currentId ?: return
+        if (app.settings.apiKey.isBlank()) return
+        meterJob?.cancel()
+        meterJob = app.scope.launch {
+            val projectId = conversations.firstOrNull { it.id == id }?.projectId.orEmpty()
+            val p = prepare(id, projectId, 0)
+            if (id == currentId && !busy && p.info != null) context = p.info
+        }
+    }
+
+    /**
+     * Refresh: Stella summarizes the chat so far and continues from the summary, freeing her memory.
+     * All messages stay visible and synced; only what's sent to the model shrinks.
+     */
+    fun refreshContext() {
+        if (busy) return
+        val convId = currentId ?: return
+        stopRequested = false
+        busy = true
+        status = "Refreshing context…"
+        val gen = generation
+        job = app.scope.launch {
+            try {
+                if (!compact(convId, keepUserTurns = 0) && contextNotice == null) {
+                    contextNotice = "Nothing new to summarize yet."
+                }
+            } finally {
+                if (gen == generation) {
+                    busy = false
+                    status = ""
+                    updateMeter()
+                }
+            }
+        }
+    }
+
+    /**
+     * Summarizes everything since the last summary, except the last [keepUserTurns] exchanges, and
+     * stores the summary as a message placed just before the part that's kept (synced like any message).
+     */
+    private suspend fun compact(convId: String, keepUserTurns: Int): Boolean {
+        val stored = withContext(Dispatchers.IO) { app.store.messages(convId) }
+        val last = stored.indexOfLast { it.role == Role.SUMMARY }
+        val after = stored.drop(last + 1)
+        val userIdx = after.indices.filter { after[it].role == Role.USER }
+        var k = minOf(keepUserTurns, userIdx.size)
+        while (k > 1 && userIdx[userIdx.size - k] == 0) k--
+        val cut = if (k == 0) after.size else userIdx[userIdx.size - k]
+        val part = after.take(cut)
+        if (part.none { it.role == Role.USER || it.role == Role.ASSISTANT }) return false
+        val arr = JSONArray()
+        part.forEach { m ->
+            arr.put(JSONObject()
+                .put("role", StoredMessage.roleName(m.role))
+                .put("content", m.text.replace(PHOTO_REF, "[photo]").replace(DIAGRAM_REF, "[diagram]")))
+        }
+        val previous = if (last >= 0) stored[last].text else ""
+        val summary = try {
+            withContext(Dispatchers.IO) { HubApi.summarize(app.settings.serverUrl, app.settings.apiKey, previous, arr) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            contextNotice = "Couldn't refresh the context: ${friendlyError(e)}"
+            return false
+        }
+        if (summary.isBlank()) return false
+        val created = if (cut < after.size) {
+            val next = after[cut].createdAt
+            val prev = part.last().createdAt
+            if (next - prev >= 2) (prev + next) / 2 else next - 1
+        } else nextTs()
+        val m = StoredMessage(UUID.randomUUID().toString(), convId, Role.SUMMARY, summary.trim(), "", created, nextTs())
+        withContext(Dispatchers.IO) { app.store.saveMessage(m) }
+        if (convId == currentId) loadMessages(convId)
+        contextNotice = null
+        app.sync.request()
+        return true
+    }
+
+    /** Phone tools plus server tools; project tools only in project chats. */
+    private fun toolDefinitions(inProject: Boolean): JSONArray = JSONArray().apply {
+        val phone = PhoneTools.definitions()
+        for (i in 0 until phone.length()) put(phone.get(i))
+        val server = ServerTools.definitions()
+        for (i in 0 until server.length()) {
+            val name = server.optJSONObject(i)?.optJSONObject("function")?.optString("name").orEmpty()
+            if (!inProject && name in PROJECT_TOOLS) continue
+            put(server.get(i))
+        }
     }
 
     /** Text, or text + images (OpenAI format) for the newest message with photos. */
@@ -392,24 +614,19 @@ class ChatEngine(private val app: App) {
         return parts
     }
 
-    private fun buildRequest(base: List<JSONObject>, turn: List<JSONObject>): JSONObject {
+    private fun buildRequest(system: String, tools: JSONArray, base: List<JSONObject>, turn: List<JSONObject>): JSONObject {
         val all = JSONArray()
-        all.put(JSONObject().put("role", "system").put("content", systemPrompt()))
+        all.put(JSONObject().put("role", "system").put("content", system))
         base.forEach { all.put(it) }
         turn.forEach { all.put(it) }
         return JSONObject()
             .put("model", "local")
             .put("messages", all)
-            .put("tools", JSONArray().apply {
-                val phone = PhoneTools.definitions()
-                for (i in 0 until phone.length()) put(phone.get(i))
-                val server = ServerTools.definitions()
-                for (i in 0 until server.length()) put(server.get(i))
-            })
+            .put("tools", tools)
             .put("chat_template_kwargs", JSONObject().put("enable_thinking", app.settings.thinking))
     }
 
-    private fun systemPrompt(): String {
+    private fun systemPrompt(project: String, summary: String): String {
         val now = ZonedDateTime.now()
             .format(DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm (zzzz)", Locale.ENGLISH))
         val name = app.settings.assistantName.ifBlank { "Stella" }
@@ -425,7 +642,12 @@ class ChatEngine(private val app: App) {
             The user may send photos (circuits, screens, sketches, parts). Describe what you actually see and say so if something is unclear.
             When the user shares a lasting fact about themselves or their projects, or asks you to remember something, call remember. If they ask you to forget something, call forget.
             The current date and time on the phone is $now.
-        """.trimIndent() + app.memory.promptSection().let { if (it.isEmpty()) "" else "\n\n$it" }
+        """.trimIndent() +
+            app.memory.promptSection().let { if (it.isEmpty()) "" else "\n\n$it" } +
+            (if (project.isBlank()) "" else "\n\n$project") +
+            (if (summary.isBlank()) "" else "\n\n## Earlier in this chat\n" +
+                "The start of this conversation was summarized to free up memory. Continue naturally from it; " +
+                "the user can still see the full chat.\n$summary")
     }
 
     private fun stripThink(text: String): String =
@@ -453,9 +675,12 @@ class ChatEngine(private val app: App) {
 
     companion object {
         val PHOTO_REF = Regex("!\\[[^\\]]*\\]\\(image:([0-9a-f]{16})\\)")
-        private val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
+        val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
         private const val MAX_TOOL_ROUNDS = 6
         private const val MAX_HISTORY = 24
+        /** Refresh the context automatically once it is this full. */
+        private const val REFRESH_AT = 0.85f
+        val PROJECT_TOOLS = setOf("project_note", "project_search")
         private const val STREAMING_PREFIX = "streaming-"
     }
 }

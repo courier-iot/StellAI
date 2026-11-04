@@ -31,6 +31,8 @@ class App : Application() {
         private set
     lateinit var memory: MemoryManager
         private set
+    lateinit var projects: ProjectManager
+        private set
 
     var assistantRunning by mutableStateOf(false)
         private set
@@ -43,6 +45,7 @@ class App : Application() {
         instance = this
         settings = AppSettings(this)
         memory = MemoryManager(this)
+        projects = ProjectManager(this)
         store = ChatStore(this)
         sync = SyncManager(this)
         engine = ChatEngine(this)

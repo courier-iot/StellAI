@@ -1,0 +1,6 @@
+pystray>=0.19
+pillow>=10
+qrcode>=7.4
+matplotlib>=3.8
+schemdraw>=0.18
+pypdf>=4

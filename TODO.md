@@ -6,37 +6,43 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 1. [ ] **Synced desktop chat** (server, M)
    A browser chat served by the StellAI server that shares the same synced chats as the phone, so you can switch devices mid-conversation.
 
-2. [ ] **Projects** (server + app, M)
-   Group chats by project, each with its own pinned notes, files and instructions (e.g. "StellAI app", "Power supply PCB").
+2. [ ] **Smarter file search** (server, M)
+   Projects already search their files by keywords. Add meaning-based search (a small embedding model) so questions phrased differently from the datasheet still find the right page, plus a shared library usable from any chat.
 
-3. [ ] **Datasheet library** (server, L)
-   Drop PDFs on the server; Stella searches them to answer questions like "what's the ADC reference on the RP2040?"
-
-4. [ ] **Reminders and notes** (server + app, M)
+3. [ ] **Reminders and notes** (server + app, M)
    "Remind me to reflow the board at 5", "add flux to my parts list". Synced to all devices.
 
-5. [ ] **Coding mode** (app, S)
+4. [ ] **Coding mode** (app, S)
    One tap to switch on thinking mode and a coding-focused prompt for hard bugs.
 
-6. [ ] **Web search** (server, M)
+5. [ ] **Web search** (server, M)
    A private search engine (SearXNG) on the server so Stella can look up current docs and part availability.
 
-7. [ ] **GitHub access** (server, M)
+6. [ ] **GitHub access** (server, M)
    Stella reads your repositories (StellAI included) to explain code and help debug.
 
-8. [ ] **Quick launch** (app, S)
+7. [ ] **Quick launch** (app, S)
    A Quick Settings tile and a home-screen widget to talk to Stella in one tap.
 
-9. [ ] **Server controls in the app** (server + app, M)
+8. [ ] **Server controls in the app** (server + app, M)
    See whether the server is up, which model is loaded, and switch models.
 
 ## Also discussed, not yet built
 
 - [ ] **Search past conversations**: find relevant old chats by meaning and bring them into the current answer. Builds on memory.
 - [ ] **"Hey Stella" wake word**: the app support is done; train the model in the Colab notebook (see the app README) and drop `hey_stella.onnx` into `~/llm/wakewords/` on the server.
+- [ ] **Windows installer, full release**: code signing (no SmartScreen warning), a fixed APK signing key, and testing on real Windows PCs.
 - [ ] **Security hardening**: firewall rules limited to Tailscale and your home network, Android backup turned off for the app, and a command to replace the API key.
 
 ## Done
+
+- [x] **Automatic updates**: Linux and Windows servers check the repo every 30 minutes and update themselves when Stella is idle, keeping all data. Linux rolls back a version that fails to start; Windows verifies a checksum and reinstalls silently.
+
+- [x] **Projects**: group chats under a project with its own instructions, pinned notes and files (PDF, Word, code, text, images). Small files go to Stella whole; big ones are searched for the parts that matter. Stella can save project notes and search project files herself. Synced through the server.
+- [x] **Context refresh**: a context meter under the top bar; when a chat nears Stella's limit she summarizes the older part and continues (automatic, or ⋮ → Refresh context). Exact token counts from the server.
+
+- [x] **Windows installer (preview)**: `StellAI-Setup.exe` built by GitHub Actions; detects CPU/RAM/GPU, picks CUDA, Vulkan or CPU and a model, downloads everything on first run; tray app with start/stop, start with Windows, firewall rule and a QR code to pair phones.
+- [x] **QR pairing**: scan the server's QR code with the phone camera and confirm to connect.
 
 - [x] **Long-term memory**: remember/forget tools, automatic learning from quiet chats, a Memory screen to view, add and delete facts; shared by all devices.
 - [x] **Photo input**: take or choose photos; Stella sees them through Qwen3.5's vision add-on; photos sync to other devices.

@@ -53,6 +53,10 @@ object ServerTools {
 
     fun displayName(name: String): String = when (name) {
         "render_diagram" -> "Drawing diagram"
+        "project_note" -> "Saving project note"
+        "project_search" -> "Searching project files"
+        "remember" -> "Remembering"
+        "forget" -> "Forgetting"
         else -> "Calculating"
     }
 

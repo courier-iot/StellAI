@@ -41,6 +41,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Pairing QR code from the StellAI server (stellai://pair?url=...&key=...) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="stellai" android:host="pair" />
+            </intent-filter>
             <!-- Assistant gesture and voice-command button (headsets, car) -->
             <intent-filter>
                 <action android:name="android.intent.action.ASSIST" />

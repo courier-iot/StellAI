@@ -109,6 +109,56 @@ object HubApi {
         return JSONObject(execute(authed(serverUrl, apiKey, "/memories/learn").post(body).build()))
     }
 
+    // ---- Projects and context ---------------------------------------------------------------
+    /** Longer timeouts: reading a big PDF or describing an image can take a while. */
+    private val slow = http.newBuilder().readTimeout(5, TimeUnit.MINUTES).writeTimeout(2, TimeUnit.MINUTES).build()
+    private val JSON = "application/json".toMediaType()
+
+    fun projects(serverUrl: String, apiKey: String): JSONArray =
+        JSONObject(execute(authed(serverUrl, apiKey, "/projects").get().build())).optJSONArray("projects") ?: JSONArray()
+
+    /** Creates (no id) or updates a project. Returns the saved project. */
+    fun saveProject(serverUrl: String, apiKey: String, project: JSONObject): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/projects").post(project.toString().toRequestBody(JSON)).build()))
+
+    fun deleteProject(serverUrl: String, apiKey: String, id: String) {
+        execute(authed(serverUrl, apiKey, "/projects/$id").delete().build())
+    }
+
+    fun addProjectNote(serverUrl: String, apiKey: String, projectId: String, text: String) {
+        val body = JSONObject().put("text", text).toString().toRequestBody(JSON)
+        execute(authed(serverUrl, apiKey, "/projects/$projectId/notes").post(body).build())
+    }
+
+    fun deleteProjectNote(serverUrl: String, apiKey: String, projectId: String, noteId: String) {
+        execute(authed(serverUrl, apiKey, "/projects/$projectId/notes/$noteId").delete().build())
+    }
+
+    fun uploadProjectFile(serverUrl: String, apiKey: String, projectId: String, name: String, bytes: ByteArray) {
+        val q = java.net.URLEncoder.encode(name, "UTF-8")
+        val request = authed(serverUrl, apiKey, "/projects/$projectId/files?name=$q")
+            .put(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
+        execute(request, slow)
+    }
+
+    fun deleteProjectFile(serverUrl: String, apiKey: String, projectId: String, fileId: String) {
+        execute(authed(serverUrl, apiKey, "/projects/$projectId/files/$fileId").delete().build())
+    }
+
+    /** The text Stella sees from a project file. */
+    fun projectFileText(serverUrl: String, apiKey: String, projectId: String, fileId: String): String =
+        execute(authed(serverUrl, apiKey, "/projects/$projectId/files/$fileId.txt").get().build())
+
+    /** Token budget for the next request: project context, counts and how much history fits. */
+    fun context(serverUrl: String, apiKey: String, body: JSONObject): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/context").post(body.toString().toRequestBody(JSON)).build()))
+
+    /** Summarizes chat messages (plus an earlier summary) so the chat can continue with a fresh context. */
+    fun summarize(serverUrl: String, apiKey: String, previous: String, messages: JSONArray): String {
+        val body = JSONObject().put("previous", previous).put("messages", messages).toString().toRequestBody(JSON)
+        return JSONObject(execute(authed(serverUrl, apiKey, "/summarize").post(body).build(), slow)).optString("summary")
+    }
+
     // ---- Photos and custom wake words ------------------------------------------------------
     fun uploadImage(serverUrl: String, apiKey: String, id: String, jpeg: ByteArray) {
         execute(authed(serverUrl, apiKey, "/images/$id.jpg").put(jpeg.toRequestBody("image/jpeg".toMediaType())).build())
@@ -139,8 +189,8 @@ object HubApi {
         false
     }
 
-    private fun execute(request: Request): String =
-        http.newCall(request).execute().use { response ->
+    private fun execute(request: Request, client: OkHttpClient = http): String =
+        client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 val msg = try {

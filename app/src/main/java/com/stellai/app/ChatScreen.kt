@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
@@ -55,6 +56,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -63,6 +65,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -102,7 +105,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ChatScreen(onOpenSettings: () -> Unit) {
+fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
     val app = App.instance
     val engine = app.engine
     val voice = app.voice
@@ -111,6 +114,14 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var confirmDelete by remember { mutableStateOf<Conversation?>(null) }
+    var moveDialog by remember { mutableStateOf(false) }
+    var contextDialog by remember { mutableStateOf(false) }
+    var overflow by remember { mutableStateOf(false) }
+    val project = app.projects.get(engine.currentProjectId)
+    LaunchedEffect(Unit) {
+        engine.updateMeter()
+        app.projects.refresh()
+    }
 
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) voice.listenNow()
@@ -184,9 +195,60 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                 )
                 HorizontalDivider(Modifier.padding(vertical = 8.dp), color = Space.Line)
                 LazyColumn(Modifier.weight(1f)) {
-                    items(engine.conversations, key = { it.id }) { c ->
+                    item(key = "projects-header") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 28.dp, end = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("PROJECTS", style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 2.sp), color = Space.Muted,
+                                modifier = Modifier.weight(1f))
+                            IconButton(onClick = { onOpenProject("new"); closeDrawer() }) {
+                                Icon(Icons.Filled.Add, contentDescription = "New project", tint = Space.Accent, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                    if (app.projects.items.isEmpty()) {
+                        item(key = "projects-empty") {
+                            Text(
+                                "Group chats with shared instructions, notes and files. Tap + to start one.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Space.Muted,
+                                modifier = Modifier.padding(start = 28.dp, end = 20.dp, bottom = 8.dp),
+                            )
+                        }
+                    }
+                    items(app.projects.items, key = { "p-" + it.id }) { p ->
+                        val color = accentFor(p.color).main
                         NavigationDrawerItem(
-                            label = { Text(c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            label = { Text(p.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            icon = { Text("◆", color = color) },
+                            selected = false,
+                            onClick = { onOpenProject(p.id); closeDrawer() },
+                            badge = {
+                                val n = engine.conversations.count { it.projectId == p.id }
+                                if (n > 0) Text("$n", style = HudLabel.copy(fontSize = 11.sp), color = Space.Muted)
+                            },
+                            colors = itemColors,
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                    }
+                    item(key = "chats-header") {
+                        Text("CHATS", style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 2.sp), color = Space.Muted,
+                            modifier = Modifier.padding(start = 28.dp, top = 14.dp, bottom = 6.dp))
+                    }
+                    items(engine.conversations, key = { it.id }) { c ->
+                        val cp = app.projects.get(c.projectId)
+                        NavigationDrawerItem(
+                            label = {
+                                Column {
+                                    Text(c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (cp != null) {
+                                        Text("◆ ${cp.name}", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
+                                            color = accentFor(cp.color).main.copy(alpha = 0.85f), maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            },
                             selected = c.id == engine.currentId,
                             onClick = { engine.open(c.id); closeDrawer() },
                             badge = {
@@ -221,6 +283,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
             Scaffold(
                 containerColor = Color.Transparent,
                 topBar = {
+                  Column {
                     TopAppBar(
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Space.Void.copy(alpha = 0.55f)),
                         navigationIcon = {
@@ -263,8 +326,38 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                             IconButton(onClick = onOpenSettings) {
                                 Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = Space.Muted)
                             }
+                            Box {
+                                IconButton(onClick = { overflow = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = Space.Muted)
+                                }
+                                DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
+                                    DropdownMenuItem(
+                                        text = { Text("Refresh context") },
+                                        enabled = engine.currentId != null && !engine.busy,
+                                        onClick = { overflow = false; engine.refreshContext() },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(if (project == null) "Move to project…" else "Change project…") },
+                                        onClick = { overflow = false; moveDialog = true },
+                                    )
+                                    if (project != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("Project details") },
+                                            onClick = { overflow = false; onOpenProject(project.id) },
+                                        )
+                                    }
+                                }
+                            }
                         },
                     )
+                    ContextStrip(
+                        project = project,
+                        info = engine.context,
+                        show = engine.currentId != null || project != null,
+                        onProject = { project?.let { onOpenProject(it.id) } },
+                        onMeter = { contextDialog = true },
+                    )
+                  }
                 },
                 bottomBar = {
                     Column(
@@ -281,6 +374,17 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { app.memory.lastLearned = null }
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                        }
+                        engine.contextNotice?.let { n ->
+                            Text(
+                                "✦ $n  (tap to dismiss)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Space.Gold,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { engine.contextNotice = null }
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
                             )
                         }
@@ -419,7 +523,7 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                 },
             ) { padding ->
                 if (engine.messages.isEmpty()) {
-                    EmptyState(Modifier.padding(padding), app, name)
+                    EmptyState(Modifier.padding(padding), app, name, project)
                 } else {
                     LazyColumn(
                         state = listState,
@@ -435,6 +539,65 @@ fun ChatScreen(onOpenSettings: () -> Unit) {
                 }
             }
         }
+    }
+
+    if (moveDialog) {
+        AlertDialog(
+            onDismissRequest = { moveDialog = false },
+            containerColor = Space.Panel,
+            title = { Text(if (engine.currentId == null) "Start this chat in…" else "Move chat to…") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                    item {
+                        ProjectChoice("No project", Space.Muted, selected = project == null) {
+                            engine.moveToProject(engine.currentId, ""); moveDialog = false
+                        }
+                    }
+                    items(app.projects.items, key = { it.id }) { p ->
+                        ProjectChoice(p.name, accentFor(p.color).main, selected = p.id == project?.id) {
+                            engine.moveToProject(engine.currentId, p.id); moveDialog = false
+                        }
+                    }
+                    item {
+                        ProjectChoice("+ New project…", Space.Accent, selected = false) {
+                            moveDialog = false; onOpenProject("new")
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { moveDialog = false }) { Text("Close") } },
+        )
+    }
+
+    if (contextDialog) {
+        val info = engine.context
+        AlertDialog(
+            onDismissRequest = { contextDialog = false },
+            containerColor = Space.Panel,
+            title = { Text("$name's memory for this chat") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (info != null) {
+                        Text("${tokens(info.used)} of ${tokens(info.limit)} tokens used (${(info.fraction * 100).toInt()}%)" +
+                            if (info.projectTokens > 0) ", including ${tokens(info.projectTokens)} of project context." else ".")
+                    }
+                    Text(
+                        "When this fills up, $name refreshes it automatically: she summarizes the older part of the chat " +
+                            "and continues from the summary. You can also refresh now, e.g. when switching topics. " +
+                            "Every message stays here and on your other devices.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Space.Muted,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = engine.currentId != null && !engine.busy,
+                    onClick = { contextDialog = false; engine.refreshContext() },
+                ) { Text("Refresh now") }
+            },
+            dismissButton = { TextButton(onClick = { contextDialog = false }) { Text("Close") } },
+        )
     }
 
     confirmDelete?.let { c ->
@@ -484,9 +647,23 @@ private fun PulseRing() {
 }
 
 @Composable
-private fun EmptyState(modifier: Modifier, app: App, name: String) {
+private fun EmptyState(modifier: Modifier, app: App, name: String, project: Project?) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (project != null) {
+                Text("◆ ${project.name.uppercase()}", style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
+                    color = accentFor(project.color).main)
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    "New chat in this project. $name knows its instructions, " +
+                        "${project.notes.size} note${if (project.notes.size == 1) "" else "s"} and " +
+                        "${project.files.size} file${if (project.files.size == 1) "" else "s"}.",
+                    textAlign = TextAlign.Center,
+                    color = Space.Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.size(28.dp))
+            }
             Text("✦", fontSize = 44.sp, color = Space.Accent)
             Spacer(Modifier.size(8.dp))
             Text(
@@ -562,6 +739,7 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                 }
             }
         }
+        Role.SUMMARY -> SummaryCard(msg, name, onLongPress = { menu = true }) { Actions() }
         Role.ERROR -> Text(
             "⚠ ${msg.text}",
             color = MaterialTheme.colorScheme.onErrorContainer,
@@ -643,3 +821,99 @@ private fun ReasoningBlock(reasoning: String) {
 }
 
 private val DIAGRAM_LINE = Regex("^!\\[([^\\]]*)\\]\\(diagram:([0-9a-f]{16})\\)$")
+
+/** Marks where the context was refreshed; tap to read what Stella carried forward. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SummaryCard(msg: UiMessage, name: String, onLongPress: () -> Unit, actions: @Composable () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(12.dp)
+    Box {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp)
+                .background(Space.Glow.copy(alpha = 0.08f), shape)
+                .border(1.dp, Space.Glow.copy(alpha = 0.35f), shape)
+                .combinedClickable(onClick = { expanded = !expanded }, onLongClick = onLongPress)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            Text("✦ CONTEXT REFRESHED", style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 2.sp), color = Space.Glow)
+            Spacer(Modifier.size(4.dp))
+            if (expanded) {
+                MarkdownContent(msg.text, Space.Text)
+            } else {
+                Text(
+                    "$name continues from a summary of the messages above. Tap to read it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Space.Muted,
+                )
+            }
+        }
+        actions()
+    }
+}
+
+/** Project chip and context meter under the top bar. */
+@Composable
+private fun ContextStrip(project: Project?, info: ContextInfo?, show: Boolean, onProject: () -> Unit, onMeter: () -> Unit) {
+    if (!show) return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Space.Void.copy(alpha = 0.55f))
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (project != null) {
+            Text(
+                "◆ ${project.name}",
+                style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 0.5.sp),
+                color = accentFor(project.color).main,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false).clickable(onClick = onProject).padding(vertical = 4.dp),
+            )
+            Spacer(Modifier.size(12.dp))
+        }
+        Spacer(Modifier.weight(0.01f))
+        if (info != null) {
+            val f = info.fraction
+            val color = when {
+                f > 0.85f -> Space.Red
+                f > 0.6f -> Space.Gold
+                else -> Space.Accent
+            }
+            Row(
+                Modifier.clickable(onClick = onMeter).padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("CONTEXT", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 1.5.sp), color = Space.Muted)
+                Spacer(Modifier.size(6.dp))
+                LinearProgressIndicator(
+                    progress = { f },
+                    modifier = Modifier.size(width = 64.dp, height = 4.dp),
+                    color = color,
+                    trackColor = Space.Line,
+                )
+                Spacer(Modifier.size(6.dp))
+                Text("${(f * 100).toInt()}%", style = HudLabel.copy(fontSize = 10.sp), color = color)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectChoice(label: String, color: Color, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("◆", color = color)
+        Spacer(Modifier.size(10.dp))
+        Text(label, color = if (selected) Space.Accent else Space.Text, modifier = Modifier.weight(1f))
+        if (selected) Text("✓", color = Space.Accent)
+    }
+}
+
+private fun tokens(n: Int): String = if (n >= 1000) "%.1fk".format(n / 1000f) else n.toString()

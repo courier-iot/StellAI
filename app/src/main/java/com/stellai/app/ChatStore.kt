@@ -13,11 +13,14 @@ data class Conversation(
     val createdAt: Long,
     val updatedAt: Long,
     val deleted: Boolean = false,
+    /** Project this chat belongs to, or "" for none. */
+    val projectId: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("title", title)
         .put("created_at", createdAt).put("updated_at", updatedAt)
         .put("deleted", deleted)
+        .put("project_id", projectId)
 
     companion object {
         fun fromJson(o: JSONObject) = Conversation(
@@ -26,6 +29,7 @@ data class Conversation(
             createdAt = o.optLong("created_at"),
             updatedAt = o.getLong("updated_at"),
             deleted = o.optBoolean("deleted"),
+            projectId = o.optString("project_id"),
         )
     }
 }
@@ -53,6 +57,7 @@ data class StoredMessage(
         fun roleName(r: Role) = when (r) {
             Role.USER -> "user"
             Role.ASSISTANT -> "assistant"
+            Role.SUMMARY -> "summary"
             else -> "tool"
         }
 
@@ -60,6 +65,7 @@ data class StoredMessage(
             "user" -> Role.USER
             "assistant" -> Role.ASSISTANT
             "tool" -> Role.TOOL
+            "summary" -> Role.SUMMARY
             else -> null
         }
 
@@ -83,13 +89,14 @@ data class StoredMessage(
  * Local copy of all chats. Rows changed on this device are marked "dirty"
  * until the laptop has accepted them.
  */
-class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 2) {
+class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE conversations(
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 1)"""
+                updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 1,
+                project_id TEXT NOT NULL DEFAULT '')"""
         )
         db.execSQL(
             """CREATE TABLE messages(
@@ -102,12 +109,13 @@ class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+        if (oldVersion < 3) db.execSQL("ALTER TABLE conversations ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
     }
 
     // ---- Reads -------------------------------------------------------------------------
     fun conversations(): List<Conversation> =
         readableDatabase.rawQuery(
-            "SELECT id, title, created_at, updated_at, deleted FROM conversations WHERE deleted=0 ORDER BY updated_at DESC",
+            "SELECT id, title, created_at, updated_at, deleted, project_id FROM conversations WHERE deleted=0 ORDER BY updated_at DESC",
             null,
         ).use { c -> c.map { conv(it) } }
 
@@ -119,7 +127,7 @@ class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 
 
     fun dirtyConversations(): List<Conversation> =
         readableDatabase.rawQuery(
-            "SELECT id, title, created_at, updated_at, deleted FROM conversations WHERE dirty=1", null,
+            "SELECT id, title, created_at, updated_at, deleted, project_id FROM conversations WHERE dirty=1", null,
         ).use { c -> c.map { conv(it) } }
 
     fun dirtyMessages(): List<StoredMessage> =
@@ -144,6 +152,7 @@ class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 
         writableDatabase.insertWithOnConflict("conversations", null, ContentValues().apply {
             put("id", c.id); put("title", c.title); put("created_at", c.createdAt)
             put("updated_at", c.updatedAt); put("deleted", if (c.deleted) 1 else 0); put("dirty", if (dirty) 1 else 0)
+            put("project_id", c.projectId)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
@@ -211,7 +220,13 @@ class ChatStore(context: Context) : SQLiteOpenHelper(context, "chats.db", null, 
     }
 
     // ---- Cursor helpers --------------------------------------------------------------------
-    private fun conv(c: Cursor) = Conversation(c.getString(0), c.getString(1), c.getLong(2), c.getLong(3), c.getInt(4) == 1)
+    private fun conv(c: Cursor) =
+        Conversation(c.getString(0), c.getString(1), c.getLong(2), c.getLong(3), c.getInt(4) == 1, c.getString(5) ?: "")
+
+    /** Moves a chat into a project ("" = none); synced to other devices. */
+    fun setProject(id: String, projectId: String, now: Long) {
+        writableDatabase.execSQL("UPDATE conversations SET project_id=?, updated_at=?, dirty=1 WHERE id=?", arrayOf<Any>(projectId, now, id))
+    }
 
     private fun msg(c: Cursor): StoredMessage? {
         val role = StoredMessage.parseRole(c.getString(2)) ?: return null

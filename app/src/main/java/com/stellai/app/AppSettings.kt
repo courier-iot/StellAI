@@ -30,6 +30,11 @@ class AppSettings(context: Context) {
         get() = prefs.getString("memory_cache", "[]") ?: "[]"
         set(v) = prefs.edit().putString("memory_cache", v).apply()
 
+    /** Last project list fetched from the server (names, notes, file list). */
+    var projectCache: String
+        get() = prefs.getString("project_cache", "[]") ?: "[]"
+        set(v) = prefs.edit().putString("project_cache", v).apply()
+
     // Sync bookkeeping (not UI state)
     var syncCursor: Long
         get() = prefs.getLong("sync_cursor", 0L)
