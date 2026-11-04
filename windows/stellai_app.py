@@ -98,7 +98,9 @@ class App:
         self._start_tray()
         self.root.after(100, self._pump)
 
-        if ws.is_installed(self.cfg):
+        if self.cfg.get("client"):
+            self.show_client()
+        elif ws.is_installed(self.cfg):
             self.show_dashboard()
             if after_update:
                 start = self.cfg.get("resume_servers", True)
@@ -194,6 +196,18 @@ class App:
             f"Memory:     {hw['ram_gb']} GB\n"
             f"Graphics:   {gpu}\n"
             f"Will run on: {how}"))
+
+        # Slow PC: suggest using a stronger StellAI server instead (same chats, faster answers)
+        cp = self.panel(self.page, "Or use another StellAI server")
+        if ws.is_weak(hw):
+            self.label(cp, "This PC is slow for running Stella itself. If you have a stronger StellAI server (e.g. a "
+                           "desktop with a graphics card), use that instead: same chats, much faster answers, "
+                           "nothing big to install here.", fg=AMBER, size=9, wraplength=680).pack(anchor="w")
+        else:
+            self.label(cp, "Already have StellAI running on another computer? This PC can just use it.",
+                       fg=MUTED, size=9).pack(anchor="w")
+        ttk.Button(cp, text="Use another server…", command=self.ask_client).pack(anchor="w", pady=(6, 0))
+        cp.master.pack_configure(before=self.model_panel.master)
 
         for w in self.model_panel.winfo_children():
             w.destroy()
@@ -293,6 +307,53 @@ class App:
         self.show_dashboard()
         self.start_servers()
 
+    # ------------------------------------------------------------------ client mode
+    def ask_client(self):
+        d = tk.Toplevel(self.root, bg=PANEL)
+        d.title("Use another StellAI server")
+        d.transient(self.root)
+        self.label(d, "Server address (its Tailscale address works at home and away):").pack(anchor="w", padx=14, pady=(14, 2))
+        srv = tk.Entry(d, width=40, bg=BG, fg=TEXT, insertbackground=TEXT, relief="flat")
+        srv.pack(anchor="w", padx=14)
+        self.label(d, "API key (shown by StellAI Server on that computer):").pack(anchor="w", padx=14, pady=(10, 2))
+        key = tk.Entry(d, width=40, show="•", bg=BG, fg=TEXT, insertbackground=TEXT, relief="flat")
+        key.pack(anchor="w", padx=14)
+        msg = self.label(d, "", fg=MUTED, size=9)
+        msg.pack(anchor="w", padx=14, pady=6)
+
+        def save():
+            server = srv.get().strip().replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
+            if not server or not key.get().strip():
+                msg.config(text="Enter both.", fg=RED)
+                return
+            msg.config(text="Checking…", fg=MUTED)
+            d.update()
+            ok = ws.check_server(server)
+            if self.servers.wanted:
+                self.servers.stop()
+            self.cfg.set(client={"server": server, "key": key.get().strip()})
+            d.destroy()
+            self.show_client(None if ok else f"Couldn't reach {server} right now; make sure StellAI Server is running there.")
+        ttk.Button(d, text="Use this server", style="Accent.TButton", command=save).pack(anchor="e", padx=14, pady=(0, 14))
+
+    def show_client(self, warning=None):
+        self.clear()
+        c = self.cfg.get("client") or {}
+        p = self.panel(self.page, "Using another server")
+        self.label(p, f"This PC uses Stella on {c.get('server')}. Chats, projects and reminders are the same on every "
+                      "device.", wraplength=680).pack(anchor="w")
+        if warning:
+            self.label(p, warning, fg=AMBER, size=9, wraplength=680).pack(anchor="w", pady=(6, 0))
+        row = tk.Frame(p, bg=PANEL)
+        row.pack(anchor="w", pady=(10, 0))
+        ttk.Button(row, text="Open chat", style="Accent.TButton",
+                   command=lambda: webbrowser.open(ws.client_url(self.cfg))).pack(side="left")
+
+        def run_here():
+            self.cfg.set(client=None)
+            self.show_dashboard() if ws.is_installed(self.cfg) else self.show_setup()
+        ttk.Button(row, text="Run Stella on this PC instead", command=run_here).pack(side="left", padx=8)
+
     # ------------------------------------------------------------------ dashboard
     def show_dashboard(self):
         self.clear()
@@ -314,7 +375,7 @@ class App:
         self.start_btn = ttk.Button(btns, text="Start", style="Accent.TButton", command=self.toggle_servers)
         self.start_btn.pack(side="left")
         ttk.Button(btns, text="Open chat in browser",
-                   command=lambda: webbrowser.open(f"http://127.0.0.1:{ws.LLAMA_PORT}")).pack(side="left", padx=8)
+                   command=lambda: webbrowser.open(ws.web_chat_url(self.cfg))).pack(side="left", padx=8)
         backend = {"cuda": "NVIDIA CUDA", "vulkan": "Vulkan GPU", "cpu": "CPU"}.get(pl["backend"], pl["backend"])
         self.label(btns, f"running on {backend}", fg=MUTED, size=9).pack(side="left", padx=6)
 
@@ -370,6 +431,19 @@ class App:
                    if os.name == "nt" else None).pack(side="left", padx=6)
         ttk.Button(orow, text="Wake words folder", command=lambda: os.startfile(self.cfg.p("wakewords"))
                    if os.name == "nt" else None).pack(side="left")
+        crow = tk.Frame(opts, bg=PANEL)
+        crow.pack(anchor="w", pady=(8, 0))
+        ttk.Button(crow, text="Check everything", command=self.run_doctor).pack(side="left")
+        ttk.Button(crow, text="Back up now", command=self.backup_now).pack(side="left", padx=6)
+        ttk.Button(crow, text="Restore a backup…", command=self.restore_backup).pack(side="left")
+
+        wrow = tk.Frame(opts, bg=PANEL)
+        wrow.pack(fill="x", pady=(10, 0))
+        self.searx_label = self.label(wrow, "", fg=MUTED, size=9)
+        self.searx_label.pack(side="left")
+        self.searx_btn = ttk.Button(wrow, text="Set up private web search", command=self.setup_search)
+        self.searx_btn.pack(side="right")
+        self._show_search_state()
 
         urow = tk.Frame(opts, bg=PANEL)
         urow.pack(fill="x", pady=(10, 0))
@@ -465,6 +539,88 @@ class App:
             elif s != "crashed":
                 setattr(self, f"_reported_{name}", False)
         self._tick_id = self.root.after(2000, self._tick)
+
+    # ------------------------------------------------------------------ health check and backups
+    def run_doctor(self):
+        if not self.servers.web:
+            messagebox.showinfo("StellAI", "Start the server first; the check looks at the running parts.")
+            return
+        self.log("Running the health check…")
+
+        def work():
+            text = stellai_hub.doctor_text(stellai_hub.run_doctor())
+            self.q.put(("log", text))
+            self.q.put(("call", lambda: messagebox.showinfo("StellAI health check", text)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def backup_now(self):
+        if not self.servers.web:
+            messagebox.showinfo("StellAI", "Start the server first.")
+            return
+
+        def work():
+            try:
+                path = stellai_hub.backup_now()
+                self.q.put(("log", f"Backup saved: {path}"))
+            except Exception as e:
+                self.q.put(("log", f"Backup failed: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def restore_backup(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(title="Restore a StellAI backup", initialdir=self.cfg.p("backups"),
+                                          filetypes=[("StellAI backups", "stellai-backup-*.zip"), ("Zip", "*.zip")])
+        if not path:
+            return
+        if not messagebox.askyesno("StellAI", "Replace the current chats, memories and projects with this backup?\n\n"
+                                               "The current chat database is kept as a copy."):
+            return
+        was_running = self.servers.wanted
+        self.servers.stop()
+        try:
+            msg = stellai_hub.restore_backup(path, stellai_hub.parse_args(ws.hub_args(self.cfg)))
+            self.log(msg)
+        except Exception as e:
+            messagebox.showerror("StellAI", f"Couldn't restore: {e}")
+        if was_running:
+            self.start_servers()
+
+    # ------------------------------------------------------------------ web search
+    def _show_search_state(self, text=None):
+        if not (hasattr(self, "searx_label") and self.searx_label.winfo_exists()):
+            return
+        if text:
+            self.searx_label.config(text=text)
+        elif self.cfg.get("searxng"):
+            self.searx_label.config(text="Web search: private (SearXNG in Docker)")
+            self.searx_btn.config(text="Reinstall web search")
+        elif ws.docker_exe():
+            self.searx_label.config(text="Web search: DuckDuckGo. Docker is installed, so private search is available.")
+        else:
+            self.searx_label.config(text="Web search: DuckDuckGo. Install Docker Desktop for private search (SearXNG).")
+            self.searx_btn.config(text="Get Docker Desktop",
+                                  command=lambda: webbrowser.open("https://www.docker.com/products/docker-desktop/"))
+
+    def setup_search(self):
+        self.searx_btn.config(state="disabled")
+        self._show_search_state("Setting up SearXNG… (first time downloads about 300 MB)")
+
+        def work():
+            try:
+                ws.setup_searxng(self.cfg, self.log_threadsafe)
+                msg = None
+                restart = self.servers.wanted
+            except Exception as e:
+                msg, restart = f"Couldn't set up web search: {e}", False
+
+            def done():
+                self.searx_btn.config(state="normal")
+                self._show_search_state(msg)
+                if restart:   # the hub picks up SearXNG on its next start
+                    self.servers.stop()
+                    self.start_servers()
+            self.q.put(("call", done))
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ updates
     def _set_update_state(self, text, info=None):
@@ -663,7 +819,8 @@ class App:
             M("Show StellAI", lambda: self.q.put(("call", self.show_window)), default=True),
             M(lambda item: "Stop server" if self.servers.wanted else "Start server",
               lambda: self.q.put(("call", self.toggle_servers))),
-            M("Open chat in browser", lambda: webbrowser.open(f"http://127.0.0.1:{ws.LLAMA_PORT}")),
+            M("Open chat in browser", lambda: webbrowser.open(ws.client_url(self.cfg) if self.cfg.get("client")
+                                                              else ws.web_chat_url(self.cfg))),
             pystray.Menu.SEPARATOR,
             M("Quit", lambda: self.q.put(("call", self.quit))),
         )

@@ -20,6 +20,8 @@ After the first build, each one on the main branch is also published under **Rel
 
 ## First run
 
+On a slow PC (2 cores, no graphics card) the app suggests **Use another server…**: enter your StellAI server's address and API key, and this PC just opens Stella there, with nothing big to install. You can switch back any time.
+
 The app checks your computer:
 
 | Detected | Runs on |
@@ -38,11 +40,18 @@ Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardw
 
 ## Every day
 
+- **Open chat in browser** opens the desktop chat (same chats as your phone).
+- **Web search**: Stella uses DuckDuckGo. With Docker Desktop installed, *Options → Set up private web search* runs SearXNG on this PC instead.
+- The first install also downloads a small search model (~140 MB) for meaning-based search in project files and the library.
+
 - **Start / Stop** the server. Green dots mean Stella, voice and sync are ready.
 - **Connect your phone**: scan the QR code with the phone camera, then tap **Connect** in StellAI. Or type the address and API key in the app's Settings.
 - **Tailscale**: install it on the PC and phone (same account) and pick the Tailscale address to use Stella away from home.
 - Closing the window keeps the server running in the tray. Right-click the tray icon → **Quit** to stop everything.
 - **Change model** to switch models or re-detect hardware (for example after adding a GPU).
+- **Check everything** runs the health check and shows what needs fixing.
+- **Back up now** / **Restore a backup…**: backups are also made every night into `%LOCALAPPDATA%\StellAI\backups` (last 14 kept).
+- The phone app's **Server** screen and the desktop chat's **🖥 Server** button show status, switch models and run the same checks.
 - **Wake words folder**: drop a trained `hey_stella.onnx` here and it appears in the phone app's wake word list.
 
 ## Updates

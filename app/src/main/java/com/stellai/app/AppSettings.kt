@@ -12,7 +12,8 @@ class AppSettings(context: Context) {
 
     var serverUrl by stringPref("server_url", "http://192.168.1.100:8080")
     var apiKey by stringPref("api_key", "")
-    var thinking by boolPref("thinking", false)
+    /** "auto" (think on hard questions only), "on" or "off". Older versions had an on/off switch. */
+    var thinkingMode by stringPref("thinking_mode", if (prefs.getBoolean("thinking", false)) "on" else "auto")
     var assistantName by stringPref("assistant_name", "Stella")
     var accentColor by stringPref("accent_color", "cyan")
     var learnFromChats by boolPref("learn_from_chats", true)
@@ -29,6 +30,11 @@ class AppSettings(context: Context) {
     var memoryCache: String
         get() = prefs.getString("memory_cache", "[]") ?: "[]"
         set(v) = prefs.edit().putString("memory_cache", v).apply()
+
+    /** Your own modes, as last fetched from the server. */
+    var modeCache: String
+        get() = prefs.getString("mode_cache", "[]") ?: "[]"
+        set(v) = prefs.edit().putString("mode_cache", v).apply()
 
     /** Last project list fetched from the server (names, notes, file list). */
     var projectCache: String

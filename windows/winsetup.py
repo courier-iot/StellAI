@@ -21,7 +21,9 @@ try:
 except ImportError:
     APP_VERSION = "0.0.0-dev"                      # running from source: no auto-updates
 UA = f"StellAI-Windows/{APP_VERSION}"
-LLAMA_PORT, HUB_PORT, WHISPER_PORT = 8080, 8092, 8093
+LLAMA_PORT, HUB_PORT, WHISPER_PORT, EMBED_PORT, SEARXNG_PORT = 8080, 8092, 8093, 8094, 8888
+EMBED_FILE = "nomic-embed-text-v1.5.Q8_0.gguf"   # small model for meaning-based file search (~140 MB, CPU)
+EMBED_URL = f"https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/{EMBED_FILE}"
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 LLAMA_REPO = "ggml-org/llama.cpp"
@@ -213,20 +215,22 @@ def plan(hw, model_key, vision=True, whisper=None):
     """Everything needed to install and run: files, URLs and llama-server arguments."""
     m = dict(MODELS[model_key])
     vram = hw["vram_gb"] if hw["backend"] != "cpu" else 0
-    gpu_args, ctx = [], 8192
-    if model_key == "4b":
-        if vram >= 3.5:
-            gpu_args = ["-ngl", "99"]
-    elif model_key == "9b":
+    ctx = 8192
+    # On a GPU, llama-server's --fit (on by default) places as many layers / MoE experts on the card as fit,
+    # so no fixed -ngl / --cpu-moe; a bigger micro-batch reads long prompts faster.
+    gpu_args = ["-ub", "1024"] if hw["backend"] != "cpu" else []
+    if model_key == "9b":
         if 4.5 <= vram < 7.5:
             m["file"] = "Qwen3.5-9B-Q3_K_M.gguf"   # 3-bit so it fits entirely on a 6 GB card
             m["size_gb"] = 4.6
-        if vram >= 4.5:
-            gpu_args = ["-ngl", "99"]
-    else:
-        ctx = 16384
-        if vram >= 3.5:
-            gpu_args = ["-ngl", "99", "--cpu-moe"]
+    elif model_key == "35b":
+        ctx = 32768 if vram >= 4.5 else 16384   # experts in RAM leave GPU room for a long context
+        total = hw["ram_gb"] + vram
+        # Best quality that fits RAM + GPU memory (more bits = more accurate, especially for code)
+        if total >= 40:
+            m["file"], m["size_gb"] = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf", 22.2
+        elif total >= 30:
+            m["file"], m["size_gb"] = "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf", 17.5
     if whisper is None:
         whisper = "small" if hw["ram_gb"] >= 14 and hw["cores"] >= 6 else "base"
     wname = f"ggml-{whisper}.en.bin"
@@ -239,6 +243,7 @@ def plan(hw, model_key, vision=True, whisper=None):
         "mmproj_url": f"{HF}/{m['repo']}/resolve/main/mmproj-F16.gguf",
         "whisper_file": wname, "whisper_url": f"{HF}/ggerganov/whisper.cpp/resolve/main/{wname}",
         "gpu_args": gpu_args, "context": ctx, "threads": max(1, hw["cores"]),
+        "threads_batch": max(1, hw.get("threads") or hw["cores"]),
     }
 
 
@@ -313,7 +318,16 @@ def llama_release(get=http_json, text=http_text):
     raise RuntimeError("couldn't find a llama.cpp release with Windows builds")
 
 
-def whisper_asset(get=http_json):
+def whisper_asset(get=http_json, gpu=False):
+    """(tag, asset): the CUDA build (bundles its own CUDA DLLs) for NVIDIA cards, else the CPU build."""
+    if gpu:
+        try:
+            for rel in get(f"https://api.github.com/repos/{WHISPER_REPO}/releases?per_page=10"):
+                for a in rel.get("assets", []):
+                    if re.fullmatch(r"whisper-bin-win-cuda-12\.[\d.]+-x64\.zip", a["name"]):
+                        return rel["tag_name"], a
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
     api = f"https://api.github.com/repos/{WHISPER_REPO}"
     rels = []
     try:
@@ -483,9 +497,10 @@ def install(cfg, pl, status, progress, cancel):
     if not os.path.isfile(os.path.join(bin_whisper, "whisper-server.exe")):
         status("Finding the latest whisper.cpp build…")
         try:
-            tag, a = whisper_asset()
-            z = download(a["browser_download_url"], os.path.join(dl, f"whisper-{tag}-x64.zip"), prog("Whisper"), cancel)
+            tag, a = whisper_asset(gpu=pl["backend"] == "cuda")
+            z = download(a["browser_download_url"], os.path.join(dl, a["name"]), prog("Whisper"), cancel)
             extract_flat(z, bin_whisper)
+            cfg.set(whisper_gpu="cuda" in a["name"])
         except (RuntimeError, urllib.error.URLError, OSError) as e:
             status(f"Voice recognition skipped: {e}")
 
@@ -493,6 +508,10 @@ def install(cfg, pl, status, progress, cancel):
                              (pl["label"], pl["model_url"], pl["model_file"])] + \
             ([("Vision add-on", pl["mmproj_url"], pl["mmproj_file"])] if pl["vision"] else []):
         download(url, os.path.join(models, name), prog(label), cancel)
+    try:
+        download(EMBED_URL, os.path.join(models, EMBED_FILE), prog("Search model"), cancel)
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        status(f"File search will use keywords only: {e}")
 
     for d in ("diagrams", "images", "wakewords", "logs"):
         os.makedirs(cfg.p(d), exist_ok=True)
@@ -555,11 +574,19 @@ class Job:
 
 def llama_args(cfg, pl, key):
     a = [cfg.p("bin", "llama", "llama-server.exe"), "-m", cfg.p("models", pl["model_file"]),
-         "-c", str(pl["context"]), "-t", str(cfg.get("threads") or pl["threads"])]
+         "-c", str(pl["context"]), "-t", str(cfg.get("threads") or pl["threads"]),
+         "-tb", str(pl.get("threads_batch") or pl["threads"])]   # all threads for reading prompts
     a += pl["gpu_args"]
     mm = cfg.p("models", pl["mmproj_file"])
-    if pl.get("vision") and os.path.isfile(mm):
+    vision = pl.get("vision") and os.path.isfile(mm)
+    if vision:
         a += ["--mmproj", mm]
+    if pl.get("backend", "cpu") != "cpu":
+        # GPU memory --fit leaves free for what it doesn't know about: the vision add-on and GPU Whisper
+        a += ["--fit-target", str(1024 + (1000 if vision else 0) + (700 if cfg.get("whisper_gpu") else 0))]
+    # Cap thinking so it can't fill the context
+    a += ["--reasoning-budget", "1024" if pl["context"] <= 8192 else "2048",
+          "--reasoning-budget-message", "I have thought enough; time to answer."]
     a += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja",
           "--api-key", key, "--host", "0.0.0.0", "--port", str(LLAMA_PORT)]
     return a
@@ -570,15 +597,69 @@ def whisper_args(cfg, pl):
     model = cfg.p("models", pl["whisper_file"])
     if not (os.path.isfile(exe) and os.path.isfile(model)):
         return None
-    return [exe, "-m", model, "-t", str(max(1, min(4, pl["threads"]))),
+    return [exe, "-m", model, "-t", str(max(1, min(4, pl["threads"]))), "-bo", "1",
             "--host", "127.0.0.1", "--port", str(WHISPER_PORT)]
 
 
+def embed_args(cfg):
+    exe = cfg.p("bin", "llama", "llama-server.exe")
+    model = cfg.p("models", EMBED_FILE)
+    if not (os.path.isfile(exe) and os.path.isfile(model)):
+        return None
+    return [exe, "-m", model, "--embedding", "--pooling", "mean", "-ngl", "0", "-c", "8192", "-b", "2048", "-ub", "2048",
+            "-np", "1", "-t", "2", "--host", "127.0.0.1", "--port", str(EMBED_PORT)]
+
+
 def hub_args(cfg):
-    return ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
+    args = ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
             "--image-dir", cfg.p("images"), "--wakeword-dir", cfg.p("wakewords"),
             "--llama", f"http://127.0.0.1:{LLAMA_PORT}", "--whisper", f"http://127.0.0.1:{WHISPER_PORT}",
             "--mmdc", shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT)]
+    if os.path.isfile(cfg.p("models", EMBED_FILE)):
+        args += ["--embed", f"http://127.0.0.1:{EMBED_PORT}"]
+    if cfg.get("searxng"):
+        args += ["--searxng", f"http://127.0.0.1:{SEARXNG_PORT}"]
+    return args
+
+
+def web_chat_url(cfg):
+    from urllib.parse import quote
+    return f"http://127.0.0.1:{HUB_PORT}/#key={quote(api_key(cfg), safe='')}"
+
+
+# ---- Private web search: SearXNG in Docker Desktop (optional; DuckDuckGo otherwise) ----
+def docker_exe():
+    return shutil.which("docker") or (r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+                                      if os.path.isfile(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe") else None)
+
+
+def setup_searxng(cfg, log):
+    """Creates the SearXNG container (bound to this PC only). Returns True when it's running."""
+    import secrets
+    exe = docker_exe()
+    if not exe:
+        raise RuntimeError("Docker Desktop isn't installed")
+    folder = cfg.p("searxng")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "settings.yml"), "w") as f:
+        f.write("use_default_settings: true\nserver:\n  secret_key: \"%s\"\n  limiter: false\n  image_proxy: false\n"
+                "search:\n  safe_search: 0\n  formats:\n    - html\n    - json\n" % secrets.token_hex(24))
+    _run([exe, "rm", "-f", "stellai-searxng"], timeout=60)
+    out = subprocess.run([exe, "run", "-d", "--name", "stellai-searxng", "--restart", "unless-stopped",
+                          "-p", f"127.0.0.1:{SEARXNG_PORT}:8080", "-v", f"{folder}:/etc/searxng", "searxng/searxng:latest"],
+                         capture_output=True, text=True, timeout=900, creationflags=NO_WINDOW)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout).strip().splitlines()[-1][:300] if (out.stderr or out.stdout) else
+                           "docker run failed")
+    cfg.set(searxng=True)
+    log("Web search (SearXNG) is set up")
+    return True
+
+
+def start_searxng(cfg):
+    exe = docker_exe()
+    if exe and cfg.get("searxng"):
+        _run([exe, "start", "stellai-searxng"], timeout=60)
 
 
 class Servers:
@@ -616,11 +697,33 @@ class Servers:
                 self._spawn("whisper", wa)
             else:
                 self.log("voice recognition not installed; voice commands won't work")
+            ea = embed_args(self.cfg)
+            if ea:
+                self._spawn("embed", ea)
+            if self.cfg.get("searxng"):
+                threading.Thread(target=start_searxng, args=(self.cfg,), daemon=True).start()
             if getattr(sys, "frozen", False):
                 self.hub.DIAGRAM_RUNNER_CMD = [sys.executable, "--schemdraw-runner"]
             self.hub.LOG_HOOK = self.log
             self.web = self.hub.start(self.hub.parse_args(hub_args(self.cfg)))
+            self.hub.SERVER_CONTROL = WinServerControl(self)   # lets the phone app switch models
             threading.Thread(target=self.web.serve_forever, daemon=True, name="hub").start()
+
+    def restart_llama(self):
+        """Restarts only the AI model (after switching models)."""
+        with self.lock:
+            entry = self.procs.pop("llama", None)
+            if entry:
+                p, logf = entry
+                if p.poll() is None:
+                    p.terminate()
+                    try:
+                        p.wait(10)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                logf.close()
+            if self.wanted:
+                self._spawn("llama", llama_args(self.cfg, self.cfg.get("plan"), api_key(self.cfg)))
 
     def stop(self):
         with self.lock:
@@ -816,3 +919,89 @@ def run_installer(path, cfg):
     log = cfg.p("logs", "update-install.log")
     subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS",
                       f"/LOG={log}"], creationflags=DETACHED, close_fds=True, cwd=os.path.dirname(path))
+
+
+# ============================================================================ client mode
+def is_weak(hw):
+    """Too slow to run Stella well: better to use a stronger StellAI server (same chats, faster answers)."""
+    return (hw["backend"] == "cpu" and hw["cores"] <= 2) or hw["ram_gb"] < 8
+
+
+def client_url(cfg):
+    c = cfg.get("client") or {}
+    from urllib.parse import quote
+    return f"http://{c.get('server', '')}:{HUB_PORT}/#key={quote(c.get('key', ''), safe='')}"
+
+
+def check_server(server, timeout=5):
+    try:
+        with urllib.request.urlopen(f"http://{server}:{HUB_PORT}/health", timeout=timeout) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+# ============================================================================ model switching from the phone
+class WinServerControl:
+    """The hub's server-control interface for the Windows app: list, download and switch models."""
+
+    def __init__(self, servers):
+        self.servers = servers
+        self.cfg = servers.cfg
+        self.download = {}
+
+    def _hw(self):
+        return self.cfg.get("hardware") or {"ram_gb": 8, "cores": 2, "threads": 4, "backend": "cpu", "vram_gb": 0, "cuda": ""}
+
+    def _plan(self, key):
+        cur = self.cfg.get("plan") or {}
+        whisper = (cur.get("whisper_file") or "ggml-base.en.bin").replace("ggml-", "").replace(".en.bin", "")
+        return plan(self._hw(), key, vision=cur.get("vision", False), whisper=whisper)
+
+    def catalog(self):
+        cur = (self.cfg.get("plan") or {}).get("model_file")
+        out = []
+        for key, m in MODELS.items():
+            pl = self._plan(key)
+            path = self.cfg.p("models", pl["model_file"])
+            out.append({"key": key, "label": m["label"], "about": m["about"], "file": pl["model_file"],
+                        "size_gb": pl["model_gb"], "context": pl["context"],
+                        "installed": os.path.isfile(path) and os.path.getsize(path) > 100_000_000,
+                        "current": pl["model_file"] == cur, "download": self.download.get(key)})
+        return out
+
+    def status(self):
+        pl = self.cfg.get("plan") or {}
+        return {"model": pl.get("label", ""), "file": pl.get("model_file", ""), "backend": pl.get("backend", ""),
+                "can_switch": True}
+
+    def switch(self, key):
+        if key not in MODELS:
+            raise ValueError("unknown model")
+        pl = self._plan(key)
+        if not os.path.isfile(self.cfg.p("models", pl["model_file"])):
+            raise ValueError("download it first")
+        self.cfg.set(plan=pl)
+        threading.Thread(target=self.servers.restart_llama, daemon=True).start()
+        return f"switching to {pl['label']}; it takes a minute to load"
+
+    def start_download(self, key):
+        if key not in MODELS:
+            raise ValueError("unknown model")
+        pl = self._plan(key)
+        state = {"state": "downloading", "done": 0, "total": 0, "error": ""}
+        self.download[key] = state
+
+        def prog(done, total):
+            state["done"], state["total"] = done, total
+
+        def work():
+            try:
+                download(pl["model_url"], self.cfg.p("models", pl["model_file"]), prog)
+                if pl["vision"]:
+                    download(pl["mmproj_url"], self.cfg.p("models", pl["mmproj_file"]), prog)
+                state["state"] = "ready"
+            except Exception as e:
+                state.update(state="failed", error=str(e))
+        threading.Thread(target=work, daemon=True).start()
+        return "download started"

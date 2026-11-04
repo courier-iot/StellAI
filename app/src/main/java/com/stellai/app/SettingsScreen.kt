@@ -76,7 +76,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
     var url by rememberSaveable { mutableStateOf(s.serverUrl) }
     var key by rememberSaveable { mutableStateOf(s.apiKey) }
     var showKey by rememberSaveable { mutableStateOf(false) }
-    var thinking by rememberSaveable { mutableStateOf(s.thinking) }
+    var thinking by rememberSaveable { mutableStateOf(s.thinkingMode) }
     var name by rememberSaveable { mutableStateOf(s.assistantName) }
     var wake by rememberSaveable { mutableStateOf(s.wakeWordEnabled) }
     var wakeWord by rememberSaveable { mutableStateOf(s.wakeWord) }
@@ -111,7 +111,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
     fun save() {
         s.serverUrl = AppSettings.normalizeUrl(url)
         s.apiKey = key.trim()
-        s.thinking = thinking
+        s.thinkingMode = thinking
         s.learnFromChats = learn
         s.assistantName = name.trim().ifBlank { "Stella" }
         s.wakeWordEnabled = wake && micAllowed
@@ -206,7 +206,14 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
                     ColorSwatch(a, selected = s.accentColor == a.id) { s.accentColor = a.id }
                 }
             }
-            SettingSwitch("Thinking mode", "Smarter on hard questions, but much slower without a GPU.", thinking) { thinking = it }
+            Text("Thinking before answering", style = MaterialTheme.typography.labelLarge)
+            Hint("Auto: thinks only when a question looks hard (debugging, maths, design) and answers simple things " +
+                "straight away. Modes like Programmer or Writer can override this.")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("auto" to "Auto", "on" to "Always", "off" to "Never").forEach { (v, label) ->
+                    FilterChip(selected = thinking == v, onClick = { thinking = v }, label = { Text(label) })
+                }
+            }
 
             HorizontalDivider()
             SectionTitle("Memory")
@@ -293,6 +300,9 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
             Text(app.sync.status, style = MaterialTheme.typography.bodyMedium)
             OutlinedButton(onClick = { app.sync.request() }) { Text("Sync now") }
 
+            HorizontalDivider()
+            GitHubSettings()
+
             Button(onClick = { save() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
@@ -340,5 +350,76 @@ private fun ColorSwatch(accent: Accent, selected: Boolean, onClick: () -> Unit) 
             style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
             color = if (selected) Color.White else Space.Muted,
         )
+    }
+}
+
+/** GitHub access for Stella: a token (kept on your server, never on the phone) and a default repository. */
+@Composable
+private fun GitHubSettings() {
+    val app = App.instance
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf("Checking…") }
+    var token by remember { mutableStateOf("") }
+    var repo by remember { mutableStateOf("") }
+    var tokenSet by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+
+    fun show(o: org.json.JSONObject) {
+        tokenSet = o.optBoolean("token_set")
+        repo = o.optString("default_repo")
+        status = when {
+            o.optString("error").isNotBlank() -> "Token saved, but GitHub said: " + o.optString("error")
+            o.optString("user").isNotBlank() -> "Connected as ${o.optString("user")}."
+            tokenSet -> "Token saved."
+            else -> "Not connected: public repositories only, no commits."
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        try {
+            show(withContext(Dispatchers.IO) { HubApi.github(app.settings.serverUrl, app.settings.apiKey) })
+        } catch (e: Exception) {
+            status = "Couldn't reach the server: ${app.engine.friendlyError(e)}"
+        }
+    }
+
+    fun save(body: org.json.JSONObject) {
+        busy = true
+        scope.launch {
+            try {
+                show(withContext(Dispatchers.IO) { HubApi.saveGithub(app.settings.serverUrl, app.settings.apiKey, body) })
+                token = ""
+            } catch (e: Exception) {
+                status = app.engine.friendlyError(e).removePrefix("HTTP 400: ")
+            }
+            busy = false
+        }
+    }
+
+    SectionTitle("GitHub")
+    Hint(
+        "Lets ${app.settings.assistantName.ifBlank { "Stella" }} read your repositories, check failed builds and commit fixes " +
+            "to a new branch (you approve every commit). Create a fine-grained token on github.com → Settings → Developer settings " +
+            "→ Fine-grained tokens, for your repositories, with: Contents read & write, Pull requests read & write, " +
+            "Actions read, Issues read. It's stored on your server."
+    )
+    Text(status, style = MaterialTheme.typography.bodyMedium)
+    OutlinedTextField(
+        value = token, onValueChange = { token = it.trim() }, singleLine = true,
+        label = { Text(if (tokenSet) "New token (leave empty to keep)" else "GitHub token") },
+        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = repo, onValueChange = { repo = it.trim() }, singleLine = true,
+        label = { Text("Default repository") }, placeholder = { Text("owner/name, e.g. courier-iot/StellAI") },
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(enabled = !busy, onClick = {
+            val body = org.json.JSONObject().put("default_repo", repo)
+            if (token.isNotBlank()) body.put("token", token)
+            save(body)
+        }) { Text("Save GitHub settings") }
+        if (tokenSet) TextButton(enabled = !busy, onClick = { save(org.json.JSONObject().put("token", "")) }) { Text("Remove token") }
     }
 }

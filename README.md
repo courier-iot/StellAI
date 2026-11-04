@@ -24,6 +24,18 @@ The AI runs on your computer. Pick one:
 - **Linux** (Linux Mint, Ubuntu): run `server/stellai-setup.sh`. It detects your hardware, builds llama.cpp for your GPU and creates the **StellAI Server** launcher.
 - **Windows 10/11 (preview)**: install `StellAI-Setup.exe` from the "Build Windows installer" Actions run. See [windows/README.md](windows/README.md).
 
+### Tuned automatically for your hardware
+
+The setup (Linux script or Windows installer) checks the computer and sets things up for it:
+
+- **Slow computer?** A 2-core machine without a usable graphics card (like the T470) is offered *client mode*: it just opens Stella on your stronger server, with the same chats and much faster answers, and installs nothing big.
+- **Model quality:** for the 35B model it picks the most accurate version that fits RAM + GPU memory (3-bit at ~24 GB total, 4-bit at ~30 GB, high-quality 4-bit at ~40 GB, e.g. a Tesla T4 server).
+- **GPU use:** llama.cpp fits as much of the model onto the graphics card as it can (leaving room for the vision add-on and voice), instead of a fixed split.
+- **Threads:** physical cores for writing replies, all threads for reading long prompts.
+- **Voice:** Whisper runs on the graphics card when there is one, with quick single-pass decoding.
+- **Thinking:** Settings → *Thinking before answering*: **Auto** (default) thinks only when a question looks hard (debugging, maths, design, long questions) and answers simple things instantly. Thinking is capped (1K tokens on small setups, 2K on bigger ones) so it can't fill Stella's memory.
+- **Sampling:** Qwen's recommended settings for Qwen3.5 are used (precise for code; a mild repetition penalty elsewhere).
+
 ### Automatic updates
 
 Both servers keep themselves up to date from this GitHub repo, checking every 30 minutes. They only install an update when Stella has been idle for a couple of minutes, and your chats, memories, projects, models and settings are never touched.
@@ -53,6 +65,60 @@ A notification, "Listening for Hey Jarvis", stays while the wake word is on. And
 ### How a voice command flows
 
 Wake word heard on the phone (beep) → you speak → it stops after a short pause (second beep) → the audio goes to Whisper on the server → the text goes to the AI → the AI runs phone actions and answers out loud.
+
+## Desktop chat
+
+Chat with Stella from any computer's browser at **http://SERVER:8092** (on the server itself: *StellAI Web Chat* in the Linux menu, or *Open chat in browser* in the Windows app). It's the same chats as your phones, synced live, with modes, projects (including adding files by drag and drop), the library, reminders and lists, photos (paste or 📷), diagrams and the context meter. Enter the API key once per browser. Phone actions (alarms, apps, texts) only work on the phone.
+
+## Server screen: status, models, health check, backups
+
+Drawer → **🖥 Server** on the phone, or **🖥 Server** at the bottom of the desktop chat's sidebar.
+
+- **Status**: whether the model is loaded, which model, context size, GPU/CPU, RAM and GPU memory, uptime.
+- **Switch model**: the models that fit this machine are listed with their size. Tap **Download** to fetch one (progress shows; it keeps going if you close the app), then **Switch**. Stella is away for about a minute while the new model loads; chats and settings stay the same. On Linux this rewrites `~/llm/model.conf` and restarts only the model server.
+- **Health check** (*Check everything*): AI model, voice, meaning search, web search, chat database, disk space, backups, PDF reading, diagrams, GitHub, Tailscale and updates, each with a fix when something is wrong. On the server itself: `~/llm/stellai-doctor.sh` (Linux, also in the app menu as *StellAI Health Check*) or *Check everything* in the Windows app.
+- **Backups**: every night (between 2 and 5 am when Stella is idle) the server zips your chats, memories, projects, photos, diagrams and wake words into `~/llm/backups` (Windows: `%LOCALAPPDATA%\StellAI\backups`) and keeps the last 14. The GitHub token is left out. *Back up now* makes one immediately, and you can set a second folder (a USB drive, a NAS mount) that every backup is copied to. To restore: `~/llm/stellai-restore.sh` on Linux, or *Restore a backup…* in the Windows app; the old database is kept beside the restored one.
+
+## Search past chats
+
+Type in the search box at the top of the drawer (phone) or sidebar (desktop). Titles match instantly; the server also searches what was said in every chat, by keywords and by meaning, and shows the matching passage. Stella can search too: ask "what did we decide about the power supply last week?" and she looks through earlier chats (the `search_chats` tool). New messages are indexed within a minute.
+
+## Reminders and lists
+
+- "Remind me to reflow the board at 5" or "…every weekday at 9" → a reminder that **rings on all your phones** at that time, even if the app is closed (Done / Snooze 10 min on the notification; dismissing on one phone clears it on the others within about 15 minutes).
+- "Add flux and solder wick to my parts list", "what's on my shopping list?", "tick off flux".
+- See and edit them in ☰ → **⏰ Reminders & lists** (or in the desktop chat).
+
+Wake-up alarms still go to the phone's clock app ("set an alarm for 6:45").
+
+## Library and file search
+
+☰ → **📚 Library** holds documents Stella can search from **any** chat (datasheets, manuals, notes). Project files work the same way inside their project. Search combines keywords with *meaning* (a small 140 MB search model on the server), so "how fast can it charge the battery?" finds the TP4056 page about charge current even though the words differ.
+
+## Web search
+
+Stella can look things up online (docs, part availability, error messages) and read pages and PDF datasheets, citing the links. On Linux the setup offers **SearXNG**, a private search engine running on your server in Docker; otherwise (and on Windows without Docker Desktop) she uses DuckDuckGo. For safety she can only open public internet addresses, never devices on your home network.
+
+## GitHub
+
+Settings → **GitHub**: add a fine-grained token (Contents read & write, Pull requests read & write, Actions read, Issues read) and a default repository. Then ask things like "why did my last build fail?", "explain ChatScreen.kt" or "fix it". Stella can read code, search it, read commits, issues and **build logs**, and **commit fixes to a new branch and open a pull request**. Every commit and pull request shows you the exact changes first and only happens if you tap **Approve**; she never commits to your main branch. The token is stored on your server, not on the phone.
+
+## Modes
+
+Each chat has a **mode**, a mindset that changes how Stella thinks and writes. Tap the chip under the top bar (e.g. **✦ GENERAL ▾**) to switch, before your first message or any time during a chat (it applies from her next reply).
+
+| Mode | For | Feel |
+|---|---|---|
+| ✦ General | Everyday help and phone actions | Short and practical |
+| ⌨ Programmer | Writing and debugging code | Precise, thinks first, full code blocks |
+| ✒ Writer | Novels, stories, worldbuilding | Creative, long prose, keeps continuity |
+| ⚡ Electronics | Circuits, PCBs, firmware | Uses the calculators and diagrams |
+| 🎓 Tutor | Learning something | Step by step, hints before answers |
+| 💡 Brainstorm | Ideas | Lots of varied ideas |
+
+Make your own in the mode picker → **Manage modes** (or copy a built-in one and change it): instructions, creativity, whether she thinks first, fewer tools, and *story memory*, which makes context refreshes keep characters, plot and style instead of tasks. Your modes and each chat's mode sync to all your devices.
+
+Tip for a novel: create a project for it (characters and world in the notes, chapters as files) and chat in **Writer** mode inside it.
 
 ## Projects
 

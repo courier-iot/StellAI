@@ -53,14 +53,14 @@ object HubApi {
         return JSONObject(execute(request))
     }
 
-    /** Tools that run on the server (calculator, electronics, diagrams), in OpenAI tool format. */
-    fun tools(serverUrl: String, apiKey: String): JSONArray {
+    /** Tools that run on the server, in OpenAI tool format, plus the names that need the user's approval. */
+    fun tools(serverUrl: String, apiKey: String): JSONObject {
         val request = Request.Builder()
             .url("${url(serverUrl)}/tools")
             .header("Authorization", "Bearer ${apiKey.trim()}")
             .get()
             .build()
-        return JSONObject(execute(request)).optJSONArray("tools") ?: JSONArray()
+        return JSONObject(execute(request))
     }
 
     /** Runs one server tool. Returns {"result": {...}, "summary": "..."}. */
@@ -149,13 +149,97 @@ object HubApi {
     fun projectFileText(serverUrl: String, apiKey: String, projectId: String, fileId: String): String =
         execute(authed(serverUrl, apiKey, "/projects/$projectId/files/$fileId.txt").get().build())
 
+    // ---- Reminders, lists, library, GitHub ------------------------------------------------
+    private fun getJson(serverUrl: String, apiKey: String, path: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, path).get().build()))
+
+    private fun postJson(serverUrl: String, apiKey: String, path: String, body: JSONObject): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, path).post(body.toString().toRequestBody(JSON)).build()))
+
+    fun reminders(serverUrl: String, apiKey: String): JSONArray =
+        getJson(serverUrl, apiKey, "/reminders").optJSONArray("reminders") ?: JSONArray()
+
+    fun addReminder(serverUrl: String, apiKey: String, text: String, dueAt: Long, repeat: String) {
+        postJson(serverUrl, apiKey, "/reminders", JSONObject().put("text", text).put("due_at", dueAt).put("repeat", repeat))
+    }
+
+    /** action: {"done": true} | {"snooze_minutes": 10} | {"cancel": true} */
+    fun reminderAction(serverUrl: String, apiKey: String, id: String, action: JSONObject) {
+        postJson(serverUrl, apiKey, "/reminders/$id", action)
+    }
+
+    fun lists(serverUrl: String, apiKey: String): JSONObject =
+        getJson(serverUrl, apiKey, "/lists").optJSONObject("lists") ?: JSONObject()
+
+    fun addToList(serverUrl: String, apiKey: String, list: String, item: String) {
+        postJson(serverUrl, apiKey, "/lists/" + java.net.URLEncoder.encode(list, "UTF-8").replace("+", "%20"),
+            JSONObject().put("items", JSONArray().put(item)))
+    }
+
+    fun setListItem(serverUrl: String, apiKey: String, id: String, done: Boolean) {
+        postJson(serverUrl, apiKey, "/lists/items/$id", JSONObject().put("done", done))
+    }
+
+    fun deleteListItem(serverUrl: String, apiKey: String, id: String) {
+        execute(authed(serverUrl, apiKey, "/lists/items/$id").delete().build())
+    }
+
+    fun clearList(serverUrl: String, apiKey: String, list: String) {
+        postJson(serverUrl, apiKey, "/lists/" + java.net.URLEncoder.encode(list, "UTF-8").replace("+", "%20") + "/clear", JSONObject())
+    }
+
+    fun library(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/library")
+
+    fun github(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/github")
+
+    // ---- Server status, models, health check, backups, chat search --------------------------
+    fun server(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/server")
+
+    fun switchModel(serverUrl: String, apiKey: String, key: String): String =
+        postJson(serverUrl, apiKey, "/server/model", JSONObject().put("key", key)).optString("message")
+
+    fun downloadModel(serverUrl: String, apiKey: String, key: String): String =
+        postJson(serverUrl, apiKey, "/server/download", JSONObject().put("key", key)).optString("message")
+
+    fun doctor(serverUrl: String, apiKey: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/doctor").get().build(), slow))
+
+    fun backups(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/backups")
+
+    fun backupNow(serverUrl: String, apiKey: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/backups").post("{}".toRequestBody(JSON)).build(), slow))
+
+    fun backupConfig(serverUrl: String, apiKey: String, copyTo: String, keep: Int): JSONObject =
+        postJson(serverUrl, apiKey, "/backups/config", JSONObject().put("copy_to", copyTo).put("keep", keep))
+
+    /** Earlier chats matching a question, by keywords and meaning. */
+    fun searchChats(serverUrl: String, apiKey: String, query: String, exclude: String = ""): JSONArray {
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        val ex = java.net.URLEncoder.encode(exclude, "UTF-8")
+        return getJson(serverUrl, apiKey, "/search?q=$q&exclude=$ex").optJSONArray("results") ?: JSONArray()
+    }
+
+    fun saveGithub(serverUrl: String, apiKey: String, body: JSONObject): JSONObject = postJson(serverUrl, apiKey, "/github", body)
+
+    fun modes(serverUrl: String, apiKey: String): JSONArray =
+        JSONObject(execute(authed(serverUrl, apiKey, "/modes").get().build())).optJSONArray("modes") ?: JSONArray()
+
+    fun saveMode(serverUrl: String, apiKey: String, mode: JSONObject) {
+        execute(authed(serverUrl, apiKey, "/modes").post(mode.toString().toRequestBody(JSON)).build())
+    }
+
+    fun deleteMode(serverUrl: String, apiKey: String, id: String) {
+        execute(authed(serverUrl, apiKey, "/modes/$id").delete().build())
+    }
+
     /** Token budget for the next request: project context, counts and how much history fits. */
     fun context(serverUrl: String, apiKey: String, body: JSONObject): JSONObject =
         JSONObject(execute(authed(serverUrl, apiKey, "/context").post(body.toString().toRequestBody(JSON)).build()))
 
     /** Summarizes chat messages (plus an earlier summary) so the chat can continue with a fresh context. */
-    fun summarize(serverUrl: String, apiKey: String, previous: String, messages: JSONArray): String {
-        val body = JSONObject().put("previous", previous).put("messages", messages).toString().toRequestBody(JSON)
+    fun summarize(serverUrl: String, apiKey: String, previous: String, messages: JSONArray, style: String = "work"): String {
+        val body = JSONObject().put("previous", previous).put("messages", messages).put("style", style)
+            .toString().toRequestBody(JSON)
         return JSONObject(execute(authed(serverUrl, apiKey, "/summarize").post(body).build(), slow)).optString("summary")
     }
 

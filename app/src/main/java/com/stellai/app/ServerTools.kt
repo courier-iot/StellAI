@@ -18,6 +18,8 @@ object ServerTools {
     @Volatile
     private var names: Set<String> = emptySet()
     @Volatile
+    private var approvalNames: Set<String> = emptySet()
+    @Volatile
     private var fetchedAt = 0L
     @Volatile
     private var fetchedFor = ""
@@ -26,6 +28,9 @@ object ServerTools {
 
     fun has(name: String) = name in names
 
+    /** Server tools that change things outside StellAI (GitHub commits): the user must approve each call. */
+    fun needsApproval(name: String) = name in approvalNames
+
     /** Blocking. Refreshes the tool list at most every 10 minutes (or when the server changes). */
     fun refresh(app: App) {
         val s = app.settings
@@ -33,7 +38,10 @@ object ServerTools {
         val fresh = System.currentTimeMillis() - fetchedAt < 10 * 60_000
         if (fresh && key == fetchedFor && names.isNotEmpty()) return
         try {
-            val arr = HubApi.tools(s.serverUrl, s.apiKey)
+            val resp = HubApi.tools(s.serverUrl, s.apiKey)
+            val arr = resp.optJSONArray("tools") ?: JSONArray()
+            val approval = resp.optJSONArray("approval")
+            approvalNames = if (approval == null) emptySet() else (0 until approval.length()).map { approval.optString(it) }.toSet()
             val set = mutableSetOf<String>()
             for (i in 0 until arr.length()) {
                 arr.optJSONObject(i)?.optJSONObject("function")?.optString("name")?.let { if (it.isNotEmpty()) set.add(it) }
@@ -54,6 +62,15 @@ object ServerTools {
     fun displayName(name: String): String = when (name) {
         "render_diagram" -> "Drawing diagram"
         "project_note" -> "Saving project note"
+        "library_search" -> "Searching the library"
+        "search_chats" -> "Searching past chats"
+        "web_search" -> "Searching the web"
+        "fetch_page" -> "Reading the page"
+        "set_reminder", "list_reminders", "cancel_reminder" -> "Updating reminders"
+        "add_to_list", "show_list", "check_off" -> "Updating lists"
+        "github_commit" -> "Committing to GitHub"
+        "github_pull_request" -> "Opening a pull request"
+        "github_repos", "github_read", "github_search", "github_history", "github_issues", "github_builds" -> "Reading GitHub"
         "project_search" -> "Searching project files"
         "remember" -> "Remembering"
         "forget" -> "Forgetting"

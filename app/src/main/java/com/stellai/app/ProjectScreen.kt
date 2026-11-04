@@ -78,6 +78,7 @@ fun ProjectScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val isNew = projectId == "new"
+    val isLibrary = projectId == ProjectManager.LIBRARY
     val project = pm.get(projectId)
     val name = app.settings.assistantName.ifBlank { "Stella" }
 
@@ -121,7 +122,7 @@ fun ProjectScreen(
             TopAppBar(
                 title = {
                     Text(
-                        if (isNew) "New project" else (project?.name ?: "Project"),
+                        if (isNew) "New project" else if (isLibrary) "📚 Library" else (project?.name ?: "Project"),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -147,10 +148,19 @@ fun ProjectScreen(
             if (!isNew && project == null) {
                 item {
                     Text(
-                        if (pm.status.isNotEmpty()) pm.status else "This project no longer exists.",
+                        if (pm.status.isNotEmpty()) pm.status else if (isLibrary) "Loading…" else "This project no longer exists.",
                         color = Space.Muted,
                     )
                 }
+                return@LazyColumn
+            }
+            if (isLibrary && project != null) {
+                item {
+                    Hint("Documents $name can search from any chat: datasheets, manuals, reference notes. She finds " +
+                        "passages by meaning, not just exact words. Ask e.g. “what's the max charge current in my TP4056 datasheet?”")
+                }
+                libraryFiles(project, pm, name, onAdd = { pickFiles.launch(arrayOf("*/*")) }, onView = { viewing = it },
+                    onDelete = { f -> scope.launch { pm.deleteFile(project.id, f.id) } })
                 return@LazyColumn
             }
 
@@ -402,4 +412,46 @@ private fun fileSize(bytes: Long): String = when {
     bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000f)
     bytes >= 1_000 -> "${bytes / 1000} KB"
     else -> "$bytes B"
+}
+
+/** The library's file list (same look as a project's files). */
+private fun androidx.compose.foundation.lazy.LazyListScope.libraryFiles(
+    project: Project,
+    pm: ProjectManager,
+    name: String,
+    onAdd: () -> Unit,
+    onView: (ProjectFile) -> Unit,
+    onDelete: (ProjectFile) -> Unit,
+) {
+    item {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = onAdd, enabled = pm.uploading == null) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(6.dp))
+                Text("Add files")
+            }
+            pm.uploading?.let {
+                Spacer(Modifier.size(12.dp))
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Accent)
+                Spacer(Modifier.size(8.dp))
+                Text("Reading $it…", color = Space.Muted, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+    if (pm.status.isNotEmpty()) item { Text(pm.status, color = Space.Red, style = MaterialTheme.typography.bodySmall) }
+    if (project.files.isEmpty()) item { Hint("No documents yet.") }
+    items(project.files, key = { "lf-" + it.id }) { f ->
+        Card(Modifier.clickable { onView(f) }) {
+            Text(if (f.kind == "pdf") "📄" else if (f.kind == "image") "🖼" else if (f.kind == "code") "⌨" else "📝",
+                modifier = Modifier.padding(end = 10.dp))
+            Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${fileSize(f.size)} · ~${f.tokens} tokens" + if (f.note.isNotBlank()) " · ${f.note}" else "",
+                    style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
+                    color = if (f.note.isNotBlank()) Space.Gold else Space.Muted, maxLines = 2)
+            }
+            IconButton(onClick = { onDelete(f) }) { Icon(Icons.Filled.Delete, contentDescription = "Remove file", tint = Space.Muted) }
+        }
+    }
 }

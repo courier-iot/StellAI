@@ -15,6 +15,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -25,6 +26,9 @@ import androidx.compose.ui.unit.dp
 class MainActivity : ComponentActivity() {
 
     private val app get() = application as App
+
+    /** Screen asked for by a notification (e.g. "tasks"). */
+    private var requestedScreen by mutableStateOf<String?>(null)
 
     /** Server address + key from a pairing QR code, waiting for the user to confirm. */
     private var pendingPair by mutableStateOf<Pair<String, String>?>(null)
@@ -42,10 +46,29 @@ class MainActivity : ComponentActivity() {
                 // Open settings first if the app hasn't been set up yet.
                 // "chat", "settings", "memory", or "project:<id>" ("project:new" to create one)
                 var screen by rememberSaveable { mutableStateOf(if (app.settings.apiKey.isBlank()) "settings" else "chat") }
+                // A reminder notification asks for the reminders screen
+                LaunchedEffect(requestedScreen) {
+                    requestedScreen?.let { s ->
+                        if (app.settings.apiKey.isNotBlank()) screen = s
+                        requestedScreen = null
+                    }
+                }
                 when (screen) {
                     "settings" -> {
                         BackHandler { screen = "chat" }
                         SettingsScreen(onDone = { screen = "chat" }, onOpenMemory = { screen = "memory" })
+                    }
+                    "tasks" -> {
+                        BackHandler { screen = "chat" }
+                        TasksScreen(onDone = { screen = "chat" })
+                    }
+                    "modes" -> {
+                        BackHandler { screen = "chat" }
+                        ModesScreen(onDone = { screen = "chat" })
+                    }
+                    "server" -> {
+                        BackHandler { screen = "chat" }
+                        ServerScreen(onDone = { screen = "chat" })
                     }
                     "memory" -> {
                         BackHandler { screen = "settings" }
@@ -64,6 +87,9 @@ class MainActivity : ComponentActivity() {
                         ChatScreen(
                             onOpenSettings = { screen = "settings" },
                             onOpenProject = { id -> screen = "project:$id" },
+                            onOpenModes = { screen = "modes" },
+                            onOpenTasks = { screen = "tasks" },
+                            onOpenServer = { screen = "server" },
                         )
                     }
                 }
@@ -106,6 +132,10 @@ class MainActivity : ComponentActivity() {
     /** Assistant gesture, headset voice button, or our own assist session: start listening. */
     private fun handleIntent(intent: Intent?) {
         intent ?: return
+        intent.getStringExtra(EXTRA_SCREEN)?.let {
+            requestedScreen = it
+            intent.removeExtra(EXTRA_SCREEN)
+        }
         val data = intent.data
         if (intent.action == Intent.ACTION_VIEW && data?.scheme == "stellai" && data.host == "pair") {
             val url = AppSettings.normalizeUrl(data.getQueryParameter("url").orEmpty())
@@ -125,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_LISTEN = "com.stellai.app.LISTEN"
+        const val EXTRA_SCREEN = "com.stellai.app.SCREEN"
     }
 }
 

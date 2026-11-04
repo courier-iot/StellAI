@@ -3,38 +3,32 @@
 Ordered from most to least useful for everyday use and technical/creative work (programming, electronics, diagrams).
 Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or more.
 
-1. [ ] **Synced desktop chat** (server, M)
-   A browser chat served by the StellAI server that shares the same synced chats as the phone, so you can switch devices mid-conversation.
-
-2. [ ] **Smarter file search** (server, M)
-   Projects already search their files by keywords. Add meaning-based search (a small embedding model) so questions phrased differently from the datasheet still find the right page, plus a shared library usable from any chat.
-
-3. [ ] **Reminders and notes** (server + app, M)
-   "Remind me to reflow the board at 5", "add flux to my parts list". Synced to all devices.
-
-4. [ ] **Coding mode** (app, S)
-   One tap to switch on thinking mode and a coding-focused prompt for hard bugs.
-
-5. [ ] **Web search** (server, M)
-   A private search engine (SearXNG) on the server so Stella can look up current docs and part availability.
-
-6. [ ] **GitHub access** (server, M)
-   Stella reads your repositories (StellAI included) to explain code and help debug.
-
-7. [ ] **Quick launch** (app, S)
+1. [ ] **Quick launch** (app, S)
    A Quick Settings tile and a home-screen widget to talk to Stella in one tap.
-
-8. [ ] **Server controls in the app** (server + app, M)
-   See whether the server is up, which model is loaded, and switch models.
 
 ## Also discussed, not yet built
 
-- [ ] **Search past conversations**: find relevant old chats by meaning and bring them into the current answer. Builds on memory.
 - [ ] **"Hey Stella" wake word**: the app support is done; train the model in the Colab notebook (see the app README) and drop `hey_stella.onnx` into `~/llm/wakewords/` on the server.
 - [ ] **Windows installer, full release**: code signing (no SmartScreen warning), a fixed APK signing key, and testing on real Windows PCs.
 - [ ] **Security hardening**: firewall rules limited to Tailscale and your home network, Android backup turned off for the app, and a command to replace the API key.
 
 ## Done
+
+- [x] **Server screen**: status, model switching and downloads from the phone or desktop chat.
+- [x] **Health check**: `stellai-doctor` checks every part of the server and says how to fix what's wrong (app, desktop chat, Linux menu, Windows app).
+- [x] **Backups**: nightly zips of everything (keeps 14), optional copy to a second folder, one-step restore.
+- [x] **Search past chats**: keyword + meaning search across all chats from the drawer/sidebar, and Stella can search them herself.
+
+- [x] **Hardware tuning**: client mode for slow machines; best 35B quality for RAM + GPU; automatic GPU fitting (--fit) with room for vision and voice; thread split; GPU Whisper with single-pass decoding; Auto thinking (hard questions only, capped); Qwen's recommended sampling.
+
+- [x] **Desktop web chat**: the server serves a browser chat at port 8092 with the same synced chats, modes, projects (drag-and-drop files), library, reminders, photos, diagrams and context refresh.
+- [x] **Smarter file search + library**: meaning-based search (nomic-embed, ~140 MB) combined with keywords for project files, plus a shared document library searchable from any chat.
+- [x] **Reminders and lists**: reminders ring on all phones (exact alarms, Done/Snooze, repeat daily/weekdays/weekly/monthly); named lists; screens on phone and desktop.
+- [x] **Web search**: SearXNG (Docker) or DuckDuckGo, plus reading pages and PDFs; private network addresses blocked.
+- [x] **GitHub access**: read code, search, commits, issues and build logs; commit to a new branch and open pull requests after on-screen approval.
+- [x] **Smaller, faster prompts**: compact tool descriptions; only the tools (phone and server) a message needs, kept stable per chat; only relevant memories; project excerpts and the time ride on the newest message so the instructions never change (the model server reuses its cache); tool results capped to the space left; 32K context for the 35B model on a 5 GB+ GPU. A "hello" now costs ~1K tokens of overhead instead of ~3K.
+
+- [x] **Modes (mindsets)**: per-chat modes (General, Programmer, Writer, Electronics, Tutor, Brainstorm) plus your own; each sets instructions, creativity, thinking, tools and how refreshes summarize (story memory for fiction). Synced. Replaces the planned "Coding mode" (now the Programmer mode).
 
 - [x] **Automatic updates**: Linux and Windows servers check the repo every 30 minutes and update themselves when Stella is idle, keeping all data. Linux rolls back a version that fails to start; Windows verifies a checksum and reinstalls silently.
 

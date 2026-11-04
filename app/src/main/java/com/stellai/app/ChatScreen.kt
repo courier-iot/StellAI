@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -105,7 +106,13 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
+fun ChatScreen(
+    onOpenSettings: () -> Unit,
+    onOpenProject: (String) -> Unit,
+    onOpenModes: () -> Unit,
+    onOpenTasks: () -> Unit,
+    onOpenServer: () -> Unit = {},
+) {
     val app = App.instance
     val engine = app.engine
     val voice = app.voice
@@ -116,11 +123,38 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
     var confirmDelete by remember { mutableStateOf<Conversation?>(null) }
     var moveDialog by remember { mutableStateOf(false) }
     var contextDialog by remember { mutableStateOf(false) }
+    var modeDialog by remember { mutableStateOf(false) }
+    val mode = engine.currentMode
     var overflow by remember { mutableStateOf(false) }
     val project = app.projects.get(engine.currentProjectId)
+    var search by remember { mutableStateOf("") }
+    var searchHits by remember { mutableStateOf<List<org.json.JSONObject>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(search) {
+        val q = search.trim()
+        if (q.length < 3) { searchHits = emptyList(); searchError = null; return@LaunchedEffect }
+        kotlinx.coroutines.delay(450)   // wait for typing to pause
+        searching = true
+        try {
+            val arr = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                HubApi.searchChats(app.settings.serverUrl, app.settings.apiKey, q)
+            }
+            searchHits = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            searchError = null
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            searchHits = emptyList()
+            searchError = "Server search unavailable; showing title matches only."
+        } finally {
+            searching = false
+        }
+    }
     LaunchedEffect(Unit) {
         engine.updateMeter()
         app.projects.refresh()
+        app.modes.refresh()
     }
 
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -193,8 +227,65 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                     colors = itemColors,
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    singleLine = true,
+                    placeholder = { Text("Search past chats") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Space.Muted) },
+                    trailingIcon = {
+                        if (search.isNotEmpty()) IconButton(onClick = { search = "" }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear search", tint = Space.Muted)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                )
                 HorizontalDivider(Modifier.padding(vertical = 8.dp), color = Space.Line)
-                LazyColumn(Modifier.weight(1f)) {
+                if (search.isNotBlank()) {
+                    val q = search.trim()
+                    val titleHits = engine.conversations.filter { it.title.contains(q, ignoreCase = true) }
+                    val serverIds = searchHits.map { it.optString("conversation_id") }.toSet()
+                    LazyColumn(Modifier.weight(1f)) {
+                        if (searching) item(key = "s-busy") {
+                            Text("Searching…", color = Space.Muted, style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(start = 28.dp, bottom = 6.dp))
+                        }
+                        searchError?.let { e -> item(key = "s-err") {
+                            Text(e, color = Space.Gold, style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(start = 28.dp, end = 16.dp, bottom = 6.dp))
+                        } }
+                        items(searchHits, key = { "s-" + it.optString("conversation_id") }) { h ->
+                            val id = h.optString("conversation_id")
+                            NavigationDrawerItem(
+                                label = {
+                                    Column(Modifier.padding(vertical = 4.dp)) {
+                                        Text(h.optString("title").ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(h.optString("date"), style = HudLabel.copy(fontSize = 10.sp), color = Space.Muted)
+                                        Text(h.optString("excerpt"), style = MaterialTheme.typography.bodySmall, color = Space.Muted,
+                                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    }
+                                },
+                                selected = id == engine.currentId,
+                                onClick = { engine.open(id); search = ""; closeDrawer() },
+                                colors = itemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                        }
+                        items(titleHits.filter { it.id !in serverIds }, key = { "t-" + it.id }) { c ->
+                            NavigationDrawerItem(
+                                label = { Text(c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                selected = c.id == engine.currentId,
+                                onClick = { engine.open(c.id); search = ""; closeDrawer() },
+                                colors = itemColors,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                        }
+                        if (!searching && searchHits.isEmpty() && titleHits.isEmpty()) item(key = "s-none") {
+                            Text(if (q.length < 3) "Keep typing…" else "No chats found.", color = Space.Muted,
+                                modifier = Modifier.padding(start = 28.dp))
+                        }
+                    }
+                } else LazyColumn(Modifier.weight(1f)) {
                     item(key = "projects-header") {
                         Row(
                             Modifier.fillMaxWidth().padding(start = 28.dp, end = 16.dp),
@@ -241,7 +332,8 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                         NavigationDrawerItem(
                             label = {
                                 Column {
-                                    Text(c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    val icon = if (c.mode.isNotEmpty()) app.modes.get(c.mode).icon + "  " else ""
+                                    Text(icon + c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     if (cp != null) {
                                         Text("◆ ${cp.name}", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
                                             color = accentFor(cp.color).main.copy(alpha = 0.85f), maxLines = 1,
@@ -262,6 +354,11 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                     }
                 }
                 HorizontalDivider(color = Space.Line)
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                    TextButton(onClick = { onOpenProject(ProjectManager.LIBRARY); closeDrawer() }) { Text("📚 Library") }
+                    TextButton(onClick = { onOpenTasks(); closeDrawer() }) { Text("⏰ Reminders") }
+                    TextButton(onClick = { onOpenServer(); closeDrawer() }) { Text("🖥 Server") }
+                }
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     val sync = app.sync
                     val label = when {
@@ -351,9 +448,10 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                         },
                     )
                     ContextStrip(
+                        mode = mode,
                         project = project,
                         info = engine.context,
-                        show = engine.currentId != null || project != null,
+                        onMode = { modeDialog = true },
                         onProject = { project?.let { onOpenProject(it.id) } },
                         onMeter = { contextDialog = true },
                     )
@@ -523,7 +621,7 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                 },
             ) { padding ->
                 if (engine.messages.isEmpty()) {
-                    EmptyState(Modifier.padding(padding), app, name, project)
+                    EmptyState(Modifier.padding(padding), app, name, project, mode)
                 } else {
                     LazyColumn(
                         state = listState,
@@ -566,6 +664,46 @@ fun ChatScreen(onOpenSettings: () -> Unit, onOpenProject: (String) -> Unit) {
                 }
             },
             confirmButton = { TextButton(onClick = { moveDialog = false }) { Text("Close") } },
+        )
+    }
+
+    engine.pendingApproval?.let { a -> ApprovalDialog(a, name) }
+
+    if (modeDialog) {
+        AlertDialog(
+            onDismissRequest = { modeDialog = false },
+            containerColor = Space.Panel,
+            title = { Text(if (engine.currentId == null) "Mode for this chat" else "Switch mode") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 440.dp)) {
+                    item {
+                        Text(
+                            "Changes how $name thinks and writes in this chat, from her next reply on.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Space.Muted,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    }
+                    items(app.modes.all, key = { it.id }) { m ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { engine.setMode(m.id); modeDialog = false }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(m.icon, fontSize = 20.sp, modifier = Modifier.widthIn(min = 34.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(m.name, color = if (m.id == mode.id) Space.Accent else Space.Text)
+                                Text(m.description, style = MaterialTheme.typography.bodySmall, color = Space.Muted, maxLines = 2)
+                            }
+                            if (m.id == mode.id) Text("✓", color = Space.Accent)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { modeDialog = false; onOpenModes() }) { Text("Manage modes") } },
+            dismissButton = { TextButton(onClick = { modeDialog = false }) { Text("Close") } },
         )
     }
 
@@ -647,9 +785,16 @@ private fun PulseRing() {
 }
 
 @Composable
-private fun EmptyState(modifier: Modifier, app: App, name: String, project: Project?) {
+private fun EmptyState(modifier: Modifier, app: App, name: String, project: Project?, mode: Mode) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (mode.id != GENERAL_MODE.id) {
+                Text("${mode.icon} ${mode.name.uppercase()} MODE", style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
+                    color = Space.Glow)
+                Spacer(Modifier.size(6.dp))
+                Text(mode.description, textAlign = TextAlign.Center, color = Space.Muted, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.size(24.dp))
+            }
             if (project != null) {
                 Text("◆ ${project.name.uppercase()}", style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
                     color = accentFor(project.color).main)
@@ -856,15 +1001,33 @@ private fun SummaryCard(msg: UiMessage, name: String, onLongPress: () -> Unit, a
 
 /** Project chip and context meter under the top bar. */
 @Composable
-private fun ContextStrip(project: Project?, info: ContextInfo?, show: Boolean, onProject: () -> Unit, onMeter: () -> Unit) {
-    if (!show) return
+private fun ContextStrip(
+    mode: Mode,
+    project: Project?,
+    info: ContextInfo?,
+    onMode: () -> Unit,
+    onProject: () -> Unit,
+    onMeter: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .background(Space.Void.copy(alpha = 0.55f))
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Mode chip: tap to switch mindset
+        Row(
+            Modifier
+                .border(1.dp, Space.Accent.copy(alpha = 0.45f), RoundedCornerShape(50))
+                .clickable(onClick = onMode)
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("${mode.icon} ${mode.name.uppercase()} ▾", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 1.sp),
+                color = Space.Accent, maxLines = 1)
+        }
+        Spacer(Modifier.size(10.dp))
         if (project != null) {
             Text(
                 "◆ ${project.name}",
@@ -917,3 +1080,51 @@ private fun ProjectChoice(label: String, color: Color, selected: Boolean, onClic
 }
 
 private fun tokens(n: Int): String = if (n >= 1000) "%.1fk".format(n / 1000f) else n.toString()
+
+/** Asks before Stella changes anything on GitHub. Shows exactly what would be committed. */
+@Composable
+private fun ApprovalDialog(a: Approval, name: String) {
+    val args = a.args
+    val repo = args.optString("repo").ifBlank { "your default repository" }
+    AlertDialog(
+        onDismissRequest = { a.decline() },
+        containerColor = Space.Panel,
+        title = { Text(if (a.tool == "github_commit") "Approve this commit?" else "Open this pull request?") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (a.tool == "github_commit") {
+                    item {
+                        Text("$name wants to commit to $repo, branch “${args.optString("branch")}”:")
+                        Text(args.optString("message"), fontStyle = FontStyle.Italic, color = Space.Muted)
+                    }
+                    val files = args.optJSONArray("files") ?: org.json.JSONArray()
+                    items((0 until files.length()).toList()) { i ->
+                        val f = files.optJSONObject(i) ?: org.json.JSONObject()
+                        var open by remember { mutableStateOf(false) }
+                        val content = f.optString("content")
+                        Column(Modifier.fillMaxWidth().border(1.dp, Space.Line, RoundedCornerShape(8.dp)).clickable { open = !open }.padding(8.dp)) {
+                            Text("${if (open) "▾" else "▸"} ${f.optString("path")}  (${content.lines().size} lines)", color = Space.Accent)
+                            if (open) Text(content.take(20000), fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Space.Text)
+                        }
+                    }
+                    val deletes = args.optJSONArray("delete")
+                    if (deletes != null && deletes.length() > 0) item {
+                        Text("Delete: " + (0 until deletes.length()).joinToString { deletes.optString(it) }, color = Space.Red)
+                    }
+                    item {
+                        Text("Nothing goes to your main branch; review it on GitHub and merge with a pull request.",
+                            style = MaterialTheme.typography.bodySmall, color = Space.Muted)
+                    }
+                } else {
+                    item {
+                        Text("$name wants to open a pull request in $repo from “${args.optString("branch")}”:")
+                        Text(args.optString("title"), color = Space.Accent)
+                        MarkdownContent(args.optString("body"), Space.Text)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { a.approve() }) { Text("Approve") } },
+        dismissButton = { TextButton(onClick = { a.decline() }) { Text("Decline", color = Space.Red) } },
+    )
+}

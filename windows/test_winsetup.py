@@ -97,13 +97,17 @@ def test_backend_and_plan():
     desk = hw(20, cores=6, backend="cuda", vram=6.0, cuda="13")
     assert ws.recommend(desk) == "35b"
     p = ws.plan(desk, "35b")
-    assert p["gpu_args"] == ["-ngl", "99", "--cpu-moe"] and p["context"] == 16384
+    assert p["gpu_args"] == ["-ub", "1024"] and p["context"] == 32768 and p["model_file"].endswith("UD-IQ3_S.gguf")
     assert p["whisper_file"] == "ggml-small.en.bin"
     p9 = ws.plan(desk, "9b")
-    assert p9["model_file"] == "Qwen3.5-9B-Q3_K_M.gguf" and p9["gpu_args"] == ["-ngl", "99"]
+    assert p9["model_file"] == "Qwen3.5-9B-Q3_K_M.gguf" and p9["gpu_args"] == ["-ub", "1024"]
     assert p9["mmproj_file"] == "Qwen3.5-9B-Q3_K_M.mmproj-F16.gguf"
     assert p9["mmproj_url"].endswith("unsloth/Qwen3.5-9B-GGUF/resolve/main/mmproj-F16.gguf")
     assert ws.plan(hw(32, 8), "9b")["model_file"] == "Qwen3.5-9B-Q4_K_M.gguf"
+    # More memory -> better 35B quality: 32 GB RAM + 6 GB GPU, and a 16 GB Tesla T4 server
+    assert ws.plan(hw(32, 6, "cuda", 6.0, "13"), "35b")["model_file"].endswith("UD-IQ4_XS.gguf")
+    assert ws.plan(hw(32, 8, "cuda", 15.0, "13"), "35b")["model_file"].endswith("UD-Q4_K_XL.gguf")
+    assert ws.is_weak(t470) and not ws.is_weak(desk)
 
 
 def test_extract_and_download():
@@ -157,11 +161,12 @@ def test_misc():
     k = ws.api_key(c)
     assert len(k) >= 32 and ws.api_key(c) == k
     c.set(plan={"model_file": "m.gguf", "mmproj_file": "mm.gguf", "context": 8192, "threads": 4,
-                "gpu_args": ["-ngl", "99"], "vision": True, "whisper_file": "w.bin"})
+                "gpu_args": ["-ub", "1024"], "vision": True, "whisper_file": "w.bin", "backend": "cuda"})
     assert ws.Config(c.root).get("plan")["context"] == 8192
     args = ws.llama_args(c, c.get("plan"), k)
     assert "--mmproj" not in args          # vision file not downloaded yet
-    assert args[args.index("--api-key") + 1] == k and "-ngl" in args
+    assert args[args.index("--api-key") + 1] == k and "-tb" in args
+    assert args[args.index("--fit-target") + 1] == "1024"   # no vision file, CPU whisper
     assert ws.whisper_args(c, c.get("plan")) is None
     assert not ws.is_installed(c)
 

@@ -26,47 +26,47 @@ object PhoneTools {
     data class Outcome(val summary: String, val result: String)
 
     fun definitions(): JSONArray = JSONArray().apply {
-        put(tool("set_alarm", "Set an alarm on the phone's clock app.",
+        put(tool("set_alarm", "Wake-up alarm in the clock app.",
             props(
-                "hour" to prop("integer", "Hour in 24-hour time, 0-23"),
-                "minute" to prop("integer", "Minute, 0-59"),
-                "label" to prop("string", "Optional alarm label"),
+                "hour" to prop("integer", "0-23"),
+                "minute" to prop("integer", "0-59"),
+                "label" to prop("string", "optional"),
             ), "hour", "minute"))
         put(tool("set_timer", "Start a countdown timer.",
             props(
-                "seconds" to prop("integer", "Timer length in seconds"),
-                "label" to prop("string", "Optional timer label"),
+                "seconds" to prop("integer", "length"),
+                "label" to prop("string", "optional"),
             ), "seconds"))
-        put(tool("open_app", "Open an installed app by its name, e.g. 'Spotify' or 'Camera'.",
-            props("app_name" to prop("string", "The app's name as shown on the home screen")),
+        put(tool("open_app", "Open an installed app by name.",
+            props("app_name" to prop("string", "e.g. Spotify")),
             "app_name"))
         put(tool("open_url", "Open a web page in the browser.",
-            props("url" to prop("string", "Full URL starting with https://")), "url"))
+            props("url" to prop("string", "https://…")), "url"))
         put(tool("web_search", "Search the web on the phone.",
             props("query" to prop("string", "What to search for")), "query"))
-        put(tool("navigate_to", "Open maps with directions to a place or address.",
-            props("destination" to prop("string", "Place name or address")), "destination"))
+        put(tool("navigate_to", "Directions in maps.",
+            props("destination" to prop("string", "place or address")), "destination"))
         put(tool("draft_text_message",
-            "Open the messaging app with a text pre-written. The user presses send.",
+            "Draft a text in the messaging app (user sends it).",
             props(
-                "message" to prop("string", "The message text"),
-                "phone_number" to prop("string", "Optional recipient phone number"),
+                "message" to prop("string", "text"),
+                "phone_number" to prop("string", "optional"),
             ), "message"))
-        put(tool("dial_number", "Open the phone dialer with a number filled in. The user presses call.",
-            props("phone_number" to prop("string", "Phone number to dial")), "phone_number"))
+        put(tool("dial_number", "Open the dialer with a number (user calls).",
+            props("phone_number" to prop("string", "number")), "phone_number"))
         put(tool("create_calendar_event",
-            "Open the calendar with a new event filled in. The user presses save.",
+            "Draft a calendar event (user saves it).",
             props(
-                "title" to prop("string", "Event title"),
-                "start" to prop("string", "Start in the format YYYY-MM-DD HH:MM (24-hour)"),
-                "duration_minutes" to prop("integer", "Length in minutes, default 60"),
-                "location" to prop("string", "Optional location"),
+                "title" to prop("string", "title"),
+                "start" to prop("string", "YYYY-MM-DD HH:MM"),
+                "duration_minutes" to prop("integer", "default 60"),
+                "location" to prop("string", "optional"),
             ), "title", "start"))
         put(tool("set_flashlight", "Turn the flashlight on or off.",
-            props("on" to prop("boolean", "true to turn on, false to turn off")), "on"))
+            props("on" to prop("boolean", "on/off")), "on"))
         put(tool("set_media_volume", "Set the phone's media volume.",
-            props("percent" to prop("integer", "Volume from 0 to 100")), "percent"))
-        put(tool("get_battery_status", "Get the phone's battery level and charging state.", props()))
+            props("percent" to prop("integer", "0-100")), "percent"))
+        put(tool("get_battery_status", "Battery level and charging state.", props()))
     }
 
     fun displayName(name: String): String = when (name) {

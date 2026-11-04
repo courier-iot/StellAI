@@ -33,11 +33,18 @@ class App : Application() {
         private set
     lateinit var projects: ProjectManager
         private set
+    lateinit var modes: ModeManager
+        private set
+    lateinit var reminders: ReminderManager
+        private set
 
     var assistantRunning by mutableStateOf(false)
         private set
 
     private var appVisible = false
+
+    /** True while an app screen is in the foreground. */
+    val isVisible: Boolean get() = appVisible
     private var periodicSync: Job? = null
 
     override fun onCreate() {
@@ -46,6 +53,10 @@ class App : Application() {
         settings = AppSettings(this)
         memory = MemoryManager(this)
         projects = ProjectManager(this)
+        modes = ModeManager(this)
+        reminders = ReminderManager(this)
+        ReminderManager.createChannel(this)
+        ReminderManager.startBackgroundSync(this)
         store = ChatStore(this)
         sync = SyncManager(this)
         engine = ChatEngine(this)
@@ -56,7 +67,10 @@ class App : Application() {
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
         refreshPeriodicSync()
-        if (visible) sync.request()
+        if (visible) {
+            sync.request()
+            scope.launch { reminders.refresh() }
+        }
     }
 
     fun onAssistantServiceChanged(running: Boolean) {

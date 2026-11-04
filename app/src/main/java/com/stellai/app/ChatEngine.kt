@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -19,6 +20,13 @@ import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 
 enum class Role { USER, ASSISTANT, TOOL, ERROR, SUMMARY }
+
+/** A server action waiting for the user's OK (e.g. a GitHub commit). */
+class Approval(val tool: String, val args: JSONObject) {
+    internal val answer = CompletableDeferred<Boolean>()
+    fun approve() = answer.complete(true)
+    fun decline() = answer.complete(false)
+}
 
 /** How full Stella's context window is for the open chat, in tokens. */
 data class ContextInfo(val used: Int, val limit: Int, val nCtx: Int, val projectTokens: Int) {
@@ -68,6 +76,16 @@ class ChatEngine(private val app: App) {
     val currentProjectId: String
         get() = currentId?.let { id -> conversations.firstOrNull { it.id == id }?.projectId } ?: pendingProjectId
 
+    /** Mode for the next new chat (when no chat is open yet). "" = General. */
+    var pendingMode by mutableStateOf("")
+        private set
+
+    /** Mindset of the open chat (or of the chat about to be started). */
+    val currentMode: Mode
+        get() = app.modes.get(currentId?.let { id -> conversations.firstOrNull { it.id == id }?.mode } ?: pendingMode)
+
+    private fun modeOf(convId: String): Mode = app.modes.get(conversations.firstOrNull { it.id == convId }?.mode)
+
     /** Context window usage for the open chat (null until the server has measured it). */
     var context by mutableStateOf<ContextInfo?>(null)
         private set
@@ -76,6 +94,24 @@ class ChatEngine(private val app: App) {
     var contextNotice by mutableStateOf<String?>(null)
 
     private var meterJob: Job? = null
+
+    /** Tool names already offered in each chat; kept so the tool list stays stable (see select_tools on the server). */
+    private val stickyTools = mutableMapOf<String, MutableSet<String>>()
+
+    /** Shown as a dialog in the chat until the user approves or declines. */
+    var pendingApproval by mutableStateOf<Approval?>(null)
+        private set
+
+    private suspend fun askApproval(tool: String, args: JSONObject): Boolean {
+        if (!app.isVisible) return false   // e.g. a voice command with the screen off: never commit unseen
+        val a = Approval(tool, args)
+        pendingApproval = a
+        return try {
+            a.answer.await()
+        } finally {
+            if (pendingApproval === a) pendingApproval = null
+        }
+    }
 
     /** Title of the open chat, or "" for a new one. */
     val currentTitle: String
@@ -126,6 +162,7 @@ class ChatEngine(private val app: App) {
         abandonTurn()
         currentId = id
         pendingProjectId = ""
+        pendingMode = ""
         app.settings.lastConversation = id
         loadMessages(id)
         context = null
@@ -137,6 +174,7 @@ class ChatEngine(private val app: App) {
         abandonTurn()
         currentId = null
         pendingProjectId = projectId
+        pendingMode = ""
         app.settings.lastConversation = ""
         messages.clear()
         draft = ""
@@ -144,6 +182,20 @@ class ChatEngine(private val app: App) {
         editingId = null
         context = null
         contextNotice = null
+    }
+
+    /** Switches the open chat's mindset (or the next new chat's). Takes effect from the next reply. */
+    fun setMode(modeId: String) {
+        val id = currentId
+        val value = if (modeId == GENERAL_MODE.id) "" else modeId
+        if (id == null) {
+            pendingMode = value
+            return
+        }
+        app.store.setMode(id, value, nextTs())
+        reloadConversations()
+        app.sync.request()
+        updateMeter()
     }
 
     /** Moves a chat into a project, or out of one with "". */
@@ -236,8 +288,10 @@ class ChatEngine(private val app: App) {
         attachments.clear()
         val convId = currentId ?: UUID.randomUUID().toString().also { id ->
             val now = nextTs()
-            app.store.saveConversation(Conversation(id, titleFrom(trimmed.ifEmpty { "Photo" }), now, now, projectId = pendingProjectId))
+            app.store.saveConversation(Conversation(id, titleFrom(trimmed.ifEmpty { "Photo" }), now, now,
+                projectId = pendingProjectId, mode = pendingMode))
             pendingProjectId = ""
+            pendingMode = ""
             currentId = id
             app.settings.lastConversation = id
             reloadConversations()
@@ -258,8 +312,10 @@ class ChatEngine(private val app: App) {
         val gen = generation
         var memoryChanged = false
         var projectChanged = false
+        var remindersChanged = false
         status = "Contacting server…"
         val projectId = conversations.firstOrNull { it.id == convId }?.projectId.orEmpty()
+        val mode = modeOf(convId)
         val turn = mutableListOf<JSONObject>() // this turn's tool calls and results, in API format
         var finalReply = ""
         try {
@@ -275,22 +331,23 @@ class ChatEngine(private val app: App) {
             }
             app.memory.refresh()
             // Fit the chat into Stella's context window; when it's nearly full, refresh it with a summary.
-            var prepared = prepare(convId, projectId, newPhotos.size)
+            var prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice)
             if (prepared.needsRefresh && !stopRequested && gen == generation) {
                 status = "Refreshing context…"
-                if (compact(convId, keepUserTurns = 2)) prepared = prepare(convId, projectId, newPhotos.size)
+                if (compact(convId, keepUserTurns = 2)) prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice)
             }
             if (gen == generation && prepared.info != null) context = prepared.info
+            rememberTools(convId, prepared.tools)
             val base = prepared.history
             val system = prepared.system
-            val tools = toolDefinitions(projectId.isNotEmpty())
+            val tools = prepared.tools
             repeat(MAX_TOOL_ROUNDS) {
                 status = "Contacting server…"
                 val streamId = STREAMING_PREFIX + UUID.randomUUID()
                 messages.add(UiMessage(streamId, Role.ASSISTANT, ""))
 
                 val result = withContext(Dispatchers.IO) {
-                    client.streamChat(app.settings.serverUrl, app.settings.apiKey, buildRequest(system, tools, base, turn)) { content, reasoning ->
+                    client.streamChat(app.settings.serverUrl, app.settings.apiKey, buildRequest(system, tools, base, turn, mode, prepared.think)) { content, reasoning ->
                         main.post {
                             if (!busy || gen != generation) return@post
                             val visible = stripThink(content)
@@ -327,17 +384,29 @@ class ChatEngine(private val app: App) {
                     val onServer = ServerTools.has(tc.name)
                     if (tc.name == "remember" || tc.name == "forget") memoryChanged = true
                     if (tc.name == "project_note") projectChanged = true
+                    if (tc.name == "set_reminder" || tc.name == "cancel_reminder") remindersChanged = true
                     status = (if (onServer) ServerTools.displayName(tc.name) else PhoneTools.displayName(tc.name)) + "…"
+                    val argsJson = try {
+                        JSONObject(tc.arguments.ifBlank { "{}" })
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                    argsJson.remove("approved")   // only the user can approve, never the model
                     // Project tools act on this chat's project
-                    val args = if (tc.name in PROJECT_TOOLS && projectId.isNotEmpty()) {
-                        try {
-                            JSONObject(tc.arguments.ifBlank { "{}" }).put("project_id", projectId).toString()
-                        } catch (_: Exception) {
-                            tc.arguments
-                        }
-                    } else tc.arguments
-                    val outcome = if (onServer) {
-                        withContext(Dispatchers.IO) { ServerTools.execute(app, tc.name, args) }
+                    if (tc.name in PROJECT_TOOLS && projectId.isNotEmpty()) argsJson.put("project_id", projectId)
+                    if (tc.name == "search_chats") argsJson.put("current_conversation", convId)
+                    val needsOk = onServer && ServerTools.needsApproval(tc.name)
+                    val outcome = if (needsOk && !askApproval(tc.name, argsJson)) {
+                        val why = if (app.isVisible) "The user declined this action." else
+                            "This needs the user's approval on screen; ask them to open the app and try again."
+                        PhoneTools.Outcome("✗ Not approved: ${ServerTools.displayName(tc.name).lowercase()}",
+                            JSONObject().put("ok", false).put("error", why).toString())
+                    } else if (onServer) {
+                        if (needsOk) argsJson.put("approved", true)
+                        // Keep big results (web pages, files) within the space left in Stella's context
+                        val left = prepared.info?.let { it.limit - it.used - turn.sumOf { t -> t.toString().length } / 3 }
+                        argsJson.put("_max_chars", if (left == null) 12000 else maxOf(1500, (left * 3 * 0.6).toInt()))
+                        withContext(Dispatchers.IO) { ServerTools.execute(app, tc.name, argsJson.toString()) }
                     } else {
                         PhoneTools.execute(app, tc.name, tc.arguments)
                     }
@@ -370,6 +439,7 @@ class ChatEngine(private val app: App) {
             app.sync.request()
             if (memoryChanged) app.scope.launch { app.memory.refresh() }
             if (projectChanged) app.scope.launch { app.projects.refresh() }
+            if (remindersChanged) app.scope.launch { app.reminders.refresh() }
             if (gen == generation) updateMeter()
             app.memory.scheduleLearning(convId)
             if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.speakReplies) {
@@ -445,6 +515,8 @@ class ChatEngine(private val app: App) {
         val history: List<JSONObject>,
         val needsRefresh: Boolean,
         val info: ContextInfo?,
+        val tools: JSONArray,
+        val think: Boolean,
     )
 
     private fun textOf(o: JSONObject): String {
@@ -461,28 +533,50 @@ class ChatEngine(private val app: App) {
      * Builds what Stella will see: instructions (with the project and any earlier summary) and as
      * much recent history as fits. The server counts tokens exactly and picks relevant project files.
      */
-    private suspend fun prepare(convId: String, projectId: String, images: Int): Prepared = withContext(Dispatchers.IO) {
+    private suspend fun prepare(
+        convId: String,
+        projectId: String,
+        images: Int,
+        mode: Mode = modeOf(convId),
+        fromVoice: Boolean = false,
+    ): Prepared = withContext(Dispatchers.IO) {
         val list = app.store.messages(convId).map { it.toUi() }
         val lastSummary = list.indexOfLast { it.role == Role.SUMMARY }
         val summary = if (lastSummary >= 0) list[lastSummary].text else ""
         val history = buildHistory(list.drop(lastSummary + 1))
-        val tools = toolDefinitions(projectId.isNotEmpty())
-        val baseSystem = systemPrompt("", summary)
+        val lastText = list.lastOrNull { it.role == Role.USER }?.text?.replace(PHOTO_REF, "").orEmpty()
+        val sticky = synchronized(stickyTools) { stickyTools[convId]?.toSet().orEmpty() }
+        val phoneNames = phoneToolsFor(lastText, fromVoice)?.let { it + sticky }
+        val phoneTools = toolDefinitions(projectId.isNotEmpty(), mode, selected = emptyList(), phone = phoneNames)
+        val baseSystem = systemPrompt("", summary, mode, "")
         val query = list.filter { it.role == Role.USER }.takeLast(2)
             .joinToString("\n") { it.text.replace(PHOTO_REF, "") }
         val plan = try {
             HubApi.context(app.settings.serverUrl, app.settings.apiKey, JSONObject()
                 .put("project_id", projectId)
                 .put("query", query)
-                .put("fixed", baseSystem + tools.toString())
+                .put("fixed", baseSystem + phoneTools.toString())
                 .put("images", images)
+                .put("mode", mode.id)
+                .put("mode_tools", mode.tools)
+                .put("split", true)
+                .put("sticky", JSONArray(sticky.toList()))
+                .put("thinking", thinkingPref(mode))
+                .put("last", lastText)
                 .put("messages", JSONArray().apply {
                     history.forEach { put(JSONObject().put("role", it.optString("role")).put("content", textOf(it))) }
                 }))
         } catch (_: Exception) {
             null
         }
-        if (plan == null) return@withContext Prepared(baseSystem, trimByCount(history), false, null)
+        if (plan == null) {
+            return@withContext Prepared(systemPrompt("", summary, mode, app.memory.promptSection()),
+                withTurnContext(trimByCount(history), ""), false, null,
+                toolDefinitions(projectId.isNotEmpty(), mode, selected = null, phone = phoneNames),
+                think = thinkingPref(mode) == "on")
+        }
+        // The server picks which of its tools fit this message (each tool costs context space)
+        val chosen = plan.optJSONArray("tools")?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }
 
         val nCtx = plan.optInt("n_ctx", 8192)
         val limit = nCtx - plan.optInt("reply_reserve", 1024)
@@ -492,12 +586,59 @@ class ChatEngine(private val app: App) {
         while (start < history.size && history[start].optString("role") != "user") start++
         if (start >= history.size) start = history.indexOfLast { it.optString("role") == "user" }.coerceAtLeast(0)
         val userTurns = history.count { it.optString("role") == "user" }
+        // Newer servers keep the instructions stable (so the model server can reuse its work on them) and
+        // send what changes per message (relevant memories, file excerpts) to attach to the newest message.
+        val memory = if (plan.has("memory_context")) plan.optString("memory_context") else app.memory.promptSection()
         Prepared(
-            system = systemPrompt(plan.optString("project_context"), summary),
-            history = history.subList(start, history.size),
+            system = systemPrompt(plan.optString("project_context"), summary, mode, memory),
+            history = withTurnContext(history.subList(start, history.size), plan.optString("turn_context")),
             needsRefresh = userTurns >= 2 && (start > 0 || used > limit * REFRESH_AT),
             info = ContextInfo(used, limit, nCtx, projectTokens),
+            tools = toolDefinitions(projectId.isNotEmpty(), mode, selected = chosen, phone = phoneNames),
+            think = if (plan.has("think")) plan.optBoolean("think") else thinkingPref(mode) == "on",
         )
+    }
+
+    /**
+     * Puts the current time and per-message context in front of the newest user message only. Keeping these
+     * out of the instructions means the start of the prompt stays the same between messages, so the model
+     * server doesn't have to re-read the whole chat each time (much faster on a CPU).
+     */
+    private fun withTurnContext(history: List<JSONObject>, extra: String): List<JSONObject> {
+        val i = history.indexOfLast { it.optString("role") == "user" }
+        if (i < 0) return history
+        val now = ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm 'UTC'xxx (VV)", Locale.ENGLISH))
+        val block = buildString {
+            append("[Automatic context, not written by the user]\nCurrent time: ").append(now)
+            if (extra.isNotBlank()) append("\n").append(extra.trim())
+            append("\n[End of context]\n\n")
+        }
+        val msg = JSONObject(history[i].toString())
+        when (val c = msg.opt("content")) {
+            is JSONArray -> {
+                val first = (0 until c.length()).firstOrNull { c.optJSONObject(it)?.optString("type") == "text" }
+                if (first != null) c.getJSONObject(first).put("text", block + c.getJSONObject(first).optString("text"))
+            }
+            else -> msg.put("content", block + (c?.toString() ?: ""))
+        }
+        return history.toMutableList().also { it[i] = msg }
+    }
+
+    /**
+     * Phone actions this message might need. Voice commands get all of them (they're usually actions);
+     * typed messages only the ones whose keywords appear, since every tool description costs context.
+     */
+    private fun phoneToolsFor(text: String, fromVoice: Boolean): Set<String>? {
+        if (fromVoice) return null
+        val t = text.lowercase()
+        val out = mutableSetOf<String>()
+        for ((name, rx) in PHONE_TRIGGERS) if (rx.containsMatchIn(t)) out.add(name)
+        return out
+    }
+
+    private fun rememberTools(convId: String, tools: JSONArray) {
+        val names = (0 until tools.length()).mapNotNull { tools.optJSONObject(it)?.optJSONObject("function")?.optString("name") }
+        synchronized(stickyTools) { stickyTools.getOrPut(convId) { mutableSetOf() }.addAll(names) }
     }
 
     /** Re-measures the open chat's context use (for the meter). */
@@ -560,7 +701,9 @@ class ChatEngine(private val app: App) {
         }
         val previous = if (last >= 0) stored[last].text else ""
         val summary = try {
-            withContext(Dispatchers.IO) { HubApi.summarize(app.settings.serverUrl, app.settings.apiKey, previous, arr) }
+            withContext(Dispatchers.IO) {
+                HubApi.summarize(app.settings.serverUrl, app.settings.apiKey, previous, arr, modeOf(convId).style)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -581,16 +724,35 @@ class ChatEngine(private val app: App) {
         return true
     }
 
-    /** Phone tools plus server tools; project tools only in project chats. */
-    private fun toolDefinitions(inProject: Boolean): JSONArray = JSONArray().apply {
-        val phone = PhoneTools.definitions()
-        for (i in 0 until phone.length()) put(phone.get(i))
+    /**
+     * Phone tools plus server tools. [selected] = the server tools the server chose for this message
+     * (empty = phone tools only, null = older server: all, filtered here by project and mode).
+     */
+    private fun toolDefinitions(inProject: Boolean, mode: Mode, selected: List<String>?, phone: Set<String>? = null): JSONArray =
+        JSONArray().apply {
         val server = ServerTools.definitions()
+        val serverPicked = mutableListOf<Any>()
+        val serverNames = mutableSetOf<String>()
         for (i in 0 until server.length()) {
             val name = server.optJSONObject(i)?.optJSONObject("function")?.optString("name").orEmpty()
-            if (!inProject && name in PROJECT_TOOLS) continue
-            put(server.get(i))
+            val keep = if (selected != null) name in selected else
+                !(!inProject && name in PROJECT_TOOLS) && !(mode.tools == "minimal" && name !in MINIMAL_SERVER_TOOLS)
+            if (keep) {
+                serverPicked.add(server.get(i))
+                serverNames.add(name)
+            }
         }
+        val phoneFilter = phone
+        val phoneDefs = PhoneTools.definitions()
+        for (i in 0 until phoneDefs.length()) {
+            val name = phoneDefs.optJSONObject(i)?.optJSONObject("function")?.optString("name").orEmpty()
+            // The server's real web search replaces the phone's "open a search in the browser"
+            if (name in serverNames || (name == "web_search" && ServerTools.has("web_search"))) continue
+            if (mode.tools == "minimal" && name !in MINIMAL_PHONE_TOOLS) continue
+            if (phoneFilter != null && name !in phoneFilter) continue
+            put(phoneDefs.get(i))
+        }
+        serverPicked.forEach { put(it) }
     }
 
     /** Text, or text + images (OpenAI format) for the newest message with photos. */
@@ -614,36 +776,54 @@ class ChatEngine(private val app: App) {
         return parts
     }
 
-    private fun buildRequest(system: String, tools: JSONArray, base: List<JSONObject>, turn: List<JSONObject>): JSONObject {
+    private fun buildRequest(
+        system: String,
+        tools: JSONArray,
+        base: List<JSONObject>,
+        turn: List<JSONObject>,
+        mode: Mode,
+        thinking: Boolean,
+    ): JSONObject {
         val all = JSONArray()
         all.put(JSONObject().put("role", "system").put("content", system))
         base.forEach { all.put(it) }
         turn.forEach { all.put(it) }
+        // Qwen's recommended sampling for Qwen3.5 (model card): precise for code, a presence penalty elsewhere
+        // to avoid the repetition loops quantized models can fall into. A mode's creativity overrides temperature.
+        val code = mode.id == "programmer" || mode.id == "electronics"
+        val temperature = mode.temperature ?: if (thinking) (if (code) 0.6 else 1.0) else 0.7
         return JSONObject()
             .put("model", "local")
             .put("messages", all)
             .put("tools", tools)
-            .put("chat_template_kwargs", JSONObject().put("enable_thinking", app.settings.thinking))
+            .put("chat_template_kwargs", JSONObject().put("enable_thinking", thinking))
+            .put("temperature", temperature)
+            .put("top_p", if (thinking) 0.95 else 0.8)
+            .put("top_k", 20)
+            .put("min_p", 0.0)
+            .put("presence_penalty", if (code) 0.0 else 1.5)
     }
 
-    private fun systemPrompt(project: String, summary: String): String {
-        val now = ZonedDateTime.now()
-            .format(DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm (zzzz)", Locale.ENGLISH))
+    /** "on"/"off"/"auto": the chat's mode decides first, then the Settings choice. */
+    private fun thinkingPref(mode: Mode): String = when (mode.thinking) {
+        "on", "off" -> mode.thinking
+        else -> app.settings.thinkingMode
+    }
+
+    private fun systemPrompt(project: String, summary: String, mode: Mode, memory: String): String {
         val name = app.settings.assistantName.ifBlank { "Stella" }
         return """
-            You are $name, the user's personal AI assistant in StellAI. You run privately on the user's own computer, not in the cloud.
-            You have a warm, capable personality with a light touch of space-explorer flair, but you stay concise and practical.
-            The user talks to you through an app on their Android phone, and you can control the phone with the provided tools.
-            When the user asks you to do something on the phone, call the matching tool instead of explaining how to do it.
-            After a tool runs, briefly confirm what happened. Never claim an action succeeded if the tool reported an error.
-            Keep replies concise and conversational. You may use Markdown (bold, lists, short headings). Always put code in fenced code blocks with a language tag. Avoid tables.
-            For ANY arithmetic or electronics maths (resistors, dividers, LEDs, filters, power, unit conversions), call the calculate or electronics tools instead of working it out yourself, then explain the result.
-            When a picture would help (circuit schematic, block diagram, flowchart, state machine, timing diagram), call render_diagram. It appears in the chat automatically, so don't repeat its code unless asked. If it fails, fix the code and try again once.
-            The user may send photos (circuits, screens, sketches, parts). Describe what you actually see and say so if something is unclear.
-            When the user shares a lasting fact about themselves or their projects, or asks you to remember something, call remember. If they ask you to forget something, call forget.
-            The current date and time on the phone is $now.
+            You are $name, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
+            The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm briefly afterwards; never claim success if a tool failed.
+            Markdown is fine; always put code in fenced blocks with a language; avoid tables.
+            Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically; if it fails, fix it and retry once).
+            Describe photos only from what you actually see.
+            Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
+            A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
         """.trimIndent() +
-            app.memory.promptSection().let { if (it.isEmpty()) "" else "\n\n$it" } +
+            (if (mode.prompt.isBlank()) "" else "\n\n## Current mode: ${mode.name}\n${mode.prompt}\n" +
+                "These mode instructions take priority over the general style guidance above (such as keeping replies short).") +
+            (if (memory.isBlank()) "" else "\n\n$memory") +
             (if (project.isBlank()) "" else "\n\n$project") +
             (if (summary.isBlank()) "" else "\n\n## Earlier in this chat\n" +
                 "The start of this conversation was summarized to free up memory. Continue naturally from it; " +
@@ -681,6 +861,23 @@ class ChatEngine(private val app: App) {
         /** Refresh the context automatically once it is this full. */
         private const val REFRESH_AT = 0.85f
         val PROJECT_TOOLS = setOf("project_note", "project_search")
+        private val PHONE_TRIGGERS = mapOf(
+            "set_alarm" to Regex("alarm|wake me"),
+            "set_timer" to Regex("timer|countdown|count down"),
+            "open_app" to Regex("\\bopen\\b|launch|\\bstart\\b|\\bplay\\b|\\bapp\\b|spotify|youtube|camera"),
+            "open_url" to Regex("https?://|website|\\burl\\b|\\blink\\b|go to "),
+            "navigate_to" to Regex("navigat|direction|drive to|route|\\bmaps?\\b|take me|how do i get"),
+            "draft_text_message" to Regex("\\btext\\b|\\bsms\\b|message (to|for)|send .* (a )?message|tell \\w+ that"),
+            "dial_number" to Regex("\\bcall\\b|\\bdial\\b|phone (number|him|her|them)"),
+            "create_calendar_event" to Regex("calendar|event|meeting|appointment|schedule"),
+            "set_flashlight" to Regex("flash ?light|torch|\\blight\\b"),
+            "set_media_volume" to Regex("volume|louder|quieter|\\bmute|turn (it )?(up|down)"),
+            "get_battery_status" to Regex("battery|charg(e|ing) level|how much charge"),
+        )
+        /** Server tools kept in "minimal" modes such as Writer. */
+        private val MINIMAL_SERVER_TOOLS = setOf("remember", "forget", "project_note", "project_search", "library_search",
+            "set_reminder", "add_to_list", "web_search", "fetch_page")
+        private val MINIMAL_PHONE_TOOLS = setOf("set_alarm", "set_timer", "open_app", "open_url")
         private const val STREAMING_PREFIX = "streaming-"
     }
 }

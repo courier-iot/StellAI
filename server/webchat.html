@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StellAI</title>
+<style>
+:root{--void:#04060d;--top:#070b1a;--panel:#0c1326;--panel2:#141d38;--line:#26335c;--text:#e6ecff;--muted:#8a96bf;
+--accent:#5ce1e6;--glow:#9b7bff;--gold:#ffd166;--red:#ff6b7a;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--void);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{background:radial-gradient(ellipse at 20% 0%,#0b1430 0%,var(--top) 45%,#0b0620 100%) fixed}
+button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);color:#0a0a14;border-color:var(--accent);font-weight:600}
+button.ghost{background:none;border-color:transparent}button.ghost:hover{border-color:var(--line)}
+input,textarea,select{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px;width:100%}
+textarea{resize:vertical}input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+a{color:var(--accent)}
+.hud{font-family:var(--mono);letter-spacing:2px;text-transform:uppercase;font-size:11px;color:var(--muted)}
+#app{display:flex;height:100vh}
+#side{width:290px;flex:none;background:rgba(12,19,38,.92);border-right:1px solid var(--line);display:flex;flex-direction:column}
+#side header{padding:18px 18px 10px;color:var(--accent);font-family:var(--mono);letter-spacing:3px;font-weight:700}
+#side .scroll{flex:1;overflow:auto;padding:0 10px 10px}
+.item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:10px;cursor:pointer;color:var(--text)}
+.item:hover{background:rgba(255,255,255,.04)}.item.sel{background:rgba(92,225,230,.12);color:var(--accent)}
+.item .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .x{opacity:0;border:none;background:none;padding:0 4px;color:var(--muted)}.item:hover .x{opacity:1}
+.sec{display:flex;align-items:center;justify-content:space-between;padding:12px 10px 4px}
+.sub{font-size:11px;color:var(--muted)}
+#side footer{border-top:1px solid var(--line);padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#bar{display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(4,6,13,.55);border-bottom:1px solid rgba(92,225,230,.15)}
+#bar .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{border:1px solid rgba(92,225,230,.45);border-radius:999px;padding:3px 10px;font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--accent);cursor:pointer;background:none;white-space:nowrap}
+#meter{display:flex;align-items:center;gap:6px;cursor:pointer}
+#meter .track{width:70px;height:4px;background:var(--line);border-radius:2px;overflow:hidden}#meter .fill{height:100%;background:var(--accent)}
+#msgs{flex:1;overflow:auto;padding:18px 16px 30px}
+.wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.msg{position:relative;max-width:85%;padding:10px 14px;border-radius:18px}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,rgba(92,225,230,.28),rgba(155,123,255,.28));border:1px solid rgba(92,225,230,.45);border-bottom-right-radius:4px;white-space:pre-wrap}
+.msg.assistant{align-self:flex-start;background:rgba(12,19,38,.85);border:1px solid rgba(92,225,230,.22);border-bottom-left-radius:4px}
+.msg.assistant.wide{max-width:100%;width:100%}
+.msg .who{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--accent);opacity:.8;margin-bottom:4px}
+.msg .acts{position:absolute;top:-12px;right:8px;display:none;gap:4px}.msg:hover .acts{display:flex}
+.msg .acts button{padding:1px 8px;font-size:12px;border-radius:8px}
+.tool{font-family:var(--mono);font-size:13px;color:var(--gold);padding:0 10px}
+.err{background:rgba(255,107,122,.12);border:1px solid rgba(255,107,122,.5);border-radius:12px;padding:10px 12px;color:#ffc7cd}
+.summary{border:1px solid rgba(155,123,255,.4);background:rgba(155,123,255,.08);border-radius:12px;padding:10px 14px;cursor:pointer}
+.summary .hud{color:var(--glow)}
+.think{font-family:var(--mono);font-size:12px;color:var(--glow);font-style:italic;white-space:pre-wrap;cursor:pointer;margin-bottom:6px}
+.md p{margin:.35em 0}.md h1,.md h2,.md h3{margin:.6em 0 .3em;font-size:1.05em}.md ul,.md ol{margin:.3em 0;padding-left:1.4em}
+.md code{font-family:var(--mono);background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px;font-size:.92em}
+.md pre{background:#060a16;border:1px solid var(--line);border-radius:10px;padding:10px 12px;overflow:auto;position:relative}
+.md pre code{background:none;padding:0;font-size:13px;line-height:1.45}
+.md pre .cp{position:absolute;top:6px;right:6px;font-size:11px;padding:1px 8px}
+.md img{max-width:100%;background:#fff;border-radius:8px;margin:6px 0;cursor:zoom-in}
+.md blockquote{border-left:3px solid var(--line);margin:.4em 0;padding-left:10px;color:var(--muted)}
+.md table{border-collapse:collapse}.md td,.md th{border:1px solid var(--line);padding:3px 8px}
+#composer{border-top:1px solid rgba(92,225,230,.18);background:rgba(4,6,13,.7);padding:10px 16px}
+#composer .row{max-width:860px;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
+#input{min-height:46px;max-height:240px;border-radius:22px;padding:11px 16px}
+#atts{max-width:860px;margin:0 auto 6px;display:flex;gap:8px;flex-wrap:wrap}
+#atts .a{position:relative}#atts img{height:60px;border-radius:8px;border:1px solid var(--line)}
+#atts .a button{position:absolute;top:-6px;right:-6px;padding:0 6px;border-radius:50%;font-size:11px}
+#notice{max-width:860px;margin:0 auto 6px;font-size:13px;color:var(--gold);display:none;cursor:pointer}
+.empty{margin:auto;text-align:center;color:var(--muted);padding:60px 20px}.empty .star{font-size:44px;color:var(--accent)}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:10;padding:16px}
+.dialog{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 20px;width:min(640px,100%);max-height:88vh;overflow:auto}
+.dialog h2{margin:0 0 10px;font-size:18px}.dialog .btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+.list .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(38,51,92,.6)}
+.list .row .t{flex:1;min-width:0}
+.pick{display:flex;gap:10px;align-items:center;padding:9px 8px;border-radius:10px;cursor:pointer}.pick:hover{background:rgba(255,255,255,.04)}
+.pick .ic{font-size:20px;width:30px;text-align:center}.pick.sel{color:var(--accent)}
+.status{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted)}.status.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.hit .ex{font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.check{display:flex;gap:10px;padding:5px 0}.check .ic{width:18px;flex:none;font-weight:700}
+.bar2{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}.bar2 div{height:100%;background:var(--accent)}
+.zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:20;cursor:zoom-out}
+.zoom img{max-width:95vw;max-height:95vh;background:#fff;border-radius:8px}
+@media (max-width:760px){#side{position:fixed;z-index:5;height:100%;transform:translateX(-100%);transition:transform .2s}#side.open{transform:none}}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <header>✦ STELLAI</header>
+    <div style="padding:0 12px 6px"><button class="primary" style="width:100%" id="newChat">+ New chat</button></div>
+    <div style="padding:0 12px 6px"><input id="search" type="search" placeholder="🔍 Search past chats" autocomplete="off"></div>
+    <div class="scroll" id="searchView" style="display:none"><div id="searchResults"></div></div>
+    <div class="scroll" id="listView">
+      <div class="sec"><span class="hud">Projects</span><button class="ghost" id="newProject" title="New project">+</button></div>
+      <div id="projects"></div>
+      <div class="sec"><span class="hud">Chats</span></div>
+      <div id="chats"></div>
+    </div>
+    <footer>
+      <button class="ghost" id="openLibrary">📚 Library</button>
+      <button class="ghost" id="openTasks">⏰ Reminders</button>
+      <button class="ghost" id="openServer">🖥 Server</button>
+      <button class="ghost" id="openSettings">⚙ Settings</button>
+      <div class="sub" id="syncState" style="width:100%"></div>
+    </footer>
+  </aside>
+  <main id="main">
+    <div id="bar">
+      <button class="ghost" id="menuBtn" style="display:none">☰</button>
+      <span class="status" id="dot"></span>
+      <div class="title"><div id="title" class="hud" style="font-size:14px;color:var(--text);letter-spacing:4px">STELLA</div><div id="subtitle" class="sub"></div></div>
+      <button class="chip" id="modeChip"></button>
+      <button class="chip" id="projectChip" style="display:none"></button>
+      <div id="meter" title="How full Stella's memory is for this chat"><span class="hud">Context</span><div class="track"><div class="fill" id="meterFill" style="width:0"></div></div><span class="hud" id="meterPct"></span></div>
+    </div>
+    <div id="msgs"><div class="wrap" id="wrap"></div></div>
+    <div id="composer">
+      <div id="notice"></div>
+      <div id="atts"></div>
+      <div class="row">
+        <button class="ghost" id="attach" title="Add a photo">📷</button>
+        <input type="file" id="file" accept="image/*" multiple hidden>
+        <textarea id="input" rows="1" placeholder="Message Stella… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button class="primary" id="send">Send</button>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+"use strict";
+// ---------------------------------------------------------------- basics
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+  const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16); }));
+const hex16 = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, "0")).join("");
+let lastTs = 0;
+const nextTs = () => { const n = Date.now(); lastTs = n > lastTs ? n : lastTs + 1; return lastTs; };
+const store = { get(k, d) { try { const v = localStorage.getItem("stellai." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+                set(k, v) { try { localStorage.setItem("stellai." + k, JSON.stringify(v)); } catch {} } };
+
+// Key from the link the server app opens (#key=...), or saved earlier
+(function () {
+  const m = location.hash.match(/key=([^&]+)/);
+  if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); }
+})();
+let KEY = store.get("key", "");
+const NAME = () => store.get("name", "Stella");
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ Authorization: "Bearer " + KEY }, opts.headers || {});
+  if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  const text = await r.text();
+  let data = null; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!r.ok) { const e = new Error((data && data.error) || ("HTTP " + r.status)); e.status = r.status; throw e; }
+  return data;
+}
+const media = ref => { const [k, id] = ref.split(":"); return (k === "image" ? `/images/${id}.jpg` : `/diagrams/${id}.png`) + "?key=" + encodeURIComponent(KEY); };
+
+// ---------------------------------------------------------------- modes (same as the phone app)
+const MODES = [
+  { id: "general", name: "General", icon: "✦", desc: "Everyday help and quick answers", prompt: "" },
+  { id: "programmer", name: "Programmer", icon: "⌨", desc: "Pair programming: complete code, debugging, reviews", temperature: 0.3, thinking: "on",
+    prompt: "Mode: Programmer. Act as a senior software engineer pair-programming with the user.\n- Give complete, working code in fenced blocks with a language tag. For changes to existing code, show the whole changed function or file section, not fragments.\n- Explain briefly why, not just what. Point out bugs, edge cases, performance and security issues you notice.\n- When debugging, reason from the actual error message and code; if they're missing, ask for them instead of guessing.\n- Follow the user's language, framework and code style. Prefer simple, maintainable solutions.\n- Replies can be as long as the code needs." },
+  { id: "writer", name: "Writer", icon: "✒", desc: "Creative writing partner for novels and stories", temperature: 0.9, thinking: "off", tools: "minimal", style: "story",
+    prompt: "Mode: Writer. You are the user's creative writing partner for fiction: novels, short stories, scenes and worldbuilding.\n- Write vivid, original prose with a strong voice, sensory detail, natural dialogue and good pacing. Show, don't tell.\n- Keep continuity: characters, names, timeline, world rules and established facts. Match the user's genre, tense, point of view and style.\n- When asked to write, write the full passage, not a summary or outline (unless asked). Long replies are welcome.\n- Write story text as plain prose: no headings, bullet points or bold in the story itself.\n- Avoid clichés and purple prose. Give characters distinct voices.\n- Suggest directions or ask questions only at natural decision points or when asked.\n- You don't need to be brief in this mode." },
+  { id: "electronics", name: "Electronics", icon: "⚡", desc: "Circuits, PCBs, firmware and calculations", temperature: 0.4,
+    prompt: "Mode: Electronics. Act as an experienced electronics engineer.\n- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n- Draw schematics or timing diagrams with render_diagram when a picture helps.\n- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)." },
+  { id: "tutor", name: "Tutor", icon: "🎓", desc: "Learn step by step instead of just getting answers", temperature: 0.5,
+    prompt: "Mode: Tutor. Help the user learn and understand, not just get answers.\n- Explain step by step with simple examples and analogies, building on what they already know.\n- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n- Check understanding with a short question now and then. Correct misconceptions kindly and clearly." },
+  { id: "brainstorm", name: "Brainstorm", icon: "💡", desc: "Lots of ideas, from practical to wild", temperature: 1.0, thinking: "off",
+    prompt: "Mode: Brainstorm. Generate many diverse ideas quickly: practical ones and bold, unusual ones.\n- Use short bullet points, one idea each, grouped if that helps. Build on and remix the user's ideas.\n- Don't judge ideas while generating; offer to evaluate or narrow them down afterwards." },
+];
+const COLORS = { cyan: "#5CE1E6", blue: "#5AA9FF", red: "#FF5C6C", green: "#4DE8A0", purple: "#A77BFF", pink: "#FF7AC6", orange: "#FFA552", yellow: "#FFD84D" };
+
+// ---------------------------------------------------------------- state
+const S = {
+  convs: new Map(), msgs: new Map(), dirtyC: new Set(), dirtyM: new Map(),
+  cursor: 0, serverId: "", current: null, pendingProject: "", pendingMode: "",
+  projects: [], customModes: [], memories: [], tools: [], approval: new Set(),
+  busy: false, abort: null, attachments: [], context: null, lastSync: 0, syncError: "", sticky: new Map(),
+};
+const allModes = () => MODES.concat(S.customModes.map(m => ({ ...m, desc: "Your mode", thinking: m.thinking || "default", tools: m.tools || "all" })));
+const modeById = id => allModes().find(m => m.id === id) || MODES[0];
+const curConv = () => S.current ? S.convs.get(S.current) : null;
+const curMode = () => modeById(curConv() ? curConv().mode : S.pendingMode);
+const curProjectId = () => curConv() ? (curConv().project_id || "") : S.pendingProject;
+const project = id => S.projects.find(p => p.id === id);
+const msgsOf = id => (S.msgs.get(id) || []).filter(m => !m.deleted).sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1));
+
+function saveConv(c) { S.convs.set(c.id, c); S.dirtyC.add(c.id); }
+function saveMsg(m) {
+  if (!S.msgs.has(m.conv_id)) S.msgs.set(m.conv_id, []);
+  const list = S.msgs.get(m.conv_id); const i = list.findIndex(x => x.id === m.id);
+  if (i >= 0) list[i] = m; else list.push(m);
+  S.dirtyM.set(m.id, m);
+}
+
+// ---------------------------------------------------------------- sync (same protocol as the phone)
+let syncing = null;
+async function sync() {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    try {
+      for (let page = 0; page < 200; page++) {
+        const convs = [...S.dirtyC].map(id => S.convs.get(id)).filter(Boolean);
+        const msgs = [...S.dirtyM.values()].slice(0, 1500);
+        const resp = await api("/sync", { method: "POST", json: { since: S.cursor, conversations: convs, messages: msgs } });
+        if (S.serverId && resp.server_id !== S.serverId) { S.cursor = 0; }
+        S.serverId = resp.server_id;
+        convs.forEach(c => { if (S.convs.get(c.id) === c) S.dirtyC.delete(c.id); });
+        msgs.forEach(m => { if (S.dirtyM.get(m.id) === m) S.dirtyM.delete(m.id); });
+        let changed = false;
+        for (const c of resp.conversations) {
+          const local = S.convs.get(c.id);
+          if (local && local.updated_at >= c.updated_at) continue;
+          S.convs.set(c.id, c); changed = true;
+          if (c.deleted) S.msgs.delete(c.id);
+        }
+        for (const m of resp.messages) {
+          const list = S.msgs.get(m.conv_id) || []; const local = list.find(x => x.id === m.id);
+          if (local && local.updated_at >= m.updated_at) continue;
+          if (local) Object.assign(local, m); else list.push(m);
+          S.msgs.set(m.conv_id, list); changed = true;
+        }
+        S.cursor = resp.cursor;
+        if (changed && !S.busy) { renderSide(); renderMsgs(); }
+        if (!resp.more && S.dirtyM.size === 0 && S.dirtyC.size === 0) break;
+      }
+      S.lastSync = Date.now(); S.syncError = "";
+    } catch (e) {
+      S.syncError = e.status === 401 ? "Wrong API key" : "Sync failed: " + e.message;
+      if (e.status === 401) askKey();
+    } finally { syncing = null; renderSyncState(); }
+  })();
+  return syncing;
+}
+function renderSyncState() {
+  $("#syncState").textContent = S.syncError || (S.lastSync ? "Synced " + new Date(S.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Syncing…");
+  $("#dot").classList.toggle("on", S.busy);
+}
+
+async function loadMeta() {
+  const [t, p, md, mem] = await Promise.allSettled([api("/tools"), api("/projects"), api("/modes"), api("/memories")]);
+  if (t.status === "fulfilled") { S.tools = t.value.tools || []; S.approval = new Set(t.value.approval || []); }
+  if (p.status === "fulfilled") S.projects = p.value.projects || [];
+  if (md.status === "fulfilled") S.customModes = md.value.modes || [];
+  if (mem.status === "fulfilled") S.memories = mem.value.memories || [];
+  renderSide(); renderBar();
+}
+
+// ---------------------------------------------------------------- markdown
+function inline(s) {
+  s = esc(s);
+  s = s.replace(/!\[([^\]]*)\]\((diagram|image):([0-9a-f]{16})\)/g, (_, t, k, id) => `<img alt="${t}" src="${media(k + ":" + id)}">`);
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  return s;
+}
+function md(src) {
+  const out = []; const lines = String(src || "").replace(/\r/g, "").split("\n"); let i = 0, list = null, para = [];
+  const flush = () => { if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; } if (list) { out.push(`</${list}>`); list = null; } };
+  while (i < lines.length) {
+    const l = lines[i];
+    const fence = l.match(/^\s*```\s*([\w+#.-]*)/);
+    if (fence) {
+      flush(); const code = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i++]);
+      i++; out.push(`<pre><button class="cp">Copy</button><code data-lang="${esc(fence[1])}">${esc(code.join("\n"))}</code></pre>`); continue;
+    }
+    let m;
+    if ((m = l.match(/^(#{1,4})\s+(.*)/))) { flush(); out.push(`<h${Math.min(3, m[1].length)}>${inline(m[2])}</h${Math.min(3, m[1].length)}>`); }
+    else if ((m = l.match(/^\s*([-*•]|\d+[.)])\s+(.*)/))) {
+      const kind = /\d/.test(m[1]) ? "ol" : "ul"; if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; }
+      if (list !== kind) { if (list) out.push(`</${list}>`); out.push(`<${kind}>`); list = kind; }
+      out.push(`<li>${inline(m[2])}</li>`);
+    } else if ((m = l.match(/^>\s?(.*)/))) { flush(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); }
+    else if (/^\s*\|.*\|\s*$/.test(l)) {
+      flush(); const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) rows.push(lines[i]); i++; }
+      out.push("<table>" + rows.map((r, n) => "<tr>" + r.trim().slice(1, -1).split("|").map(c => n ? `<td>${inline(c.trim())}</td>` : `<th>${inline(c.trim())}</th>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    } else if (!l.trim()) flush();
+    else { if (list) { out.push(`</${list}>`); list = null; } para.push(l); }
+    i++;
+  }
+  flush(); return out.join("");
+}
+
+// ---------------------------------------------------------------- rendering
+function renderSide() {
+  const pid = curProjectId();
+  $("#projects").innerHTML = S.projects.length ? S.projects.map(p => `<div class="item${p.id === pid && !S.current ? " sel" : ""}" data-p="${p.id}">
+      <span style="color:${COLORS[p.color] || COLORS.cyan}">◆</span><span class="t">${esc(p.name)}</span><span class="sub">${[...S.convs.values()].filter(c => !c.deleted && c.project_id === p.id).length || ""}</span></div>`).join("")
+    : `<div class="sub" style="padding:2px 10px 6px">Group chats with shared instructions, notes and files.</div>`;
+  const convs = [...S.convs.values()].filter(c => !c.deleted).sort((a, b) => b.updated_at - a.updated_at);
+  $("#chats").innerHTML = convs.map(c => {
+    const p = project(c.project_id); const m = c.mode ? modeById(c.mode).icon + " " : "";
+    return `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${esc(m + (c.title || "Untitled"))}${p ? `<div class="sub" style="color:${COLORS[p.color] || COLORS.cyan}">◆ ${esc(p.name)}</div>` : ""}</span><button class="x" data-del="${c.id}" title="Delete chat">🗑</button></div>`;
+  }).join("") || `<div class="sub" style="padding:2px 10px">No chats yet.</div>`;
+}
+function renderBar() {
+  const c = curConv(), m = curMode(), p = project(curProjectId());
+  $("#title").textContent = NAME().toUpperCase();
+  $("#subtitle").textContent = S.status || (c ? c.title : "New chat");
+  $("#modeChip").textContent = `${m.icon} ${m.name.toUpperCase()} ▾`;
+  $("#projectChip").style.display = p ? "" : "none";
+  if (p) { $("#projectChip").textContent = "◆ " + p.name; $("#projectChip").style.color = COLORS[p.color] || COLORS.cyan; }
+  const info = S.context;
+  $("#meter").style.display = info && c ? "" : "none";
+  if (info) {
+    const f = Math.min(1, info.used / info.limit);
+    $("#meterFill").style.width = (f * 100) + "%";
+    $("#meterFill").style.background = f > .85 ? "var(--red)" : f > .6 ? "var(--gold)" : "var(--accent)";
+    $("#meterPct").textContent = Math.round(f * 100) + "%";
+  }
+  $("#send").textContent = S.busy ? "Stop" : "Send";
+  renderSyncState();
+}
+function renderMsgs(scroll = true) {
+  const wrap = $("#wrap"); const list = S.current ? msgsOf(S.current) : [];
+  if (!list.length && !S.streaming) {
+    const m = curMode(), p = project(curProjectId());
+    wrap.innerHTML = `<div class="empty">${p ? `<div class="hud" style="color:${COLORS[p.color]}">◆ ${esc(p.name)}</div><div class="sub">New chat in this project. ${esc(NAME())} knows its instructions, notes and files.</div><br>` : ""}
+      ${m.id !== "general" ? `<div class="hud" style="color:var(--glow)">${m.icon} ${esc(m.name)} mode</div><div class="sub">${esc(m.desc)}</div><br>` : ""}
+      <div class="star">✦</div><div class="hud" style="font-size:16px;color:var(--text);letter-spacing:5px">${esc(NAME().toUpperCase())} ONLINE</div>
+      <p>Same chats as your phone. Try “Remind me to check the 3D print at 9”, or open a project and drop in a datasheet.</p></div>`;
+    return;
+  }
+  const lastReply = [...list].reverse().find(m => m.role === "assistant");
+  wrap.innerHTML = list.map(m => msgHtml(m, lastReply && m.id === lastReply.id)).join("") + (S.streaming ? msgHtml(S.streaming, false, true) : "") +
+    (S.error ? `<div class="err">⚠ ${esc(S.error)}</div>` : "");
+  if (scroll) $("#msgs").scrollTop = $("#msgs").scrollHeight;
+}
+function msgHtml(m, canRetry, live) {
+  const name = NAME().toUpperCase();
+  if (m.role === "tool") {
+    const lines = m.text.split("\n"); const img = lines.find(l => /^!\[[^\]]*\]\(diagram:/.test(l.trim()));
+    return `<div class="tool">› ${esc(lines.filter(l => l !== img).join(" "))}${img ? `<div class="md">${inline(img.trim())}</div>` : ""}</div>`;
+  }
+  if (m.role === "summary") return `<div class="summary" data-sum="${m.id}"><div class="hud">✦ Context refreshed</div><div class="sumbody sub">${esc(NAME())} continues from a summary of the messages above. Click to read it.</div></div>`;
+  if (m.role === "user") {
+    const photos = [...m.text.matchAll(/!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g)].map(x => x[1]);
+    const text = m.text.replace(/!\[[^\]]*\]\(image:[0-9a-f]{16}\)/g, "").trim();
+    return `<div class="msg user">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${S.busy ? "" : `<button data-edit="${m.id}">Edit</button>`}</div>`}${photos.map(id => `<div class="md"><img src="${media("image:" + id)}"></div>`).join("")}${esc(text)}</div>`;
+  }
+  const wide = /```|\n\|/.test(m.text);
+  return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
+    <div class="who">✦ ${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>◌ Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
+    <div class="md">${m.text ? md(m.text) : '<span class="sub">…</span>'}</div></div>`;
+}
+
+// ---------------------------------------------------------------- prompt building (mirrors the phone app)
+function nowLine() {
+  const now = new Date(); const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const off = -now.getTimezoneOffset(); const sign = off >= 0 ? "+" : "-";
+  const offset = sign + String(Math.floor(Math.abs(off) / 60)).padStart(2, "0") + ":" + String(Math.abs(off) % 60).padStart(2, "0");
+  const date = now.toLocaleString("en-CA", { weekday: "long", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  return `Current time: ${date} UTC${offset} (${tz})`;
+}
+function oldMemorySection() {
+  if (!S.memories.length) return "";
+  let chars = 0; const lines = [];
+  for (const m of S.memories) { const l = `- [${m.id}] ${m.text}`; if (chars + l.length > 3500) break; lines.push(l); chars += l.length; }
+  return "What you remember about the user (id in brackets, for forget). Use naturally; don't recite.\n" + lines.join("\n");
+}
+// Time and per-message context go in front of the newest message only, so the start of the prompt stays the
+// same between messages and the model server can reuse its cache (much faster on a CPU).
+function withTurnContext(history, extra) {
+  const i = history.map(h => h.role).lastIndexOf("user"); if (i < 0) return history;
+  const block = `[Automatic context, not written by the user]\n${nowLine()}${extra ? "\n" + extra.trim() : ""}\n[End of context]\n\n`;
+  const out = history.slice(); out[i] = { ...out[i], content: block + out[i].content }; return out;
+}
+function systemPrompt(projectText, summary, mode, memory) {
+  const name = NAME();
+  let p = `You are ${name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
+The user is in the StellAI desktop web chat. Phone actions (alarms, apps, texts) aren't available here, but reminders still ring on their phones.
+Markdown is fine; always put code in fenced blocks with a language; avoid tables.
+Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically).
+Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
+A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.`;
+  if (mode.prompt) p += `\n\n## Current mode: ${mode.name}\n${mode.prompt}\nThese mode instructions take priority over the general style guidance above (such as keeping replies short).`;
+  if (memory) p += "\n\n" + memory;
+  if (projectText) p += "\n\n" + projectText;
+  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat.\n" + summary;
+  return p;
+}
+const PHOTO = /!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g, DIAGRAM = /!\[[^\]]*\]\(diagram:[0-9a-f]+\)/g;
+function buildHistory(list) {
+  const out = []; let pending = "";
+  const flush = () => { if (pending.trim()) out.push({ role: "assistant", content: pending.trim() }); pending = ""; };
+  for (const m of list) {
+    if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo]").trim(), _id: m.id, _text: m.text }); }
+    else if (m.role === "assistant" && m.text.trim()) pending += m.text + "\n";
+    else if (m.role === "tool") pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
+  }
+  flush(); return out;
+}
+async function prepare(convId, images) {
+  const c = S.convs.get(convId); const mode = modeById(c.mode); const list = msgsOf(convId);
+  let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
+  const summary = last >= 0 ? list[last].text : "";
+  const history = buildHistory(list.slice(last + 1));
+  const base = systemPrompt("", summary, mode, "");
+  const sticky = [...(S.sticky.get(convId) || [])];
+  const query = list.filter(m => m.role === "user").slice(-2).map(m => m.text.replace(PHOTO, "")).join("\n");
+  let plan = null;
+  try {
+    plan = await api("/context", { method: "POST", json: { project_id: c.project_id || "", query, fixed: base, images, mode: mode.id,
+      mode_tools: mode.tools || "all", split: true, sticky, thinking: thinkPref(mode),
+      last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), messages: history.map(h => ({ role: h.role, content: h.content })) } });
+  } catch { plan = null; }
+  let start = 0, info = null, needsRefresh = false, names = null, projectText = "", memory = oldMemorySection(), extra = "";
+  let think = thinkPref(mode) === "on";
+  if (plan) {
+    const limit = plan.n_ctx - plan.reply_reserve, used = plan.fixed_tokens + plan.project_tokens + plan.history_tokens;
+    info = { used, limit }; names = plan.tools; projectText = plan.project_context || "";
+    if ("memory_context" in plan) memory = plan.memory_context || "";
+    extra = plan.turn_context || "";
+    if ("think" in plan) think = !!plan.think;
+    start = Math.min(plan.keep_from || 0, history.length);
+    while (start < history.length && history[start].role !== "user") start++;
+    if (start >= history.length) start = Math.max(0, history.map(h => h.role).lastIndexOf("user"));
+    needsRefresh = history.filter(h => h.role === "user").length >= 2 && (start > 0 || used > limit * 0.85);
+  } else start = Math.max(0, history.length - 24);
+  const tools = S.tools.filter(t => !names || names.includes(t.function.name));
+  const hist = withTurnContext(history.slice(start), extra);
+  return { system: systemPrompt(projectText, summary, mode, memory), history: hist, info, needsRefresh, tools, mode, think };
+}
+// "on"/"off"/"auto": the chat's mode first, then this browser's setting (auto = think on hard questions only)
+function thinkPref(mode) {
+  if (mode.thinking === "on" || mode.thinking === "off") return mode.thinking;
+  const v = store.get("thinkingMode", null);
+  return v || (store.get("thinking", false) ? "on" : "auto");
+}
+async function compact(convId, keepUserTurns) {
+  const c = S.convs.get(convId); const list = msgsOf(convId);
+  let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
+  const after = list.slice(last + 1); const users = after.map((m, i) => m.role === "user" ? i : -1).filter(i => i >= 0);
+  let k = Math.min(keepUserTurns, users.length); while (k > 1 && users[users.length - k] === 0) k--;
+  const cut = k === 0 ? after.length : users[users.length - k]; const part = after.slice(0, cut);
+  if (!part.some(m => m.role === "user" || m.role === "assistant")) return false;
+  const res = await api("/summarize", { method: "POST", json: { previous: last >= 0 ? list[last].text : "", style: modeById(c.mode).style || "work",
+    messages: part.map(m => ({ role: m.role, content: m.text.replace(PHOTO, "[photo]").replace(DIAGRAM, "[diagram]") })) } });
+  if (!res.summary) return false;
+  let created;
+  if (cut < after.length) { const next = after[cut].created_at, prev = part[part.length - 1].created_at; created = next - prev >= 2 ? Math.floor((prev + next) / 2) : next - 1; }
+  else created = nextTs();
+  saveMsg({ id: uuid(), conv_id: convId, role: "summary", text: res.summary.trim(), reasoning: "", created_at: created, updated_at: nextTs(), deleted: false });
+  return true;
+}
+async function updateMeter() {
+  if (!S.current || S.busy) return;
+  try { const p = await prepare(S.current, 0); if (p.info) { S.context = p.info; renderBar(); } } catch {}
+}
+
+// ---------------------------------------------------------------- chatting
+function addMsg(convId, role, text, reasoning = "") {
+  const ts = nextTs(); const m = { id: uuid(), conv_id: convId, role, text, reasoning, created_at: ts, updated_at: ts, deleted: false };
+  saveMsg(m); return m;
+}
+function touch(convId) { const c = S.convs.get(convId); if (c) saveConv({ ...c, updated_at: nextTs() }); }
+
+async function send() {
+  if (S.busy) { stop(); return; }
+  const text = $("#input").value.trim(); const photos = S.attachments.slice();
+  if (!text && !photos.length) return;
+  if (S.editing) { truncateFrom(S.editing); S.editing = null; }
+  $("#input").value = ""; autosize(); S.attachments = []; renderAtts();
+  let convId = S.current;
+  if (!convId) {
+    convId = uuid(); const now = nextTs(); const t = (text || "Photo").replace(/\s+/g, " ");
+    saveConv({ id: convId, title: t.length <= 48 ? t : t.slice(0, 47) + "…", created_at: now, updated_at: now, deleted: false,
+      project_id: S.pendingProject, mode: S.pendingMode });
+    S.current = convId; S.pendingProject = ""; S.pendingMode = ""; store.set("current", convId);
+  }
+  for (const p of photos) { try { await api(`/images/${p.id}.jpg`, { method: "PUT", body: p.blob, headers: { "Content-Type": "image/jpeg" } }); } catch (e) { notice("Couldn't upload a photo: " + e.message); } }
+  addMsg(convId, "user", (text + photos.map(p => `\n![photo](image:${p.id})`).join("")).trim());
+  renderSide(); renderMsgs();
+  await run(convId, photos);
+}
+function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; }
+async function retry() {
+  if (S.busy || !S.current) return; const list = msgsOf(S.current);
+  const lastUser = list.map(m => m.role).lastIndexOf("user"); if (lastUser < 0) return;
+  if (lastUser + 1 < list.length) truncateFrom(list[lastUser + 1].id);
+  await run(S.current, []);
+}
+function truncateFrom(id) {
+  const list = msgsOf(S.current); const i = list.findIndex(m => m.id === id); if (i < 0) return;
+  const now = nextTs(); list.slice(i).forEach(m => saveMsg({ ...m, deleted: true, text: "", reasoning: "", updated_at: now }));
+}
+
+async function run(convId, photos) {
+  S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
+  const turn = []; const projectId = (S.convs.get(convId).project_id || "");
+  try {
+    let p = await prepare(convId, photos.length);
+    if (p.needsRefresh && !S.stopRequested) {
+      S.status = "Refreshing context…"; renderBar();
+      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
+    }
+    if (p.info) S.context = p.info;
+    const st = S.sticky.get(convId) || new Set(); p.tools.forEach(t => st.add(t.function.name)); S.sticky.set(convId, st);
+    // newest message with photos goes to the model as images
+    const hist = p.history.map(h => ({ role: h.role, content: h.content }));
+    const lastUser = p.history.map(h => h.role).lastIndexOf("user");
+    if (lastUser >= 0 && photos.length) {
+      const block = (hist[lastUser].content.match(/^\[Automatic context[\s\S]*?\[End of context\]\n\n/) || [""])[0];
+      const parts = [{ type: "text", text: block + (p.history[lastUser]._text.replace(PHOTO, "").trim() || "(The user sent a photo.)") }];
+      for (const ph of photos) parts.push({ type: "image_url", image_url: { url: ph.dataUrl } });
+      hist[lastUser] = { role: "user", content: parts };
+    }
+    const thinking = p.think;
+    // Qwen's recommended sampling for Qwen3.5 (model card); a mode's creativity overrides temperature
+    const code = p.mode.id === "programmer" || p.mode.id === "electronics";
+    for (let round = 0; round < 6; round++) {
+      S.status = "Contacting server…"; renderBar();
+      const body = { model: "local", stream: true, messages: [{ role: "system", content: p.system }, ...hist, ...turn],
+        tools: p.tools, chat_template_kwargs: { enable_thinking: thinking },
+        temperature: p.mode.temperature != null ? p.mode.temperature : (thinking ? (code ? 0.6 : 1.0) : 0.7),
+        top_p: thinking ? 0.95 : 0.8, top_k: 20, min_p: 0, presence_penalty: code ? 0 : 1.5 };
+      const result = await stream(body);
+      const finalText = result.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
+      S.streaming = null;
+      if (finalText || !result.toolCalls.length) addMsg(convId, "assistant", finalText || "(no reply)", result.reasoning);
+      const assistant = { role: "assistant", content: finalText };
+      if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
+      turn.push(assistant); renderMsgs();
+      if (!result.toolCalls.length) break;
+      for (const tc of result.toolCalls) {
+        let args = {}; try { args = JSON.parse(tc.arguments || "{}"); } catch {}
+        delete args.approved;
+        if (["project_note", "project_search"].includes(tc.name) && projectId) args.project_id = projectId;
+        let outcome;
+        if (!S.tools.some(t => t.function.name === tc.name)) {
+          outcome = { line: "✗ " + tc.name + " isn't available on the desktop", result: JSON.stringify({ ok: false, error: "That's a phone action; it isn't available in the desktop chat." }) };
+        } else if (S.approval.has(tc.name) && !(await approve(tc.name, args))) {
+          outcome = { line: "✗ You declined: " + tc.name.replace("github_", "GitHub "), result: JSON.stringify({ ok: false, error: "The user declined this action." }) };
+        } else {
+          if (S.approval.has(tc.name)) args.approved = true;
+          if (tc.name === "search_chats") args.current_conversation = convId;
+          // keep big results (pages, files) within the space left in Stella's context
+          const left = p.info ? p.info.limit - p.info.used - Math.floor(JSON.stringify(turn).length / 3) : null;
+          args._max_chars = left == null ? 12000 : Math.max(1500, Math.floor(left * 3 * 0.6));
+          S.status = toolLabel(tc.name) + "…"; renderBar();
+          try {
+            const r = await api("/tools/" + encodeURIComponent(tc.name), { method: "POST", json: args });
+            const res = r.result || {}; let line = (res.ok ? "✓ " : "✗ ") + (r.summary || tc.name);
+            if (res.ok && res.image) line += `\n![${(res.title || "Diagram").replace(/]/g, ")")}](diagram:${res.image})`;
+            outcome = { line, result: JSON.stringify(res) };
+          } catch (e) { outcome = { line: "✗ " + e.message, result: JSON.stringify({ ok: false, error: e.message }) }; }
+        }
+        addMsg(convId, "tool", outcome.line);
+        turn.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome.result });
+        renderMsgs();
+      }
+    }
+  } catch (e) {
+    S.streaming = null;
+    if (!S.stopRequested) S.error = e.status === 401 ? "The API key was rejected." : (e.message || String(e));
+  } finally {
+    if (S.stopRequested) S.error = "Stopped.";
+    S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
+    touch(convId); renderSide(); renderMsgs(); renderBar();
+    sync().then(updateMeter);
+    if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
+  }
+}
+const toolLabel = n => ({ render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
+  project_search: "Searching project files", library_search: "Searching the library", remember: "Remembering" }[n] || (n.startsWith("github") ? "Working with GitHub" : "Calculating"));
+
+async function stream(body) {
+  S.abort = new AbortController();
+  const r = await fetch("/llm/v1/chat/completions", { method: "POST", signal: S.abort.signal,
+    headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) { let msg = "HTTP " + r.status; try { const j = await r.json(); msg = (j.error && (j.error.message || j.error)) || msg; } catch {} const e = new Error(msg); e.status = r.status; throw e; }
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  const res = { content: "", reasoning: "", toolCalls: [] }; const calls = [];
+  S.streaming = { id: "live", role: "assistant", text: "", reasoning: "" };
+  let last = 0;
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+      if (!line.startsWith("data:")) continue; const data = line.slice(5).trim(); if (data === "[DONE]") continue;
+      let j; try { j = JSON.parse(data); } catch { continue; }
+      if (j.error) throw new Error(j.error.message || "server error");
+      const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
+      if (d.content) res.content += d.content;
+      if (d.reasoning_content) res.reasoning += d.reasoning_content;
+      for (const tc of d.tool_calls || []) {
+        const c = calls[tc.index || 0] || (calls[tc.index || 0] = { id: "", name: "", arguments: "" });
+        if (tc.id) c.id = tc.id; if (tc.function && tc.function.name) c.name += tc.function.name; if (tc.function && tc.function.arguments) c.arguments += tc.function.arguments;
+      }
+    }
+    S.streaming.text = res.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trimStart(); S.streaming.reasoning = res.reasoning;
+    S.status = !S.streaming.text && res.reasoning ? "Thinking…" : "Writing…";
+    if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); }
+  }
+  res.toolCalls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || "call_" + i }));
+  return res;
+}
+
+// ---------------------------------------------------------------- approvals (GitHub commits and pull requests)
+function approve(name, args) {
+  return new Promise(resolve => {
+    let body;
+    if (name === "github_commit") {
+      const files = (args.files || []).map((f, i) => `<details><summary>${esc(f.path)} <span class="sub">(${(f.content || "").split("\n").length} lines)</span></summary><pre style="max-height:300px;overflow:auto"><code>${esc(f.content || "")}</code></pre></details>`).join("");
+      body = `<p>${esc(NAME())} wants to <b>commit</b> to <code>${esc(args.repo || "your default repo")}</code>, branch <code>${esc(args.branch)}</code>:</p>
+        <p><i>${esc(args.message || "")}</i></p>${files}${(args.delete || []).length ? `<p>Delete: ${(args.delete || []).map(esc).join(", ")}</p>` : ""}
+        <p class="sub">Nothing goes to your main branch; you can review it on GitHub and merge with a pull request.</p>`;
+    } else {
+      body = `<p>${esc(NAME())} wants to <b>open a pull request</b> in <code>${esc(args.repo || "your default repo")}</code> from <code>${esc(args.branch)}</code>:</p>
+        <p><b>${esc(args.title || "")}</b></p><div class="md">${md(args.body || "")}</div>`;
+    }
+    const d = dialog(`<h2>Approve this GitHub change?</h2>${body}<div class="btns"><button id="no">Decline</button><button class="primary" id="yes">Approve</button></div>`);
+    d.querySelector("#yes").onclick = () => { d.remove(); resolve(true); };
+    d.querySelector("#no").onclick = () => { d.remove(); resolve(false); };
+  });
+}
+
+// ---------------------------------------------------------------- dialogs
+function dialog(html, onClose) {
+  const o = document.createElement("div"); o.className = "overlay";
+  o.innerHTML = `<div class="dialog">${html}</div>`;
+  o.addEventListener("mousedown", e => { if (e.target === o) { o.remove(); onClose && onClose(); } });
+  document.body.appendChild(o); return o;
+}
+function notice(text) { const n = $("#notice"); n.textContent = "✦ " + text + "  (click to dismiss)"; n.style.display = "block"; }
+function askKey() {
+  if (document.querySelector("#keyDlg")) return;
+  const d = dialog(`<h2 id="keyDlg">Connect to Stella</h2><p class="sub">Enter the API key shown by StellAI Server (Windows: the server window; Linux: the StellAI Server terminal).</p>
+    <input id="k" type="password" placeholder="API key" autocomplete="off"><div class="btns"><button class="primary" id="ok">Connect</button></div>`);
+  const go = () => { KEY = d.querySelector("#k").value.trim(); store.set("key", KEY); d.remove(); start(); };
+  d.querySelector("#ok").onclick = go; d.querySelector("#k").onkeydown = e => { if (e.key === "Enter") go(); };
+  setTimeout(() => d.querySelector("#k").focus(), 50);
+}
+function pickMode() {
+  const cur = curMode();
+  const d = dialog(`<h2>${S.current ? "Switch mode" : "Mode for this chat"}</h2><p class="sub">Changes how ${esc(NAME())} thinks and writes in this chat, from her next reply on.</p>` +
+    allModes().map(m => `<div class="pick${m.id === cur.id ? " sel" : ""}" data-m="${esc(m.id)}"><span class="ic">${esc(m.icon)}</span><div style="flex:1"><div>${esc(m.name)}</div><div class="sub">${esc(m.desc)}</div></div>${m.id === cur.id ? "✓" : ""}</div>`).join("") +
+    `<div class="btns"><span class="sub" style="flex:1">Create your own modes in the phone app (Manage modes).</span><button id="close">Close</button></div>`);
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelectorAll("[data-m]").forEach(el => el.onclick = () => {
+    const id = el.dataset.m === "general" ? "" : el.dataset.m;
+    if (S.current) { saveConv({ ...curConv(), mode: id, updated_at: nextTs() }); sync().then(updateMeter); } else S.pendingMode = id;
+    d.remove(); renderBar(); renderSide(); renderMsgs();
+  });
+}
+function pickProject() {
+  const pid = curProjectId();
+  const d = dialog(`<h2>${S.current ? "Move chat to…" : "Start this chat in…"}</h2>` +
+    [{ id: "", name: "No project", color: "" }].concat(S.projects).map(p => `<div class="pick${p.id === pid ? " sel" : ""}" data-p="${p.id}"><span class="ic" style="color:${COLORS[p.color] || "var(--muted)"}">◆</span><div style="flex:1">${esc(p.name)}</div>${p.id === pid ? "✓" : ""}</div>`).join("") +
+    `<div class="btns"><button id="close">Close</button></div>`);
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelectorAll("[data-p]").forEach(el => el.onclick = () => {
+    if (S.current) { saveConv({ ...curConv(), project_id: el.dataset.p, updated_at: nextTs() }); sync().then(updateMeter); } else S.pendingProject = el.dataset.p;
+    d.remove(); renderBar(); renderSide(); renderMsgs();
+  });
+}
+async function openProject(id) {
+  const isNew = id === "new", isLib = id === "library";
+  let p = isNew ? { id: "", name: "", color: "cyan", instructions: "", notes: [], files: [] } : isLib ? await api("/library") : await api("/projects").then(r => r.projects.find(x => x.id === id));
+  if (!p) return;
+  const fileRows = files => files.map(f => `<div class="row"><span>${f.kind === "pdf" ? "📄" : f.kind === "image" ? "🖼" : f.kind === "code" ? "⌨" : "📝"}</span><div class="t">${esc(f.name)}<div class="sub">${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(f.size / 1000)) + " KB"} · ~${f.tokens} tokens${f.note ? " · " + esc(f.note) : ""}</div></div><button class="ghost" data-view="${f.id}">View</button><button class="ghost" data-delf="${f.id}">🗑</button></div>`).join("") || `<div class="sub">No files yet.</div>`;
+  const d = dialog(`<h2>${isLib ? "📚 Library" : isNew ? "New project" : "◆ " + esc(p.name)}</h2>
+    ${isLib ? `<p class="sub">Documents ${esc(NAME())} can search from any chat: datasheets, manuals, reference notes.</p>` : `
+    <label class="sub">Name</label><input id="pn" value="${esc(p.name)}" maxlength="60">
+    <div style="display:flex;gap:8px;margin:10px 0">${Object.entries(COLORS).map(([k, v]) => `<span data-col="${k}" style="width:24px;height:24px;border-radius:50%;background:${v};cursor:pointer;outline:${k === p.color ? "3px solid #fff" : "none"}"></span>`).join("")}</div>
+    <label class="sub">Instructions for ${esc(NAME())}</label><textarea id="pi" rows="4">${esc(p.instructions)}</textarea>
+    <div class="btns" style="justify-content:flex-start"><button class="primary" id="psave">${isNew ? "Create project" : "Save changes"}</button>${isNew ? "" : `<button id="pchat">+ New chat in this project</button>`}</div>`}
+    ${isNew ? "" : `${isLib ? "" : `<h3 class="hud" style="margin-top:16px">Notes</h3><div class="list" id="notes">${p.notes.map(n => `<div class="row"><div class="t">${esc(n.text)}</div><button class="ghost" data-deln="${n.id}">🗑</button></div>`).join("") || `<div class="sub">No notes yet.</div>`}</div>
+      <div style="display:flex;gap:8px;margin-top:6px"><input id="nn" placeholder="e.g. Input is 12–24 V, output 5 V 3 A"><button id="nadd">Add</button></div>`}
+    <h3 class="hud" style="margin-top:16px">Files</h3><div class="list" id="files">${fileRows(p.files)}</div>
+    <div style="margin-top:8px"><button id="fadd">+ Add files</button> <span class="sub" id="fstat">PDF, Word, code, text or images, up to 25 MB each. You can also drop files here.</span><input type="file" id="fin" multiple hidden></div>
+    ${isLib ? "" : `<div class="btns"><button class="ghost" id="pdel" style="color:var(--red)">Delete project</button></div>`}`}
+    <div class="btns"><button id="close">Close</button></div>`, loadMeta);
+  const q = s => d.querySelector(s);
+  q("#close").onclick = () => { d.remove(); loadMeta(); };
+  let color = p.color;
+  d.querySelectorAll("[data-col]").forEach(el => el.onclick = () => { color = el.dataset.col; d.querySelectorAll("[data-col]").forEach(x => x.style.outline = x === el ? "3px solid #fff" : "none"); });
+  if (q("#psave")) q("#psave").onclick = async () => {
+    try { const saved = await api("/projects", { method: "POST", json: { id: p.id || undefined, name: q("#pn").value, color, instructions: q("#pi").value } });
+      d.remove(); await loadMeta(); if (isNew) openProject(saved.id); } catch (e) { alertBox(e.message); } };
+  if (q("#pchat")) q("#pchat").onclick = () => { d.remove(); newChat(p.id); };
+  if (q("#nadd")) q("#nadd").onclick = async () => { const t = q("#nn").value.trim(); if (!t) return; await api(`/projects/${p.id}/notes`, { method: "POST", json: { text: t } }); d.remove(); openProject(id); };
+  d.querySelectorAll("[data-deln]").forEach(el => el.onclick = async () => { await api(`/projects/${p.id}/notes/${el.dataset.deln}`, { method: "DELETE" }); d.remove(); openProject(id); });
+  d.querySelectorAll("[data-delf]").forEach(el => el.onclick = async () => { await api(`/projects/${p.id}/files/${el.dataset.delf}`, { method: "DELETE" }); d.remove(); openProject(id); });
+  d.querySelectorAll("[data-view]").forEach(el => el.onclick = async () => {
+    const r = await fetch(`/projects/${p.id}/files/${el.dataset.view}.txt?key=${encodeURIComponent(KEY)}`); const t = await r.text();
+    dialog(`<h2>What ${esc(NAME())} reads from this file</h2><pre style="white-space:pre-wrap;font-size:12px">${esc(t.slice(0, 30000))}${t.length > 30000 ? "\n[…]" : ""}</pre>`); });
+  const upload = async files => {
+    for (const f of files) {
+      if (f.size > 25e6) { q("#fstat").textContent = f.name + " is over 25 MB"; continue; }
+      q("#fstat").textContent = "Reading " + f.name + "…";
+      try { await api(`/projects/${p.id}/files?name=${encodeURIComponent(f.name)}`, { method: "PUT", body: f, headers: { "Content-Type": "application/octet-stream" } }); }
+      catch (e) { alertBox("Couldn't add " + f.name + ": " + e.message); }
+    }
+    d.remove(); openProject(id);
+  };
+  if (q("#fadd")) { q("#fadd").onclick = () => q("#fin").click(); q("#fin").onchange = () => upload([...q("#fin").files]);
+    q(".dialog").addEventListener("dragover", e => e.preventDefault()); q(".dialog").addEventListener("drop", e => { e.preventDefault(); upload([...e.dataTransfer.files]); }); }
+  if (q("#pdel")) q("#pdel").onclick = async () => { if (!confirm(`Delete “${p.name}”? Its notes and files are deleted; its chats are kept.`)) return;
+    await api(`/projects/${p.id}`, { method: "DELETE" }); d.remove(); await loadMeta(); sync(); };
+}
+function alertBox(text) { const d = dialog(`<p>${esc(text)}</p><div class="btns"><button id="ok">OK</button></div>`); d.querySelector("#ok").onclick = () => d.remove(); }
+async function openTasks() {
+  const [r, l] = await Promise.all([api("/reminders"), api("/lists")]);
+  const fmt = ms => new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const up = r.reminders.filter(x => !x.done);
+  const d = dialog(`<h2>⏰ Reminders & lists</h2>
+    <div class="list">${up.map(x => `<div class="row"><div class="t">${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
+    <div style="display:flex;gap:8px;margin-top:8px"><input id="rt" placeholder="New reminder"><input id="rw" type="datetime-local" style="max-width:220px"><button id="radd">Add</button></div>
+    ${Object.entries(l.lists).map(([name, items]) => `<h3 class="hud" style="margin-top:16px">${esc(name)} <button class="ghost" data-clear="${esc(name)}">Clear ticked</button></h3>
+      <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">🗑</button></div>`).join("")}</div>
+      <div style="display:flex;gap:8px;margin-top:4px"><input data-newin="${esc(name)}" placeholder="Add to ${esc(name)}"></div>`).join("")}
+    <div style="display:flex;gap:8px;margin-top:16px"><input id="ln" placeholder="New list, e.g. parts" style="max-width:200px"><input id="li" placeholder="First item"><button id="ladd">Add</button></div>
+    <div class="btns"><button id="close">Close</button></div>`);
+  const again = () => { d.remove(); openTasks(); };
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelectorAll("[data-cancel]").forEach(el => el.onclick = async () => { await api(`/reminders/${el.dataset.cancel}`, { method: "POST", json: { cancel: true } }); again(); });
+  d.querySelector("#radd").onclick = async () => { const t = d.querySelector("#rt").value.trim(), w = d.querySelector("#rw").value; if (!t || !w) return;
+    try { await api("/reminders", { method: "POST", json: { text: t, due_at: new Date(w).getTime() } }); again(); } catch (e) { alertBox(e.message); } };
+  d.querySelectorAll("[data-tick]").forEach(el => el.onchange = async () => { await api(`/lists/items/${el.dataset.tick}`, { method: "POST", json: { done: el.checked } }); again(); });
+  d.querySelectorAll("[data-deli]").forEach(el => el.onclick = async () => { await api(`/lists/items/${el.dataset.deli}`, { method: "DELETE" }); again(); });
+  d.querySelectorAll("[data-clear]").forEach(el => el.onclick = async () => { await api(`/lists/${encodeURIComponent(el.dataset.clear)}/clear`, { method: "POST", json: {} }); again(); });
+  d.querySelectorAll("[data-newin]").forEach(el => el.onkeydown = async e => { if (e.key === "Enter" && el.value.trim()) { await api(`/lists/${encodeURIComponent(el.dataset.newin)}`, { method: "POST", json: { items: [el.value.trim()] } }); again(); } });
+  d.querySelector("#ladd").onclick = async () => { const n = d.querySelector("#ln").value.trim(), i = d.querySelector("#li").value.trim(); if (!n || !i) return;
+    await api(`/lists/${encodeURIComponent(n)}`, { method: "POST", json: { items: [i] } }); again(); };
+}
+async function openSettings() {
+  let gh = {}; try { gh = await api("/github"); } catch {}
+  const d = dialog(`<h2>⚙ Settings</h2>
+    <label class="sub">Assistant name (this browser)</label><input id="nm" value="${esc(NAME())}">
+    <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
+    <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <h3 class="hud" style="margin-top:18px">GitHub</h3>
+    <p class="sub">${gh.token_set ? (gh.user ? "Connected as <b>" + esc(gh.user) + "</b>." : "Token saved" + (gh.error ? ": " + esc(gh.error) : ".")) : "Not connected: public repositories only, read-only."}
+    For private repos and commits, create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens) with access to your repos and permissions: Contents read/write, Pull requests read/write, Actions read, Issues read.</p>
+    <input id="tok" type="password" placeholder="${gh.token_set ? "•••••••• (leave empty to keep)" : "GitHub token"}" autocomplete="off">
+    <input id="repo" style="margin-top:8px" placeholder="Default repository, e.g. courier-iot/StellAI" value="${esc(gh.default_repo || "")}">
+    <div class="btns" style="justify-content:flex-start">${gh.token_set ? `<button class="ghost" id="untok">Remove token</button>` : ""}</div>
+    <h3 class="hud" style="margin-top:18px">This browser</h3>
+    <button id="logout">Forget the API key here</button>
+    <div class="btns"><button id="close">Cancel</button><button class="primary" id="save">Save</button></div>`);
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#logout").onclick = () => { store.set("key", ""); location.reload(); };
+  if (d.querySelector("#untok")) d.querySelector("#untok").onclick = async () => { await api("/github", { method: "POST", json: { token: "" } }); d.remove(); openSettings(); };
+  d.querySelector("#save").onclick = async () => {
+    store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value);
+    const body = { default_repo: d.querySelector("#repo").value.trim() }; const t = d.querySelector("#tok").value.trim(); if (t) body.token = t;
+    try { const st = await api("/github", { method: "POST", json: body }); d.remove(); if (st.error) alertBox("GitHub: " + st.error); renderBar(); renderMsgs(); }
+    catch (e) { alertBox(e.message); }
+  };
+}
+
+// ---------------------------------------------------------------- search past chats
+let searchTimer = 0, searchSeq = 0;
+function renderSearch(q, hits, note) {
+  const ql = q.toLowerCase(); const seen = new Set(hits.map(h => h.conversation_id));
+  const titles = [...S.convs.values()].filter(c => !c.deleted && !seen.has(c.id) && (c.title || "").toLowerCase().includes(ql))
+    .sort((a, b) => b.updated_at - a.updated_at);
+  $("#searchResults").innerHTML = (note ? `<div class="sub" style="padding:4px 10px">${esc(note)}</div>` : "")
+    + hits.map(h => `<div class="item hit${h.conversation_id === S.current ? " sel" : ""}" data-c="${esc(h.conversation_id)}"><span class="t" style="white-space:normal">${esc(h.title || "Untitled")}
+        <div class="sub">${esc(h.date || "")}</div><div class="ex">${esc(h.excerpt || "")}</div></span></div>`).join("")
+    + titles.map(c => `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${esc(c.title || "Untitled")}</span></div>`).join("")
+    || `<div class="sub" style="padding:4px 10px">${q.length < 3 ? "Keep typing…" : "No chats found."}</div>`;
+}
+function onSearch() {
+  const q = $("#search").value.trim(); clearTimeout(searchTimer);
+  $("#searchView").style.display = q ? "" : "none"; $("#listView").style.display = q ? "none" : "";
+  if (!q) return;
+  renderSearch(q, [], q.length >= 3 ? "Searching…" : "");
+  if (q.length < 3) return;
+  const seq = ++searchSeq;
+  searchTimer = setTimeout(async () => {
+    try { const r = await api("/search?q=" + encodeURIComponent(q)); if (seq === searchSeq) renderSearch(q, r.results || []); }
+    catch { if (seq === searchSeq) renderSearch(q, [], "Server search unavailable; title matches only."); }
+  }, 400);
+}
+
+// ---------------------------------------------------------------- server: status, models, health check, backups
+async function openServer() {
+  const d = dialog(`<h2>🖥 Server</h2><div id="sv">Loading…</div>
+    <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button><div id="docOut"></div>
+    <h3 class="hud" style="margin-top:18px">Backups</h3><div id="bk">Loading…</div>
+    <div class="btns"><button id="close">Close</button></div>`);
+  let timer = 0, closed = false;
+  d.querySelector("#close").onclick = () => { closed = true; clearTimeout(timer); d.remove(); };
+  const msg = (t, bad) => { const n = document.createElement("p"); n.className = "sub"; n.style.color = bad ? "var(--red)" : "var(--gold)"; n.textContent = t; d.querySelector("#sv").prepend(n); };
+  const fmtUp = s => s < 3600 ? Math.floor(s / 60) + " min" : s < 86400 ? Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min" : Math.floor(s / 86400) + " days";
+  async function loadServer() {
+    if (closed || !d.isConnected) return;
+    let st; try { st = await api("/server"); } catch (e) { d.querySelector("#sv").innerHTML = `<p class="err">Couldn't reach the server: ${esc(e.message)}</p>`; return; }
+    const rows = [["Model", st.model || st.model_path || "unknown"], ["Context", st.context ? st.context + " tokens" : "–"],
+      ["Runs on", (st.backend || "").toUpperCase() || "–"], ["Memory", st.ram_gb + " GB RAM" + (st.vram_gb ? " · " + st.vram_gb + " GB GPU" : "")], ["Up for", fmtUp(st.uptime_s || 0)]];
+    const models = st.models || [];
+    d.querySelector("#sv").innerHTML = `<p><span class="status${st.loaded ? " on" : ""}"></span> ${st.loaded ? "Running" : "Loading the model…"}</p>
+      <div class="list">${rows.map(([k, v]) => `<div class="row"><span class="sub" style="width:90px">${k}</span><span class="t">${esc(v)}</span></div>`).join("")}</div>
+      ${models.length ? `<h3 class="hud" style="margin-top:18px">Model</h3><p class="sub">Switching takes about a minute while the new model loads.</p>
+      <div class="list">${models.map(m => { const dl = m.download || null; const pct = dl && dl.total ? Math.floor(dl.done * 100 / dl.total) : 0;
+        return `<div class="row" style="flex-wrap:wrap"><div class="t"><b style="${m.current ? "color:var(--accent)" : ""}">${esc(m.label)}${m.current ? " · in use" : ""}</b>
+          <div class="sub">${esc(m.about || "")} ${m.size_gb} GB, ${Math.round((m.context || 0) / 1024)}K context.</div>
+          ${dl && dl.state === "downloading" ? `<div class="bar2"><div style="width:${pct}%"></div></div><div class="sub">Downloading… ${pct}%</div>` : ""}
+          ${dl && dl.state === "failed" ? `<div class="sub" style="color:var(--red)">Download failed: ${esc(dl.error)}</div>` : ""}</div>
+          ${m.current ? "" : m.installed ? `<button data-sw="${esc(m.key)}">Switch</button>` : dl && dl.state === "downloading" ? "" : `<button data-dl="${esc(m.key)}">Download</button>`}</div>`; }).join("")}</div>`
+      : `<p class="sub">This server can't switch models from here yet (re-run its setup to enable it).</p>`}`;
+    d.querySelectorAll("[data-sw]").forEach(b => b.onclick = async () => {
+      const m = models.find(x => x.key === b.dataset.sw); if (!confirm(`Switch to ${m.label}? ${NAME()} is unavailable for about a minute while it loads.`)) return;
+      try { const r = await api("/server/model", { method: "POST", json: { key: m.key } }); await loadServer(); msg(r.message || "Switching…"); } catch (e) { msg(e.message, true); } });
+    d.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
+      try { const r = await api("/server/download", { method: "POST", json: { key: b.dataset.dl } }); await loadServer(); msg(r.message || "Downloading…"); } catch (e) { msg(e.message, true); } });
+    const busy = !st.loaded || models.some(m => m.download && m.download.state === "downloading");
+    clearTimeout(timer); if (busy) timer = setTimeout(loadServer, 2500);
+  }
+  async function loadBackups() {
+    let b; try { b = await api("/backups"); } catch (e) { d.querySelector("#bk").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    d.querySelector("#bk").innerHTML = `<p class="sub">Every night the server saves your chats, memories, projects, photos and wake words. It keeps the last ${b.keep}.</p>
+      <p>${b.last ? "Last backup: " + new Date(b.last).toLocaleString() : "No backup yet"}</p>${b.error ? `<p class="err">${esc(b.error)}</p>` : ""}
+      <button class="primary" id="bnow">Back up now</button>
+      <label class="sub" style="display:block;margin-top:10px">Also copy to (folder on the server, e.g. a USB drive)</label>
+      <div style="display:flex;gap:8px"><input id="bcopy" value="${esc(b.copy_to || "")}" placeholder="/media/you/USB/stellai"><input id="bkeep" type="number" min="2" max="60" value="${b.keep}" style="width:80px" title="How many to keep"><button id="bsave">Save</button></div>
+      <p class="sub">To restore: Linux: run stellai-restore.sh on the server. Windows: StellAI app → Restore a backup.</p>
+      <div class="list">${(b.backups || []).slice(0, 14).map(f => `<div class="row"><span class="t sub">${esc(f.name)}</span><span class="sub">${Math.round(f.size / 1e6)} MB</span></div>`).join("")}</div>`;
+    d.querySelector("#bnow").onclick = async e => { e.target.disabled = true; e.target.textContent = "Backing up…";
+      try { await api("/backups", { method: "POST", json: {} }); } catch (err) { alertBox(err.message); } loadBackups(); };
+    d.querySelector("#bsave").onclick = async () => {
+      try { await api("/backups/config", { method: "POST", json: { copy_to: d.querySelector("#bcopy").value.trim(), keep: +d.querySelector("#bkeep").value || 14 } }); loadBackups(); }
+      catch (err) { alertBox(err.message); } };
+  }
+  d.querySelector("#doc").onclick = async e => {
+    e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Checking… (takes a few seconds)</p>`;
+    try { const r = await api("/doctor"); const ic = { ok: ["✓", "var(--accent)"], warn: ["!", "var(--gold)"], fail: ["✗", "var(--red)"] };
+      d.querySelector("#docOut").innerHTML = (r.checks || []).map(c => { const [i, col] = ic[c.state] || ic.fail;
+        return `<div class="check"><span class="ic" style="color:${col}">${i}</span><div><b>${esc(c.name)}</b>: ${esc(c.detail)}${c.fix && c.state !== "ok" ? `<div class="sub">→ ${esc(c.fix)}</div>` : ""}</div></div>`; }).join(""); }
+    catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  loadServer(); loadBackups();
+}
+
+// ---------------------------------------------------------------- photos
+async function addPhotos(files) {
+  for (const f of files) {
+    if (!f.type.startsWith("image/")) continue;
+    const img = await createImageBitmap(f); const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+    const c = document.createElement("canvas"); c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.85));
+    S.attachments.push({ id: hex16(), blob, dataUrl: c.toDataURL("image/jpeg", 0.85) });
+  }
+  renderAtts();
+}
+function renderAtts() {
+  $("#atts").innerHTML = S.attachments.map((a, i) => `<div class="a"><img src="${a.dataUrl}"><button data-ra="${i}">✕</button></div>`).join("");
+  $("#atts").querySelectorAll("[data-ra]").forEach(b => b.onclick = () => { S.attachments.splice(+b.dataset.ra, 1); renderAtts(); });
+}
+
+// ---------------------------------------------------------------- wiring
+function newChat(projectId = "") { if (S.busy) stop(); S.current = null; S.pendingProject = projectId; S.pendingMode = ""; S.context = null; S.error = null; S.editing = null; store.set("current", ""); renderSide(); renderBar(); renderMsgs(); $("#input").focus(); }
+function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); }
+function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(240, t.scrollHeight) + "px"; }
+$("#newChat").onclick = () => newChat();
+$("#newProject").onclick = () => openProject("new");
+$("#openLibrary").onclick = () => openProject("library");
+$("#openTasks").onclick = openTasks;
+$("#openSettings").onclick = openSettings;
+$("#openServer").onclick = openServer;
+$("#search").addEventListener("input", onSearch);
+$("#search").addEventListener("keydown", e => { if (e.key === "Escape") { $("#search").value = ""; onSearch(); } });
+$("#searchResults").onclick = e => { const el = e.target.closest("[data-c]"); if (el) { $("#search").value = ""; onSearch(); openChat(el.dataset.c); } };
+$("#modeChip").onclick = pickMode;
+$("#projectChip").onclick = () => openProject(curProjectId());
+$("#meter").onclick = () => {
+  const i = S.context; if (!i) return;
+  const d = dialog(`<h2>${esc(NAME())}'s memory for this chat</h2><p>${i.used} of ${i.limit} tokens used (${Math.round(Math.min(1, i.used / i.limit) * 100)}%).</p>
+    <p class="sub">When it fills up, ${esc(NAME())} refreshes it automatically: she summarizes the older part of the chat and continues from the summary. Every message stays here and on your other devices.</p>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="ref" ${S.busy ? "disabled" : ""}>Refresh now</button></div>`);
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#ref").onclick = async () => { d.remove(); S.busy = true; S.status = "Refreshing context…"; renderBar();
+    try { if (!(await compact(S.current, 0))) notice("Nothing new to summarize yet."); } catch (e) { notice("Couldn't refresh: " + e.message); }
+    S.busy = false; S.status = ""; renderMsgs(); renderBar(); sync().then(updateMeter); };
+};
+$("#send").onclick = send;
+$("#attach").onclick = () => $("#file").click();
+$("#file").onchange = () => { addPhotos([...$("#file").files]); $("#file").value = ""; };
+$("#notice").onclick = () => { $("#notice").style.display = "none"; };
+$("#input").addEventListener("input", autosize);
+$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+$("#input").addEventListener("paste", e => { const files = [...(e.clipboardData || {}).files || []].filter(f => f.type.startsWith("image/")); if (files.length) { e.preventDefault(); addPhotos(files); } });
+$("#menuBtn").onclick = () => $("#side").classList.toggle("open");
+if (matchMedia("(max-width:760px)").matches) $("#menuBtn").style.display = "";
+$("#projects").onclick = e => { const el = e.target.closest("[data-p]"); if (el) openProject(el.dataset.p); };
+$("#chats").onclick = e => {
+  const del = e.target.closest("[data-del]");
+  if (del) { const c = S.convs.get(del.dataset.del); if (c && confirm(`Delete “${c.title}” on all your devices?`)) {
+    saveConv({ ...c, deleted: true, updated_at: nextTs() }); S.msgs.delete(c.id); if (S.current === c.id) newChat(); renderSide(); sync(); } return; }
+  const el = e.target.closest("[data-c]"); if (el) openChat(el.dataset.c);
+};
+$("#wrap").onclick = e => {
+  const t = e.target;
+  if (t.classList.contains("cp")) { navigator.clipboard.writeText(t.nextElementSibling.textContent); t.textContent = "Copied"; setTimeout(() => t.textContent = "Copy", 1200); return; }
+  if (t.dataset.copy) { const m = msgsOf(S.current).find(x => x.id === t.dataset.copy); if (m) navigator.clipboard.writeText(m.text.replace(/!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)/g, "").trim()); return; }
+  if (t.dataset.retry) { retry(); return; }
+  if (t.dataset.edit) { const m = msgsOf(S.current).find(x => x.id === t.dataset.edit); if (!m) return; S.editing = m.id;
+    $("#input").value = m.text.replace(PHOTO, "").trim(); autosize(); $("#input").focus(); notice("Editing a message: sending replaces it and the replies after it."); return; }
+  if (t.hasAttribute("data-think")) { const b = t.nextElementSibling; b.style.display = b.style.display === "none" ? "block" : "none"; b.className = "think"; return; }
+  const sum = t.closest("[data-sum]"); if (sum) { const m = msgsOf(S.current).find(x => x.id === sum.dataset.sum); const b = sum.querySelector(".sumbody");
+    if (b.classList.contains("md")) { b.className = "sumbody sub"; b.textContent = NAME() + " continues from a summary of the messages above. Click to read it."; } else { b.className = "sumbody md"; b.innerHTML = md(m.text); } return; }
+  if (t.tagName === "IMG") { const z = document.createElement("div"); z.className = "zoom"; z.innerHTML = `<img src="${t.src}">`; z.onclick = () => z.remove(); document.body.appendChild(z); }
+};
+
+async function start() {
+  if (!KEY) { askKey(); return; }
+  S.current = store.get("current", "") || null;
+  renderBar(); renderMsgs();
+  await sync();
+  if (S.current && !S.convs.has(S.current)) S.current = null;
+  await loadMeta();
+  renderSide(); renderMsgs(); updateMeter();
+}
+setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
+setInterval(() => { if (KEY) loadMeta(); }, 300000);
+start();
+</script>
+</body>
+</html>

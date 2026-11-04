@@ -70,7 +70,15 @@ class ProjectManager(private val app: App) {
         arr.optJSONObject(i)?.let { Project.fromJson(it) }
     }.filter { it.id.isNotBlank() }
 
-    fun get(id: String?): Project? = if (id.isNullOrEmpty()) null else items.firstOrNull { it.id == id }
+    /** The shared document library (files any chat can search). */
+    var library by mutableStateOf<Project?>(null)
+        private set
+
+    fun get(id: String?): Project? = when {
+        id.isNullOrEmpty() -> null
+        id == LIBRARY -> library
+        else -> items.firstOrNull { it.id == id }
+    }
 
     private val url get() = app.settings.serverUrl
     private val key get() = app.settings.apiKey
@@ -82,6 +90,11 @@ class ProjectManager(private val app: App) {
         items.addAll(parse(arr))
         app.settings.projectCache = arr.toString()
         status = ""
+        try {
+            library = Project.fromJson(withContext(Dispatchers.IO) { HubApi.library(url, key) })
+        } catch (_: Exception) {
+            // older server without a library
+        }
         true
     } catch (e: Exception) {
         status = "Couldn't reach the server: ${app.engine.friendlyError(e)}"
@@ -171,5 +184,6 @@ class ProjectManager(private val app: App) {
 
     companion object {
         const val MAX_FILE = 25_000_000
+        const val LIBRARY = "library"
     }
 }
