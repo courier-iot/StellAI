@@ -186,7 +186,7 @@ def detect():
     return {"ram_gb": _ram_gb(), "cpu": cpu, "cores": cores, "threads": logical,
             "gpus": [g["name"] for g in gpus] or ([nvidia["name"]] if nvidia else []),
             "backend": backend, "gpu": gpu["name"] if gpu else "", "vram_gb": gpu["vram_gb"] if gpu else 0,
-            "cuda": cuda}
+            "cuda": cuda, "cuda_driver": nvidia["cuda"] if nvidia else ""}
 
 
 # ============================================================================ models
@@ -237,6 +237,7 @@ def plan(hw, model_key, vision=True, whisper=None):
     mmproj = m["file"].replace(".gguf", ".mmproj-F16.gguf")
     return {
         "model_key": model_key, "label": m["label"], "backend": hw["backend"], "cuda": hw.get("cuda", ""),
+        "cuda_driver": hw.get("cuda_driver", ""),
         "model_file": m["file"], "model_url": f"{HF}/{m['repo']}/resolve/main/{m['file']}",
         "model_gb": m["size_gb"],
         "vision": bool(vision), "mmproj_file": mmproj,
@@ -260,9 +261,13 @@ def http_text(url, timeout=30):
         return r.read().decode().strip()
 
 
-def pick_llama_assets(assets, backend, cuda=""):
+def pick_llama_assets(assets, backend, cuda="", driver="", skip=()):
     """From a llama.cpp release's asset names, pick the zips for this backend (x64 Windows).
 
+    For CUDA: the newest build whose CUDA version the driver supports (driver = the "CUDA Version"
+    nvidia-smi reports, e.g. "13.0"), skipping versions that already failed on this PC (skip, e.g.
+    ["13.1"]). A build newer than the driver fails to load with "PTX was compiled with an unsupported
+    toolchain". Falls back to Vulkan when no CUDA build fits.
     Returns a list of asset dicts, main build first; for CUDA the matching runtime DLL zip too."""
     names = {a["name"]: a for a in assets}
 
@@ -272,13 +277,22 @@ def pick_llama_assets(assets, backend, cuda=""):
         return names[hits[0]] if hits else None
 
     if backend == "cuda":
-        majors = [cuda] if cuda == "12" else ["13", "12"] if cuda == "13" else ["12"]
-        for major in majors:
-            main = find(rf"^llama-.*-bin-win-cuda-{major}\.\d+-x64\.zip$")
-            if main:
-                ver = re.search(rf"cuda-({major}\.\d+)-x64", main["name"]).group(1)
-                rt = find(rf"^cudart-llama-.*bin-win-cuda-{re.escape(ver)}-x64\.zip$")
-                return [main] + ([rt] if rt else [])
+        majors = ["12"] if cuda == "12" else ["13", "12"] if cuda == "13" else ["12"]
+        limit = _version_tuple(driver) if driver else None
+        builds = []
+        for n in names:
+            m = re.match(r"^llama-.*-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$", n)
+            if not m or m.group(1) not in majors or f"{m.group(1)}.{m.group(2)}" in skip:
+                continue
+            ver = (int(m.group(1)), int(m.group(2)))
+            if limit and limit != (0,) and ver > limit:
+                continue
+            builds.append((ver, n))
+        if builds:
+            ver, main = max(builds)
+            v = f"{ver[0]}.{ver[1]}"
+            rt = find(rf"^cudart-llama-.*bin-win-cuda-{re.escape(v)}-x64\.zip$")
+            return [names[main]] + ([rt] if rt else [])
         backend = "vulkan"
     if backend == "vulkan":
         main = find(r"^llama-.*-bin-win-vulkan-x64\.zip$")
@@ -464,6 +478,85 @@ def is_installed(cfg):
         os.path.isfile(cfg.p("models", pl["model_file"]))
 
 
+def cuda_driver_version(pl=None):
+    """The newest CUDA version the installed NVIDIA driver supports ("13.0"), or ""."""
+    try:
+        nv = _nvidia()
+    except Exception:
+        nv = None
+    return (nv or {}).get("cuda") or (pl or {}).get("cuda_driver", "")
+
+
+def install_llama(cfg, pl, status, prog, cancel):
+    """Downloads the llama.cpp build for plan pl (if it isn't there yet). Returns its assets."""
+    bin_llama, dl = cfg.p("bin", "llama"), cfg.p("downloads")
+    os.makedirs(dl, exist_ok=True)
+    status("Finding the latest llama.cpp build…")
+    rel = llama_release()
+    assets = pick_llama_assets(rel["assets"], pl["backend"], pl.get("cuda", ""),
+                               driver=cuda_driver_version(pl) if pl["backend"] == "cuda" else "",
+                               skip=cfg.get("bad_cuda") or [])
+    want_tag = f"{rel['tag_name']}:{pl['backend']}:{assets[0]['name']}"
+    if cfg.get("llama_build") != want_tag or not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
+        shutil.rmtree(bin_llama, ignore_errors=True)
+        for a in assets:
+            z = download(a["browser_download_url"], os.path.join(dl, a["name"]), prog(a["name"]), cancel)
+            status(f"Unpacking {a['name']}…")
+            extract_flat(z, bin_llama)
+        if not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
+            raise RuntimeError("llama-server.exe wasn't in the download")
+        cfg.set(llama_build=want_tag)
+    return assets
+
+
+# Errors that mean "this CUDA build can't run with this driver/GPU" (not out-of-memory or a bad model)
+CUDA_BUILD_ERRORS = re.compile(
+    r"PTX was compiled with an unsupported toolchain|no kernel image is available|"
+    r"CUDA driver version is insufficient|cudaErrorUnsupportedPtxVersion|"
+    r"cudaErrorInsufficientDriver|ggml_cuda_init: failed to initialize CUDA", re.I)
+
+
+def cuda_build_failed(log_text):
+    return bool(CUDA_BUILD_ERRORS.search(log_text or ""))
+
+
+def current_cuda_build(cfg):
+    """CUDA version of the installed llama.cpp build ("13.1"), or "" for Vulkan/CPU."""
+    m = re.search(r"-bin-win-cuda-(\d+\.\d+)-x64\.zip", cfg.get("llama_build") or "")
+    return m.group(1) if m else ""
+
+
+def recover_from_cuda_failure(cfg, status=lambda t: None, cancel=None):
+    """After llama-server failed with a CUDA build/driver error: remember that build as bad and
+    install the next one down (an older CUDA build, then Vulkan). Returns a sentence for the log."""
+    pl = dict(cfg.get("plan") or {})
+    bad = list(cfg.get("bad_cuda") or [])
+    ver = current_cuda_build(cfg)
+    if ver and ver not in bad:
+        bad.append(ver)
+    cfg.set(bad_cuda=bad)
+    if pl.get("backend") == "cuda" and ver == "":
+        pl["backend"] = "vulkan"      # not a CUDA build after all: nothing lower to try
+    attempts = cfg.get("cuda_recoveries", 0) + 1
+    cfg.set(cuda_recoveries=attempts)
+    if attempts > 4:
+        pl["backend"] = "vulkan"
+    def prog(label):
+        return lambda done, total: status(f"{label}: {done / 2**20:.0f} MB")
+    assets = install_llama(cfg, pl, status, prog, cancel)
+    if "-cuda-" not in assets[0]["name"]:
+        pl["backend"] = "vulkan"
+        hw = dict(cfg.get("hardware") or {})
+        if hw:
+            hw["backend"] = "vulkan"
+            cfg.set(hardware=hw)
+    cfg.set(plan=pl)
+    used = assets[0]["name"]
+    return (f"Your NVIDIA driver can't run the CUDA {ver or ''} build, so StellAI switched to "
+            + (f"the CUDA {current_cuda_build(cfg)} build." if "-cuda-" in used else "Vulkan (still uses the GPU).")
+            + " Updating the NVIDIA driver lets it use the newest build.")
+
+
 def install(cfg, pl, status, progress, cancel):
     """Download engines and models for plan pl. status(text), progress(fraction or None)."""
     bin_llama, bin_whisper, models = cfg.p("bin", "llama"), cfg.p("bin", "whisper"), cfg.p("models")
@@ -480,19 +573,7 @@ def install(cfg, pl, status, progress, cancel):
                 status(f"{label}: {done / 2**20:.0f} MB")
         return f
 
-    status("Finding the latest llama.cpp build…")
-    rel = llama_release()
-    assets = pick_llama_assets(rel["assets"], pl["backend"], pl.get("cuda", ""))
-    want_tag = f"{rel['tag_name']}:{pl['backend']}:{assets[0]['name']}"
-    if cfg.get("llama_build") != want_tag or not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
-        shutil.rmtree(bin_llama, ignore_errors=True)
-        for a in assets:
-            z = download(a["browser_download_url"], os.path.join(dl, a["name"]), prog(a["name"]), cancel)
-            status(f"Unpacking {a['name']}…")
-            extract_flat(z, bin_llama)
-        if not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
-            raise RuntimeError("llama-server.exe wasn't in the download")
-        cfg.set(llama_build=want_tag)
+    assets = install_llama(cfg, pl, status, prog, cancel)
 
     if not os.path.isfile(os.path.join(bin_whisper, "whisper-server.exe")):
         status("Finding the latest whisper.cpp build…")

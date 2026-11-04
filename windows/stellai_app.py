@@ -536,9 +536,30 @@ class App:
             if s == "crashed" and not getattr(self, f"_reported_{name}", False):
                 setattr(self, f"_reported_{name}", True)
                 self.log(f"{label} stopped. Last lines of its log:\n" + self.servers.log_tail(name))
+                if name == "llama" and ws.cuda_build_failed(self.servers.log_tail("llama", 80)):
+                    self._recover_cuda()
             elif s != "crashed":
                 setattr(self, f"_reported_{name}", False)
         self._tick_id = self.root.after(2000, self._tick)
+
+    def _recover_cuda(self):
+        """The CUDA build doesn't work with this NVIDIA driver: install an older build (or Vulkan) and retry."""
+        if getattr(self, "_recovering", False):
+            return
+        self._recovering = True
+        self.log("The GPU driver can't run this CUDA build of the AI engine. Downloading one that fits…")
+
+        def work():
+            try:
+                msg = ws.recover_from_cuda_failure(self.cfg, status=lambda t: None)
+                self.q.put(("log", msg))
+                self.servers.restart_llama()
+            except Exception as e:
+                self.q.put(("log", f"Couldn't switch builds automatically ({type(e).__name__}: {e}). "
+                                   "Update the NVIDIA driver, or use Change model → re-detect."))
+            finally:
+                self._recovering = False
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ health check and backups
     def run_doctor(self):

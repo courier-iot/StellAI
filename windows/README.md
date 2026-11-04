@@ -54,6 +54,10 @@ Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardw
 - The phone app's **Server** screen and the desktop chat's **🖥 Server** button show status, switch models and run the same checks.
 - **Wake words folder**: drop a trained `hey_stella.onnx` here and it appears in the phone app's wake word list.
 
+## If the AI model won't start on an NVIDIA GPU
+
+llama.cpp publishes CUDA builds for several CUDA versions. A build newer than your NVIDIA driver fails with *"the provided PTX was compiled with an unsupported toolchain"*. StellAI picks the newest build your driver supports, and if a build still fails it switches by itself to an older CUDA build, then to Vulkan (which still uses the GPU), and says so in the log. Updating the NVIDIA driver (GeForce Experience / nvidia.com) lets it use the newest, fastest build: after updating, use **Change model → re-detect**.
+
 ## Updates
 
 The app checks this repo's releases every 30 minutes. When there's a newer version it downloads it, checks the SHA-256 checksum published with it, waits until Stella has been idle for 2 minutes, then reinstalls itself silently and restarts in the tray. Your models, chats, memories, projects and settings (all in `%LOCALAPPDATA%\StellAI`) stay as they are.

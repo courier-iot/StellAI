@@ -38,6 +38,13 @@ def test_assets():
     # No CUDA at all: Vulkan
     nocuda = [a for a in ASSETS if "cuda" not in a["name"]]
     assert names(ws.pick_llama_assets(nocuda, "cuda", "12")) == [f"llama-{TAG}-bin-win-vulkan-x64.zip"]
+    # Driver supports CUDA 13.0 only: the 13.4 build would fail ("unsupported toolchain"), use 12.4
+    assert names(ws.pick_llama_assets(ASSETS, "cuda", "13", driver="13.0"))[0].endswith("cuda-12.4-x64.zip")
+    assert names(ws.pick_llama_assets(ASSETS, "cuda", "13", driver="13.4"))[0].endswith("cuda-13.4-x64.zip")
+    assert names(ws.pick_llama_assets(ASSETS, "cuda", "13", skip=["13.4"]))[0].endswith("cuda-12.4-x64.zip")
+    # Nothing left: Vulkan
+    assert names(ws.pick_llama_assets(ASSETS, "cuda", "13", skip=["13.4", "12.4"])) == [f"llama-{TAG}-bin-win-vulkan-x64.zip"]
+    assert names(ws.pick_llama_assets(ASSETS, "cuda", "12", driver="12.2")) == [f"llama-{TAG}-bin-win-vulkan-x64.zip"]
     try:
         ws.pick_llama_assets([{"name": "nightly-tag.txt"}], "cpu")
         raise AssertionError("expected an error")
@@ -152,6 +159,34 @@ def test_extract_and_download():
         assert f.read() == blob
     assert seen[-1] == (len(blob), len(blob)) and seen[0][0] > 1_000_000
     srv.shutdown()
+
+
+def test_cuda_recovery():
+    log = ("0.15.757.561 E D:\\a\\llama.cpp\\ggml-cuda.cu:111: CUDA error\n"
+           "CUDA error: the provided PTX was compiled with an unsupported toolchain.\n")
+    assert ws.cuda_build_failed(log)
+    assert not ws.cuda_build_failed("CUDA error: out of memory")
+    c = ws.Config(tempfile.mkdtemp())
+    c.set(llama_build=f"{TAG}:cuda:llama-{TAG}-bin-win-cuda-13.4-x64.zip",
+          plan={"backend": "cuda", "cuda": "13", "cuda_driver": "13.0"}, hardware={"backend": "cuda"})
+    assert ws.current_cuda_build(c) == "13.4"
+    got = {}
+    orig_rel, orig_dl, orig_ex, orig_nv = ws.llama_release, ws.download, ws.extract_flat, ws._nvidia
+    try:
+        ws.llama_release = lambda *a, **k: {"tag_name": TAG, "assets": ASSETS}
+        ws._nvidia = lambda: None
+        def fake_download(url, dest, *a, **k):
+            got.setdefault("dl", []).append(os.path.basename(dest)); return dest
+        def fake_extract(z, folder):
+            os.makedirs(folder, exist_ok=True); open(os.path.join(folder, "llama-server.exe"), "w").close()
+        ws.download, ws.extract_flat = fake_download, fake_extract
+        msg = ws.recover_from_cuda_failure(c)
+        assert c.get("bad_cuda") == ["13.4"] and ws.current_cuda_build(c) == "12.4", (c.get("bad_cuda"), c.get("llama_build"))
+        assert "CUDA 12.4" in msg and c.get("plan")["backend"] == "cuda"
+        msg = ws.recover_from_cuda_failure(c)   # 12.4 fails too: Vulkan
+        assert "Vulkan" in msg and c.get("plan")["backend"] == "vulkan" and c.get("hardware")["backend"] == "vulkan"
+    finally:
+        ws.llama_release, ws.download, ws.extract_flat, ws._nvidia = orig_rel, orig_dl, orig_ex, orig_nv
 
 
 def test_misc():
