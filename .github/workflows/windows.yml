@@ -1,0 +1,133 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "windows/**"
+      - "server/**"
+      - ".github/workflows/windows.yml"
+
+permissions:
+  contents: write   # publish the installer as a GitHub release (used by auto-update)
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      APP_VERSION: "0.1.${{ github.run_number }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r windows/requirements.txt pyinstaller
+
+      - name: Logic tests
+        working-directory: windows
+        run: python test_winsetup.py
+
+      - name: Check llama.cpp / whisper.cpp downloads are found (live)
+        continue-on-error: true
+        working-directory: windows
+        run: |
+          python -c "import winsetup as w; r=w.llama_release(); print('llama.cpp', r['tag_name']); [print(b, [a['name'] for a in w.pick_llama_assets(r['assets'], b, c)]) for b,c in (('cuda','13'),('cuda','12'),('vulkan',''),('cpu',''))]; print('whisper', w.whisper_asset()[0])"
+
+      - name: Stamp version
+        shell: bash
+        run: python -c "open('windows/_version.py','w').write('VERSION = \"${{ env.APP_VERSION }}\"\n')"
+
+      - name: Draw icon
+        run: python windows/make_icon.py windows/stellai.ico
+
+      - name: Build app (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name StellAI
+          --icon windows/stellai.ico
+          --paths server --paths windows
+          --add-data "windows/stellai.ico;."
+          --collect-all schemdraw
+          --hidden-import pystray._win32
+          --hidden-import matplotlib.backends.backend_agg
+          --distpath dist --workpath build
+          windows/stellai_app.py
+
+      - name: Smoke test the packaged diagram renderer
+        shell: pwsh
+        run: |
+          @'
+          import schemdraw
+          import schemdraw.elements as elm
+          with schemdraw.Drawing() as d:
+              d += elm.Resistor().label("10k")
+              d += elm.Capacitor().down().label("100nF")
+          '@ | Set-Content -Encoding utf8 test_diagram.py
+          $p = Start-Process -FilePath dist\StellAI\StellAI.exe -ArgumentList "--schemdraw-runner","test_diagram.py","test_diagram.png" -Wait -PassThru
+          if (-not (Test-Path test_diagram.png)) { throw "schemdraw rendering failed in the packaged app (exit $($p.ExitCode))" }
+          Write-Host "diagram OK: $((Get-Item test_diagram.png).Length) bytes"
+
+      - name: Smoke test the hub inside the packaged app
+        shell: pwsh
+        run: |
+          python -c "import sys; sys.path[:0]=['server','windows']; import stellai_hub as h, winsetup as w, os, tempfile, threading, urllib.request; c=w.Config(tempfile.mkdtemp()); w.api_key(c); web=h.start(h.parse_args(w.hub_args(c))); threading.Thread(target=web.serve_forever,daemon=True).start(); print(urllib.request.urlopen('http://127.0.0.1:8092/health').read()); web.shutdown()"
+
+      - name: Self-test the window (real hardware detection + screenshots)
+        continue-on-error: true   # informational: GitHub's virtual desktop can be flaky with GUIs
+        shell: pwsh
+        run: |
+          $out = "$PWD\selftest"
+          $p = Start-Process -FilePath dist\StellAI\StellAI.exe -ArgumentList "--selftest",$out -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "self-test hung" }
+          Get-Content "$out\hardware.json" -ErrorAction SilentlyContinue
+          $r = Get-Content "$out\result.txt" -Raw -ErrorAction SilentlyContinue
+          Write-Host "Result: $r"
+          if ($r -notmatch '^OK') { throw "self-test failed" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-screenshots
+          path: |
+            selftest/*.png
+            selftest/*.json
+            selftest/result.txt
+          if-no-files-found: ignore
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" windows\installer.iss
+          Get-ChildItem dist\*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StellAI-Setup-windows
+          path: dist/StellAI-Setup-*.exe
+          if-no-files-found: error
+
+      # Installed copies check these releases every 30 minutes and update themselves.
+      - name: Publish release for auto-update
+        if: github.ref_name == github.event.repository.default_branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          f="StellAI-Setup-$APP_VERSION.exe"
+          sha256sum "$f" | cut -d' ' -f1 > "$f.sha256"
+          gh release create "windows-v$APP_VERSION" "$f" "$f.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "StellAI Server for Windows $APP_VERSION (preview)" \
+            --notes "Built from ${GITHUB_SHA:0:7}. Installed copies update automatically. New install: download the .exe below (SmartScreen: More info → Run anyway)."
+          # Keep only the five newest Windows releases
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep '^windows-v' | sort -V -r | tail -n +6 \
+            | while read -r tag; do gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; done
