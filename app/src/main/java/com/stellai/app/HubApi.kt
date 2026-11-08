@@ -224,9 +224,13 @@ object HubApi {
         postJson(serverUrl, apiKey, "/avatar/event", event)
     }
 
+    /** Avatar settings; also tells whether the server is new enough to have an avatar screen at all. */
+    fun avatarConfig(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/avatar/config")
+
     /** The avatar screen page on the server (key in the #fragment so it isn't logged). */
     fun avatarPageUrl(serverUrl: String, apiKey: String): String =
-        url(serverUrl) + "/avatar?app=1#key=" + java.net.URLEncoder.encode(apiKey.trim(), "UTF-8")
+        url(serverUrl) + "/avatar?app=1&src=" + java.net.URLEncoder.encode("phone-" + android.os.Build.MODEL, "UTF-8") +
+            "#key=" + java.net.URLEncoder.encode(apiKey.trim(), "UTF-8")
 
     fun saveGithub(serverUrl: String, apiKey: String, body: JSONObject): JSONObject = postJson(serverUrl, apiKey, "/github", body)
 

@@ -410,7 +410,7 @@ fun ChatScreen(
                         title = {
                             Column {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    StatusDot(online = engine.busy || voice.phase != VoicePhase.IDLE || app.assistantRunning)
+                                    StatusDot(online = engine.busy || voice.phase != VoicePhase.IDLE || app.wakeListening)
                                     Spacer(Modifier.size(8.dp))
                                     Text(
                                         name.uppercase(),
@@ -423,7 +423,7 @@ fun ChatScreen(
                                     voice.phase == VoicePhase.LISTENING -> "Listening…"
                                     voice.phase == VoicePhase.TRANSCRIBING -> "Decoding transmission…"
                                     engine.currentTitle.isNotEmpty() -> engine.currentTitle
-                                    app.assistantRunning -> "Say “${app.settings.wakeWordLabel}”"
+                                    app.wakeListening -> "Say “${app.settings.wakeWordLabel}”"
                                     else -> "Standing by"
                                 }
                                 Text(
@@ -837,7 +837,7 @@ private fun EmptyState(modifier: Modifier, app: App, name: String, project: Proj
                 color = Space.Text,
             )
             Spacer(Modifier.size(16.dp))
-            val wake = if (app.assistantRunning) "Say “${app.settings.wakeWordLabel}, set an alarm for 6:45”\nor tap the microphone\n\n" else "Tap the microphone and speak, or type:\n"
+            val wake = if (app.wakeListening) "Say “${app.settings.wakeWordLabel}, set an alarm for 6:45”\nor tap the microphone\n\n" else "Tap the microphone and speak, or type:\n"
             Text(
                 wake + "“Start a 10 minute timer”\n“Open Spotify”\n“Turn on the flashlight”",
                 textAlign = TextAlign.Center,

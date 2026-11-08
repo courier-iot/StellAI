@@ -38,7 +38,12 @@ class App : Application() {
     lateinit var reminders: ReminderManager
         private set
 
+    /** The background service is running (keeps the connection when you switch apps). */
     var assistantRunning by mutableStateOf(false)
+        private set
+
+    /** The wake word is being listened for. */
+    var wakeListening by mutableStateOf(false)
         private set
 
     /** True while the avatar screen is open: the avatar speaks replies with the server's voice instead. */
@@ -90,15 +95,37 @@ class App : Application() {
         }
     }
 
-    fun onAssistantServiceChanged(running: Boolean) {
+    fun onAssistantServiceChanged(running: Boolean, wake: Boolean) {
         assistantRunning = running
+        wakeListening = running && wake
         refreshPeriodicSync()
+    }
+
+    /** True while the avatar screen is open and on screen (in the background the phone speaks for itself). */
+    val avatarSpeaking: Boolean get() = avatarScreenOpen && appVisible
+
+    /**
+     * Keeps the phone awake while a reply is on its way, so it still arrives with the screen off or
+     * another app open. Released when done (and after 10 minutes at most).
+     */
+    inline fun <T> awake(block: () -> T): T {
+        val lock = (getSystemService(POWER_SERVICE) as android.os.PowerManager)
+            .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "StellAI:reply")
+        lock.setReferenceCounted(false)
+        lock.acquire(10 * 60_000L)
+        try {
+            return block()
+        } finally {
+            if (lock.isHeld) lock.release()
+        }
     }
 
     /** Applies settings: starts or stops the wake word service. Call from a visible activity. */
     fun applySettings(fromActivity: android.app.Activity) {
-        if (settings.wakeWordEnabled && voice.hasMicPermission() && settings.apiKey.isNotBlank()) {
-            if (!assistantRunning) AssistantService.start(fromActivity)
+        val wake = settings.wakeWordEnabled && voice.hasMicPermission()
+        if ((wake || settings.stayConnected) && settings.apiKey.isNotBlank() && settings.serverUrl.isNotBlank()) {
+            // (also when already running: it re-checks whether the wake word is wanted)
+            if (!assistantRunning || wake != wakeListening) AssistantService.start(fromActivity)
         } else if (assistantRunning) {
             AssistantService.stop(fromActivity)
         }

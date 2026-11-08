@@ -256,7 +256,7 @@ class ChatEngine(private val app: App) {
         if (lastUser + 1 < messages.size) truncateFrom(messages[lastUser + 1].id)
         stopRequested = false
         busy = true
-        job = app.scope.launch { runConversation(convId, fromVoice = false, newPhotos = emptyList()) }
+        job = app.scope.launch { app.awake { runConversation(convId, fromVoice = false, newPhotos = emptyList()) } }
     }
 
     /** Puts an earlier message back in the box; sending replaces it and the replies after it. */
@@ -299,7 +299,7 @@ class ChatEngine(private val app: App) {
         addStored(convId, Role.USER, content)
         stopRequested = false
         busy = true
-        job = app.scope.launch { runConversation(convId, fromVoice, photos) }
+        job = app.scope.launch { app.awake { runConversation(convId, fromVoice, photos) } }
     }
 
     fun stop() {
@@ -320,7 +320,7 @@ class ChatEngine(private val app: App) {
         var finalReply = ""
         app.avatarEvent("thinking", voice = fromVoice)
         // Spoken replies start as soon as the first phrase arrives (not after the whole answer)
-        val speakOut = fromVoice && app.settings.speakReplies && !app.avatarScreenOpen
+        val speakOut = fromVoice && app.settings.speakReplies && !app.avatarSpeaking
         val feeder = SentenceFeeder { piece -> main.post { app.speaker.enqueue(piece) } }
         if (speakOut) main.post { app.speaker.stop() }
         try {
@@ -463,7 +463,7 @@ class ChatEngine(private val app: App) {
                     // (posted, so it runs after the last phrase has been queued)
                     speakOut -> main.post { app.speaker.whenDone { app.voice.listenNow(followUp = true) } }
                     // the avatar screen speaks it with the server's voice: wait roughly as long as that takes
-                    app.avatarScreenOpen && app.settings.speakReplies ->
+                    app.avatarSpeaking && app.settings.speakReplies ->
                         main.postDelayed({ app.voice.listenNow(followUp = true) },
                             2500L + finalReply.split(Regex("\\s+")).size * 380L)
                     else -> app.voice.listenNow(followUp = true)

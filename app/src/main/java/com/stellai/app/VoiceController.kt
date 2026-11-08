@@ -234,7 +234,7 @@ class VoiceController(private val app: App) {
         // "thanks", "that's all": the conversation is over
         if (followUp && END_PHRASE.matches(command.trim())) {
             app.avatarEvent("idle")
-            if (Regex("(?i)thank|cheers").containsMatchIn(command) && app.settings.speakReplies && !app.avatarScreenOpen) {
+            if (Regex("(?i)thank|cheers").containsMatchIn(command) && app.settings.speakReplies && !app.avatarSpeaking) {
                 main.post { app.speaker.speak(listOf("Anytime!", "You're welcome!", "Happy to help.").random()) }
             }
             return

@@ -6,6 +6,8 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import androidx.core.app.NotificationManagerCompat
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -94,12 +96,16 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
     var sensitivity by rememberSaveable { mutableStateOf(s.wakeSensitivity) }
     var speak by rememberSaveable { mutableStateOf(s.speakReplies) }
     var followUp by rememberSaveable { mutableStateOf(s.followUp) }
+    var stayConnected by rememberSaveable { mutableStateOf(s.stayConnected) }
     var testResult by remember { mutableStateOf<String?>(null) }
 
     // Re-check permissions when returning from Android's settings pages.
     var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var micAllowed by remember { mutableStateOf(app.voice.hasMicPermission()) }
+    val power = remember { context.getSystemService(PowerManager::class.java) }
+    var batteryFree by remember { mutableStateOf(power.isIgnoringBatteryOptimizations(context.packageName)) }
     LifecycleResumeEffect(Unit) {
+        batteryFree = power.isIgnoringBatteryOptimizations(context.packageName)
         overlayAllowed = Settings.canDrawOverlays(context)
         micAllowed = app.voice.hasMicPermission()
         onPauseOrDispose {}
@@ -121,6 +127,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
         s.wakeSensitivity = sensitivity
         s.speakReplies = speak
         s.followUp = followUp
+        s.stayConnected = stayConnected
         (context as? Activity)?.let { app.applySettings(it) }
         onDone()
     }
@@ -271,6 +278,23 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
             SettingSwitch("Keep listening after she answers",
                 "Reply without the wake word for a few seconds after she speaks. Saying \"thanks\" or \"that's all\" ends it.",
                 followUp) { followUp = it }
+            SettingSwitch("Stay connected in the background",
+                "Keeps Stella connected when you switch apps, so replies still arrive and reminders keep syncing. Shows a quiet notification while it's on.",
+                stayConnected) { on ->
+                stayConnected = on
+                if (on && Build.VERSION.SDK_INT >= 33 && !NotificationManagerCompat.from(context).areNotificationsEnabled())
+                    permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            }
+            if ((stayConnected || wake) && !batteryFree) {
+                Hint("Some phones still stop apps in the background to save battery. If Stella keeps disconnecting, let StellAI run without battery limits.")
+                OutlinedButton(onClick = {
+                    try {
+                        context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName)))
+                    } catch (_: Exception) {
+                        try { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
+                    }
+                }) { Text("Allow running without battery limits") }
+            }
 
             Text("Default assistant", style = MaterialTheme.typography.labelLarge)
             Hint("Make StellAI your phone's assistant, so long-pressing the power or home button starts listening. Choose \"StellAI\" under Digital assistant app.")

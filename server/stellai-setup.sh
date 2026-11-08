@@ -4114,6 +4114,7 @@ WEBCHAT_HTML = r"""<!doctype html>
 --accent:#5ce1e6;--glow:#9b7bff;--gold:#ffd166;--red:#ff6b7a;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--void);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+*{-webkit-tap-highlight-color:transparent}
 body{background:radial-gradient(ellipse at 20% 0%,#0b1430 0%,var(--top) 45%,#0b0620 100%) fixed}
 button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px 12px;cursor:pointer}
 button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
@@ -4185,8 +4186,25 @@ a{color:var(--accent)}
 .zoom img{max-width:95vw;max-height:95vh;background:#fff;border-radius:8px}
 #stage{display:none;position:relative;flex:1;min-height:0;overflow:hidden}
 #avatarHost{position:absolute;inset:0}
-#caption{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:min(900px,92%);text-align:center;font-size:clamp(17px,2.4vw,27px);line-height:1.35;text-shadow:0 2px 14px #000,0 0 3px #000;transition:opacity .5s;opacity:0;pointer-events:none}
-#caption .who{display:block;font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--accent);margin-bottom:4px}
+/* subtitles: a small window below or beside her (per screen), or the classic film-style line over her */
+#caption{position:absolute;z-index:2;box-sizing:border-box;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(8,12,24,.82);
+  font-size:15px;line-height:1.45;color:var(--text);text-align:left;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;transition:opacity .5s;opacity:0}
+#caption .who{display:block;font-family:var(--mono);font-size:10px;letter-spacing:3px;color:var(--accent);margin-bottom:3px}
+body:not([data-cap=over]) #caption{opacity:.45}
+#caption.on,body[data-cap] #caption.on{opacity:1}
+#caption:empty::before{content:"Subtitles appear here when she talks";color:var(--muted);font-size:13px}
+body[data-cap=below] #caption{left:50%;transform:translateX(-50%);bottom:14px;width:min(620px,calc(100% - 28px));height:clamp(78px,17vh,132px)}
+body[data-cap=below] #avatarHost{bottom:calc(clamp(78px,17vh,132px) + 24px)}
+body[data-cap=side] #caption{right:14px;top:50%;transform:translateY(-50%);width:min(340px,34%);max-height:62%;min-height:90px}
+body[data-cap=side] #avatarHost{right:calc(min(340px,34%) + 24px)}
+@media (orientation:portrait) and (max-width:760px){
+  body[data-cap=side] #caption{right:auto;top:auto;left:50%;transform:translateX(-50%);bottom:14px;width:calc(100% - 28px);max-height:none;min-height:0;height:clamp(78px,17vh,132px)}
+  body[data-cap=side] #avatarHost{right:0;bottom:calc(clamp(78px,17vh,132px) + 24px)}}
+body[data-cap=over] #caption{left:50%;bottom:22px;transform:translateX(-50%);width:min(900px,92%);text-align:center;font-size:clamp(17px,2.4vw,27px);line-height:1.35;
+  background:none;border:none;padding:0;overflow:hidden;text-shadow:0 2px 14px #000,0 0 3px #000;pointer-events:none}
+body[data-cap=over] #caption:empty::before{content:none}
+body:not([data-cap=over]) #caption .who{position:sticky;top:-10px;margin:-10px -14px 3px;padding:8px 14px 3px;background:rgb(10,14,27)}
+body[data-cap=off] #caption{display:none}
 #avName{position:absolute;top:14px;left:18px;font-family:var(--mono);letter-spacing:6px;color:var(--accent);font-weight:700}
 #avState{position:absolute;top:36px;left:18px;font-family:var(--mono);font-size:12px;letter-spacing:2px;color:var(--muted)}
 #avStatus{position:absolute;top:58px;left:18px;right:18px;font-size:12px;color:var(--gold);display:none}
@@ -4194,11 +4212,17 @@ a{color:var(--accent)}
 #tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
 #mic.on{background:var(--red);border-color:var(--red);color:#fff}
 body.avatar #side,body.avatar #bar{display:none}
+body.avatar{height:100dvh;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
+body.avatar #stage{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 body.avatar #stage{display:block}
 body.avatar #msgs{display:none}
 body.avatar.showchat #msgs{display:block;flex:0 0 40%;border-top:1px solid var(--line);background:rgba(4,6,13,.6)}
 body.avatar #composer{background:rgba(4,6,13,.35);border-top:none}
 body.inapp #composer,body.inapp #avChat,body.inapp #avFull{display:none}
+body.inapp #avName{top:56px;left:60px}body.inapp #avState{top:78px;left:60px}body.inapp #avStatus{top:100px}body.inapp #stageBar{top:48px}
+body.inapp #caption{bottom:110px!important}
+body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bottom:calc(clamp(78px,17vh,132px) + 120px)}
+@media (orientation:landscape){body.inapp[data-cap=side] #caption{bottom:auto!important}body.inapp[data-cap=side] #avatarHost{bottom:0}}
 @media (max-width:760px){#side{position:fixed;z-index:5;height:100%;transform:translateX(-100%);transition:transform .2s}#side.open{transform:none}}
 </style>
 </head>
@@ -4273,6 +4297,11 @@ const store = { get(k, d) { try { const v = localStorage.getItem("stellai." + k)
   if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname + location.search); }
 })();
 const AVATAR_MODE = location.pathname === "/avatar";
+// In the phone app's avatar screen, tell the app about errors that stop the page (it shows them)
+if (window.StellaiApp) {
+  window.addEventListener("error", e => { try { StellaiApp.error(String(e.message || e)); } catch {} });
+  window.addEventListener("unhandledrejection", e => { try { StellaiApp.error(String((e.reason && e.reason.message) || e.reason)); } catch {} });
+}
 let KEY = store.get("key", "");
 const NAME = () => store.get("name", "Stella");
 
@@ -5277,9 +5306,11 @@ function avatarCaption(text, who = "stella") {
   const el = $("#caption"); if (!el) return;
   clearTimeout(AV.captionTimer);
   const t = String(text || "").replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*#`>]|(^|\s)_+|_+(\s|$)/g, "$1$2").replace(/\s+/g, " ").trim();
-  el.innerHTML = t ? `<span class="who">${who === "you" ? "YOU" : esc(NAME().toUpperCase())}</span>${esc(t.length > 260 ? "…" + t.slice(-260) : t)}` : "";
-  el.style.opacity = t ? 1 : 0;
-  if (t && who === "stella" && !S.busy) AV.captionTimer = setTimeout(() => { if (!SPEAK.speaking && !S.busy) el.style.opacity = 0; }, 12000);
+  const over = captionAt() === "over", max = over ? 260 : 3000;     // the window scrolls, so it can hold the whole answer
+  el.innerHTML = t ? `<span class="who">${who === "you" ? "YOU" : esc(NAME().toUpperCase())}</span>${esc(t.length > max ? "…" + t.slice(-max) : t)}` : "";
+  el.classList.toggle("on", !!t);
+  if (t) el.scrollTop = el.scrollHeight;
+  if (t && who === "stella" && !S.busy) AV.captionTimer = setTimeout(() => { if (!SPEAK.speaking && !S.busy) el.classList.remove("on"); }, 12000);
 }
 function updateAvatarState() {
   if (!AV.avatar) return;
@@ -5343,6 +5374,19 @@ async function startWake() {
     });
   } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
 }
+// Which replies this screen says out loud (saved on this screen only): by default only conversations held
+// on this screen, so a reply isn't spoken twice by the phone and the computer at the same time.
+const SPEAK_FROM = [["this", "Only conversations on this screen"], ["phone", "This screen and the StellAI phone app"], ["all", "Every device (phone app, desktop chat, other avatar screens)"]];
+const OWN_SOURCE = new URLSearchParams(location.search).get("src") || "";   // the phone app that shows this page
+const CAPTION_AT = [["below", "In a small window below her"], ["side", "In a small window beside her"], ["over", "Over her, like film subtitles"], ["off", "Off"]];
+function captionAt() { const v = store.get("avatarCaption", "below"); return CAPTION_AT.some(c => c[0] === v) ? v : "below"; }
+function applyCaptionAt() { document.body.dataset.cap = captionAt(); }
+function speakFrom() { return store.get("avatarSpeakFrom", OWN_SOURCE ? "this" : "this"); }
+function speaksFor(ev) {
+  if (OWN_SOURCE && ev.source === OWN_SOURCE) return true;          // the phone this screen runs in
+  const f = speakFrom();
+  return f === "all" || (f === "phone" && ev.device === "phone");
+}
 async function pollAvatarEvents() {
   try {
     const r = await api("/avatar/events?since=" + AV.since);
@@ -5354,7 +5398,9 @@ async function pollAvatarEvents() {
       if (ev.source === CLIENT_ID) continue;
       if (ev.state === "reply") {
         AV.remote = null; avatarCaption(ev.text, "stella"); AV.avatar && AV.avatar.react(ev.text);
-        if (AV.cfg.speak && AV.cfg.speak_others && ev.text) { SPEAK.cancel(); SPEAK.say(ev.text); }
+        // a screen that was asleep (phone app in the background) catches up quietly instead of reading out old replies
+        const fresh = !document.hidden && (!r.now || !ev.ts || r.now - ev.ts < 25);
+        if (AV.cfg.speak && ev.text && fresh && speaksFor(ev)) { SPEAK.cancel(); SPEAK.say(ev.text); }
       } else if (ev.state === "idle") { AV.remote = null; }
       else { AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
         if (ev.state === "listening") avatarCaption("…", "you"); }
@@ -5403,7 +5449,10 @@ function openAvatarSettings() {
     <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
     <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
-    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="oth" style="width:auto" ${c.speak_others ? "checked" : ""}> Also speak replies to the phone and other devices</label>
+    <label class="sub" style="display:block;margin-top:8px">Which replies this screen speaks (this screen only)</label>
+    <select id="oth">${SPEAK_FROM.map(([v, l]) => `<option value="${v}" ${speakFrom() === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <label class="sub" style="display:block;margin-top:8px">Subtitles (this screen only)</label>
+    <select id="capAt">${CAPTION_AT.map(([v, l]) => `<option value="${v}" ${captionAt() === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <h3 class="hud" style="margin-top:16px">Conversation</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fu" style="width:auto" ${c.followup ? "checked" : ""}> Keep listening after she answers, so you can reply without the wake word ("thanks" or "that's all" ends it)</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bi" style="width:auto" ${c.barge_in ? "checked" : ""}> Interrupt her by talking (best with a speakerphone that cancels echo)</label>
@@ -5465,9 +5514,11 @@ function openAvatarSettings() {
   $d("#save").onclick = async () => {
     try {
       AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
-        speed: +$d("#sp").value, speak: $d("#spk").checked, speak_others: $d("#oth").checked, height_cm: +$d("#ht").value,
+        speed: +$d("#sp").value, speak: $d("#spk").checked, height_cm: +$d("#ht").value,
         gestures: $d("#ges").checked, wake: $d("#wk").checked, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : undefined,
         followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+      store.set("avatarSpeakFrom", $d("#oth").value);
+      store.set("avatarCaption", $d("#capAt").value); applyCaptionAt();
       d.remove(); loadAvatarConfig();
     } catch (e) { alertBox(e.message); }
   };
@@ -5476,6 +5527,7 @@ async function startAvatarScreen() {
   document.body.classList.add("avatar");
   $("#input").placeholder = "Message " + NAME() + "…  (or press Space to talk)";
   if (new URLSearchParams(location.search).get("app") === "1") document.body.classList.add("inapp");
+  applyCaptionAt();
   await pollAvatarEvents();      // remember where the event list is now, so nothing that happens while loading is missed
   const mod = await import("/avatar/avatar.js");
   AV.slow = mod.looksLikeSlowDevice();
@@ -5516,7 +5568,11 @@ async function start() {
   if (S.current && !S.convs.has(S.current)) S.current = null;
   await loadMeta();
   renderSide(); renderMsgs(); updateMeter();
-  if (AVATAR_MODE && !AV.avatar) { $("#avName").textContent = NAME().toUpperCase(); startAvatarScreen().catch(e => avatarStatus("Avatar: " + e.message)); }
+  if (AVATAR_MODE && !AV.avatar) {
+    $("#avName").textContent = NAME().toUpperCase();
+    startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} })
+      .catch(e => { avatarStatus("Avatar: " + e.message); try { window.StellaiApp && window.StellaiApp.error(String(e.message || e)); } catch {} });
+  }
 }
 setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);
@@ -6293,7 +6349,7 @@ class AvatarBus:
 
     def since(self, seq):
         with self.lock:
-            return {"seq": self.seq, "events": [e for e in self.events if e["seq"] > seq and time.time() - e["ts"] < 120]}
+            return {"seq": self.seq, "now": time.time(), "events": [e for e in self.events if e["seq"] > seq and time.time() - e["ts"] < 120]}
 
 
 AVATAR_BUS = AvatarBus()
@@ -6560,16 +6616,20 @@ function createOrb(host, o) {
   const stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.3 + 0.2, s: Math.random() * 0.6 + 0.2, p: Math.random() * 6 }));
   const sparks = Array.from({ length: 36 }, (_, i) => ({ a: (i / 36) * Math.PI * 2, ring: i % 3 }));
   const ro = new ResizeObserver(resize); ro.observe(host);
+  // Resizing a canvas wipes it, so only resize when the size really changed, and redraw straight away
+  // (phones resize the page all the time as the address bar slides and the keyboard opens: that was the flicker)
   function resize() {
-    dpr = o.light ? 1 : Math.min(2, window.devicePixelRatio || 1);
-    w = host.clientWidth; h = host.clientHeight;
+    const nd = o.light ? 1 : Math.min(2, window.devicePixelRatio || 1), nw = host.clientWidth, nh = host.clientHeight;
+    if (nd === dpr && nw === w && nh === h) return;
+    dpr = nd; w = nw; h = nh;
     canvas.width = Math.max(1, w * dpr); canvas.height = Math.max(1, h * dpr);
+    if (raf) frame(performance.now(), true);
   }
   resize();
-  function frame(now) {
-    raf = requestAnimationFrame(frame);
-    const step = (now - last) / 1000;
-    if (o.light && step < 1 / 31) return;          // light mode: 30 frames a second
+  function frame(now, now_) {
+    if (!now_) raf = requestAnimationFrame(frame);
+    const step = Math.max((now - last) / 1000, 1e-3);
+    if (o.light && step < 1 / 31 && !now_) return;          // light mode: 30 frames a second
     const dt = Math.min(0.05, step); last = now; t += dt;
     fps = lerp(fps, 1 / Math.max(step, 1e-3), 0.05);
     smooth = lerp(smooth, level, level > smooth ? 0.5 : 0.15);
@@ -6865,9 +6925,13 @@ async function createVRM(host, url, o) {
   }
   setHeight(o.height);
 
+  let lastW = 0, lastH = 0;
   function resize() {
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
     renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+    try { renderer.render(scene, cam); } catch {}        // redraw now so the screen doesn't blink
   }
   const ro = new ResizeObserver(resize); ro.observe(host); resize();
 

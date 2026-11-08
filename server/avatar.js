@@ -70,16 +70,20 @@ function createOrb(host, o) {
   const stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.3 + 0.2, s: Math.random() * 0.6 + 0.2, p: Math.random() * 6 }));
   const sparks = Array.from({ length: 36 }, (_, i) => ({ a: (i / 36) * Math.PI * 2, ring: i % 3 }));
   const ro = new ResizeObserver(resize); ro.observe(host);
+  // Resizing a canvas wipes it, so only resize when the size really changed, and redraw straight away
+  // (phones resize the page all the time as the address bar slides and the keyboard opens: that was the flicker)
   function resize() {
-    dpr = o.light ? 1 : Math.min(2, window.devicePixelRatio || 1);
-    w = host.clientWidth; h = host.clientHeight;
+    const nd = o.light ? 1 : Math.min(2, window.devicePixelRatio || 1), nw = host.clientWidth, nh = host.clientHeight;
+    if (nd === dpr && nw === w && nh === h) return;
+    dpr = nd; w = nw; h = nh;
     canvas.width = Math.max(1, w * dpr); canvas.height = Math.max(1, h * dpr);
+    if (raf) frame(performance.now(), true);
   }
   resize();
-  function frame(now) {
-    raf = requestAnimationFrame(frame);
-    const step = (now - last) / 1000;
-    if (o.light && step < 1 / 31) return;          // light mode: 30 frames a second
+  function frame(now, now_) {
+    if (!now_) raf = requestAnimationFrame(frame);
+    const step = Math.max((now - last) / 1000, 1e-3);
+    if (o.light && step < 1 / 31 && !now_) return;          // light mode: 30 frames a second
     const dt = Math.min(0.05, step); last = now; t += dt;
     fps = lerp(fps, 1 / Math.max(step, 1e-3), 0.05);
     smooth = lerp(smooth, level, level > smooth ? 0.5 : 0.15);
@@ -375,9 +379,13 @@ async function createVRM(host, url, o) {
   }
   setHeight(o.height);
 
+  let lastW = 0, lastH = 0;
   function resize() {
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
     renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+    try { renderer.render(scene, cam); } catch {}        // redraw now so the screen doesn't blink
   }
   const ro = new ResizeObserver(resize); ro.observe(host); resize();
 

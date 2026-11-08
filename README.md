@@ -88,7 +88,9 @@ Drawer → **🖥 Server** on the phone, or **🖥 Server** at the bottom of the
 
 ## Avatar screen
 
-Stella gets a face and a voice: a full-screen page with an animated **space orb** or your own **3D character**, which listens, thinks, talks with a natural voice and moves her mouth while speaking. Replies to the phone and the desktop chat are spoken there too (can be turned off).
+Stella gets a face and a voice: a full-screen page with an animated **space orb** or your own **3D character**, which listens, thinks, talks with a natural voice and moves her mouth while speaking. Each screen speaks only the conversations held on it, so a reply is never said twice; in ⚙ → Voice you can let a screen also speak replies to the StellAI phone app, or to every device (handy for a Pi screen in the kitchen). Subtitles show in a small window below her (or beside her, over her film-style, or off — also per screen).
+
+**Phone app in the background:** StellAI stays connected when you switch apps (Settings → "Stay connected in the background", on by default), with a quiet notification while it's on. If your phone still cuts it off, use the "Allow running without battery limits" button under that switch.
 
 - **On the server PC**: menu → **StellAI Avatar** (Linux) or **Avatar screen** in the Windows app.
 - **Spare phone or tablet**: install the StellAI app, connect it, then drawer → **✦ Avatar screen**. The screen stays on; talk with the big mic button or the app's wake word.
