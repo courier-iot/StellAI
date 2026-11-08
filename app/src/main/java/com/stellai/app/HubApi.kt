@@ -219,6 +219,15 @@ object HubApi {
         return getJson(serverUrl, apiKey, "/search?q=$q&exclude=$ex").optJSONArray("results") ?: JSONArray()
     }
 
+    /** Avatar screens show what Stella is doing on any device. */
+    fun avatarEvent(serverUrl: String, apiKey: String, event: JSONObject) {
+        postJson(serverUrl, apiKey, "/avatar/event", event)
+    }
+
+    /** The avatar screen page on the server (key in the #fragment so it isn't logged). */
+    fun avatarPageUrl(serverUrl: String, apiKey: String): String =
+        url(serverUrl) + "/avatar?app=1#key=" + java.net.URLEncoder.encode(apiKey.trim(), "UTF-8")
+
     fun saveGithub(serverUrl: String, apiKey: String, body: JSONObject): JSONObject = postJson(serverUrl, apiKey, "/github", body)
 
     fun modes(serverUrl: String, apiKey: String): JSONArray =

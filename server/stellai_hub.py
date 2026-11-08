@@ -2961,6 +2961,12 @@ def backup_now():
                         for f in files:
                             full = os.path.join(root, f)
                             z.write(full, os.path.join(label, os.path.relpath(full, path)))
+                # the avatar's settings, character and animations (not its downloads)
+                for f in ["config.json", "animations.json"] + (
+                        ["bin/characters/" + c["file"] for c in list_characters()] +
+                        ["bin/animations/" + a["file"] for a in list_animations()] if AVATAR["dir"] else []):
+                    if AVATAR["dir"] and os.path.isfile(_avatar_path(*f.split("/"))):
+                        z.write(_avatar_path(*f.split("/")), "avatar/" + f)
                 gh = github_config()
                 gh.pop("token", None)   # never put the GitHub token in a backup
                 z.writestr("github.json", json.dumps(gh))
@@ -3015,7 +3021,8 @@ def restore_backup(zip_path, cfg):
         stamp = time.strftime("%Y%m%d-%H%M%S")
         had_db = os.path.exists(cfg.db)
         targets = {"projects": cfg.project_dir or os.path.join(os.path.dirname(os.path.abspath(cfg.db)), "projects"),
-                   "images": cfg.image_dir, "diagrams": cfg.diagram_dir, "wakewords": cfg.wakeword_dir}
+                   "images": cfg.image_dir, "diagrams": cfg.diagram_dir, "wakewords": cfg.wakeword_dir,
+                   "avatar": getattr(cfg, "avatar_dir", "") or os.path.join(os.path.dirname(os.path.abspath(cfg.db)), "avatar")}
         if os.path.exists(cfg.db):
             os.replace(cfg.db, f"{cfg.db}.before-restore-{stamp}")
             for ext in ("-wal", "-shm"):
@@ -3323,6 +3330,17 @@ def run_doctor():
         except (OSError, IndexError, subprocess.SubprocessError):
             ip = ""
     add("Tailscale", "ok" if ip else "warn", ip or "not connected", "" if ip else "Install/sign in to use Stella away from home.")
+    if AVATAR["dir"]:
+        st = AVATAR["status"].get("voice", "")
+        voice = avatar_config()["voice"]
+        if piper_exe() and os.path.isfile(_avatar_path("voices", voice + ".onnx")):
+            add("Avatar voice", "ok", "ready: " + VOICES.get(voice, voice).split(":")[0])
+        elif st.startswith("failed"):
+            add("Avatar voice", "warn", st, "Check the internet connection, then open the avatar screen again.")
+        elif st:
+            add("Avatar voice", "ok", st + "…")
+        else:
+            add("Avatar voice", "ok", "not set up yet: downloads (~90 MB) the first time you open the avatar screen")
     if DOCTOR["update"]:
         add("Updates", "ok", DOCTOR["update"])
     worst = "fail" if any(c["state"] == "fail" for c in checks) else "warn" if any(c["state"] == "warn" for c in checks) else "ok"
@@ -3414,8 +3432,9 @@ EXIT_CODE = 0
 def _tracked(fn):
     """Counts requests in progress, so updates wait until nobody is using Stella."""
     def wrapper(self):
-        if urlparse(self.path).path == "/health":
-            return fn(self)
+        p = urlparse(self.path).path
+        if p == "/health" or p == "/avatar/events" or p.startswith("/avatar/lib/"):
+            return fn(self)     # health checks and avatar screens polling don't count as using Stella
         with ACTIVITY["lock"]:
             ACTIVITY["active"] += 1
         try:
@@ -3564,6 +3583,7 @@ WEBCHAT_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StellAI</title>
+<script type="importmap">{"imports":{"three":"/avatar/lib/build/three.module.js","three/addons/":"/avatar/lib/examples/jsm/","@pixiv/three-vrm":"/avatar/lib/three-vrm.module.min.js","@pixiv/three-vrm-core":"/avatar/lib/three-vrm.module.min.js","@pixiv/three-vrm-animation":"/avatar/lib/three-vrm-animation.module.min.js"}}</script>
 <style>
 :root{--void:#04060d;--top:#070b1a;--panel:#0c1326;--panel2:#141d38;--line:#26335c;--text:#e6ecff;--muted:#8a96bf;
 --accent:#5ce1e6;--glow:#9b7bff;--gold:#ffd166;--red:#ff6b7a;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
@@ -3638,6 +3658,22 @@ a{color:var(--accent)}
 .bar2{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}.bar2 div{height:100%;background:var(--accent)}
 .zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:20;cursor:zoom-out}
 .zoom img{max-width:95vw;max-height:95vh;background:#fff;border-radius:8px}
+#stage{display:none;position:relative;flex:1;min-height:0;overflow:hidden}
+#avatarHost{position:absolute;inset:0}
+#caption{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:min(900px,92%);text-align:center;font-size:clamp(17px,2.4vw,27px);line-height:1.35;text-shadow:0 2px 14px #000,0 0 3px #000;transition:opacity .5s;opacity:0;pointer-events:none}
+#caption .who{display:block;font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--accent);margin-bottom:4px}
+#avName{position:absolute;top:14px;left:18px;font-family:var(--mono);letter-spacing:6px;color:var(--accent);font-weight:700}
+#avState{position:absolute;top:36px;left:18px;font-family:var(--mono);font-size:12px;letter-spacing:2px;color:var(--muted)}
+#avStatus{position:absolute;top:58px;left:18px;right:18px;font-size:12px;color:var(--gold);display:none}
+#stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
+#tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
+#mic.on{background:var(--red);border-color:var(--red);color:#fff}
+body.avatar #side,body.avatar #bar{display:none}
+body.avatar #stage{display:block}
+body.avatar #msgs{display:none}
+body.avatar.showchat #msgs{display:block;flex:0 0 40%;border-top:1px solid var(--line);background:rgba(4,6,13,.6)}
+body.avatar #composer{background:rgba(4,6,13,.35);border-top:none}
+body.inapp #composer,body.inapp #avChat,body.inapp #avFull{display:none}
 @media (max-width:760px){#side{position:fixed;z-index:5;height:100%;transform:translateX(-100%);transition:transform .2s}#side.open{transform:none}}
 </style>
 </head>
@@ -3671,6 +3707,14 @@ a{color:var(--accent)}
       <button class="chip" id="projectChip" style="display:none"></button>
       <div id="meter" title="How full Stella's memory is for this chat"><span class="hud">Context</span><div class="track"><div class="fill" id="meterFill" style="width:0"></div></div><span class="hud" id="meterPct"></span></div>
     </div>
+    <div id="stage">
+      <div id="avatarHost"></div>
+      <div id="avName">STELLA</div><div id="avState"></div><div id="avStatus"></div>
+      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat">💬</button>
+        <button class="ghost" id="avSet" title="Avatar settings">⚙</button><button class="ghost" id="avFull" title="Full screen">⛶</button></div>
+      <div id="caption"></div>
+      <div id="tapStart"><div>✦ Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
+    </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
     <div id="composer">
       <div id="notice"></div>
@@ -3679,6 +3723,7 @@ a{color:var(--accent)}
         <button class="ghost" id="attach" title="Add a photo">📷</button>
         <input type="file" id="file" accept="image/*" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message Stella… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)">🎤</button>
         <button class="primary" id="send">Send</button>
       </div>
     </div>
@@ -3700,8 +3745,9 @@ const store = { get(k, d) { try { const v = localStorage.getItem("stellai." + k)
 // Key from the link the server app opens (#key=...), or saved earlier
 (function () {
   const m = location.hash.match(/key=([^&]+)/);
-  if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); }
+  if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname + location.search); }
 })();
+const AVATAR_MODE = location.pathname === "/avatar";
 let KEY = store.get("key", "");
 const NAME = () => store.get("name", "Stella");
 
@@ -4040,7 +4086,7 @@ async function send() {
   renderSide(); renderMsgs();
   await run(convId, photos);
 }
-function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; }
+function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
   if (S.busy || !S.current) return; const list = msgsOf(S.current);
   const lastUser = list.map(m => m.role).lastIndexOf("user"); if (lastUser < 0) return;
@@ -4054,6 +4100,7 @@ function truncateFrom(id) {
 
 async function run(convId, photos) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
+  SPEAK.cancel(); postAvatar({ state: "thinking" });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
     let p = await prepare(convId, photos.length);
@@ -4084,6 +4131,8 @@ async function run(convId, photos) {
       const result = await stream(body);
       const finalText = result.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
       S.streaming = null;
+      if (AVATAR_MODE) { SPEAK.feed(finalText, true); avatarCaption(finalText); if (finalText && AV.avatar) AV.avatar.react(finalText); }
+      if (finalText && !result.toolCalls.length) postAvatar({ state: "reply", text: finalText });
       if (finalText || !result.toolCalls.length) addMsg(convId, "assistant", finalText || "(no reply)", result.reasoning);
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
@@ -4123,6 +4172,7 @@ async function run(convId, photos) {
   } finally {
     if (S.stopRequested) S.error = "Stopped.";
     S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
+    postAvatar({ state: "idle" });
     touch(convId); renderSide(); renderMsgs(); renderBar();
     sync().then(updateMeter);
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
@@ -4139,7 +4189,7 @@ async function stream(body) {
   const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
   const res = { content: "", reasoning: "", toolCalls: [] }; const calls = [];
   S.streaming = { id: "live", role: "assistant", text: "", reasoning: "" };
-  let last = 0;
+  let last = 0; SPEAK.begin();
   for (;;) {
     const { value, done } = await reader.read(); if (done) break;
     buf += dec.decode(value, { stream: true });
@@ -4159,7 +4209,8 @@ async function stream(body) {
     }
     S.streaming.text = res.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trimStart(); S.streaming.reasoning = res.reasoning;
     S.status = !S.streaming.text && res.reasoning ? "Thinking…" : "Writing…";
-    if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); }
+    if (AVATAR_MODE) SPEAK.feed(S.streaming.text);
+    if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); if (AVATAR_MODE && S.streaming.text) avatarCaption(S.streaming.text); }
   }
   res.toolCalls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || "call_" + i }));
   return res;
@@ -4475,6 +4526,372 @@ $("#wrap").onclick = e => {
   if (t.tagName === "IMG") { const z = document.createElement("div"); z.className = "zoom"; z.innerHTML = `<img src="${t.src}">`; z.onclick = () => z.remove(); document.body.appendChild(z); }
 };
 
+// ---------------------------------------------------------------- voice input (microphone → Whisper on the server)
+const MIC = { rec: null };
+function micHelp() {
+  alertBox("The microphone only works on a secure page. Options: open the chat on the server computer itself " +
+    "(http://localhost:8092), use Tailscale HTTPS (run 'sudo tailscale serve --bg 8092' on the server and open the https://… address it shows), " +
+    "or in Chrome open chrome://flags/#unsafely-treat-insecure-origin-as-secure, add this address (" + location.origin + ") and restart Chrome.");
+}
+async function micToggle() {
+  if (MIC.rec) { MIC.rec.stop(); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { micHelp(); return; }
+  if (S.busy) stop();
+  SPEAK.cancel();
+  let streamIn;
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } }); }
+  catch (e) { alertBox("Couldn't use the microphone: " + e.message); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(streamIn);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = []; let heard = false, quietSince = 0, startedAt = performance.now(), done = false;
+  proc.onaudioprocess = ev => {
+    const d = ev.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d));
+    let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] * d[i];
+    const rms = Math.sqrt(sum / (d.length / 4)); AV.micLevel = Math.min(1, rms * 8);
+    const now = performance.now();
+    if (rms > 0.02) { heard = true; quietSince = now; }
+    if ((heard && now - quietSince > 1300) || now - startedAt > 30000 || (!heard && now - startedAt > 8000)) rec.stop();
+  };
+  src.connect(proc); proc.connect(ctx.destination);
+  const rec = MIC.rec = {
+    async stop() {
+      if (done) return; done = true; MIC.rec = null; AV.micLevel = 0;
+      try { proc.disconnect(); src.disconnect(); } catch {}
+      streamIn.getTracks().forEach(t => t.stop());
+      const rate = ctx.sampleRate; ctx.close();
+      $("#mic").classList.remove("on"); updateAvatarState();
+      if (!heard) return;
+      const len = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(len); let o = 0;
+      for (const c of chunks) { all.set(c, o); o += c.length; }
+      const ratio = rate / 16000, out = new Int16Array(Math.floor(len / ratio));
+      for (let i = 0; i < out.length; i++) {   // average the samples that fall into each 16 kHz sample
+        const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio)); let s = 0;
+        for (let j = a; j < b; j++) s += all[j];
+        out[i] = Math.max(-1, Math.min(1, s / Math.max(1, b - a))) * 32767;
+      }
+      S.status = "Listening… transcribing"; renderBar(); avatarCaption("…", "you");
+      try {
+        const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
+          "Content-Type": "application/octet-stream" }, body: out.buffer });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        S.status = ""; renderBar();
+        const text = (j.text || "").trim();
+        if (!text) { avatarCaption("(didn't catch that)", "you"); return; }
+        $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
+        avatarCaption(text, "you");
+        send();
+      } catch (e) { S.status = ""; renderBar(); notice("Couldn't transcribe: " + e.message); }
+    },
+  };
+  $("#mic").classList.add("on"); updateAvatarState();
+  postAvatar({ state: "listening" });
+}
+
+// ---------------------------------------------------------------- Stella's voice (Piper on the server)
+const SPEAK = {
+  ctx: null, analyser: null, data: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  audio() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.analyser = this.ctx.createAnalyser(); this.analyser.fftSize = 512; this.analyser.connect(this.ctx.destination);
+      this.data = new Uint8Array(this.analyser.fftSize);
+    }
+    return this.ctx;
+  },
+  level() {
+    if (!this.playing || !this.analyser) return 0;
+    this.analyser.getByteTimeDomainData(this.data); let s = 0;
+    for (let i = 0; i < this.data.length; i++) { const v = (this.data[i] - 128) / 128; s += v * v; }
+    return Math.min(1, Math.sqrt(s / this.data.length) * 4);
+  },
+  get speaking() { return !!this.playing || this.queue.length > 0 || this.busyFetch > 0; },
+  begin() { this.fed = 0; },
+  // Speak finished sentences of a reply that's still streaming in; finish() says the rest
+  feed(text, finish = false) {
+    if (!this.enabled) return;
+    let rest = text.slice(this.fed);
+    const fences = (text.slice(0, this.fed).match(/```/g) || []).length;
+    if (!finish && fences % 2 === 1) return;    // inside a code block: wait until it closes
+    let cut = -1;
+    if (finish) cut = rest.length;
+    else {
+      const rx = /[.!?…:;]["')\]]?\s+|\n{2,}/g; let m;
+      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= 40 || /\n/.test(m[0])) { cut = m.index + m[0].length; } }
+      const fence = rest.indexOf("```"); if (fence >= 0 && (cut < 0 || fence < cut)) {
+        const close = rest.indexOf("```", fence + 3);
+        if (close < 0) cut = fence > 0 ? fence : -1; else cut = close + 3;
+      }
+    }
+    if (cut <= 0) return;
+    const piece = rest.slice(0, cut); this.fed += cut;
+    if (piece.trim()) this.say(piece);
+  },
+  say(text) {
+    const gen = this.gen; this.busyFetch++;
+    const p = fetch("/tts", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed }) })
+      .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ("HTTP " + r.status)); } return r.arrayBuffer(); })
+      .then(buf => buf.byteLength > 44 ? this.audio().decodeAudioData(buf) : null)
+      .catch(e => { if (gen === this.gen) avatarStatus("Voice: " + e.message); return null; })
+      .finally(() => { this.busyFetch--; });
+    this.queue.push({ p, gen }); this.pump();
+  },
+  async pump() {
+    if (this.playing || !this.queue.length) return;
+    const item = this.queue.shift(); this.playing = item;
+    const buf = await item.p;
+    if (buf && item.gen === this.gen) {
+      const ctx = this.audio(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+      await new Promise(res => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(this.analyser); s.onended = res; item.src = s; s.start(); });
+    }
+    this.playing = null;
+    if (this.queue.length) this.pump(); else { updateAvatarState(); if (this.onIdle) this.onIdle(); }
+  },
+  cancel() {
+    this.gen++; this.queue = [];
+    if (this.playing && this.playing.src) { try { this.playing.src.stop(); } catch {} }
+    this.playing = null; this.fed = 0;
+  },
+};
+
+// ---------------------------------------------------------------- what Stella is doing, shared with avatar screens
+const CLIENT_ID = uuid();
+const DEVICE = AVATAR_MODE ? "avatar screen" : "desktop chat";
+function postAvatar(ev) {
+  if (!KEY) return;
+  fetch("/avatar/event", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(Object.assign({ source: CLIENT_ID, device: DEVICE }, ev)) }).catch(() => {});
+}
+
+// ---------------------------------------------------------------- the avatar screen (/avatar)
+const AV = { avatar: null, cfg: { style: "orb", voice: "", speed: 1, speak: true, speak_others: true, camera: "upper", voices: [] },
+  remote: null, remoteUntil: 0, since: 0, micLevel: 0, captionTimer: 0 };
+function avatarStatus(text) { const el = $("#avStatus"); if (el) { el.textContent = text || ""; el.style.display = text ? "" : "none"; } }
+function avatarCaption(text, who = "stella") {
+  const el = $("#caption"); if (!el) return;
+  clearTimeout(AV.captionTimer);
+  const t = String(text || "").replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*#`>]|(^|\s)_+|_+(\s|$)/g, "$1$2").replace(/\s+/g, " ").trim();
+  el.innerHTML = t ? `<span class="who">${who === "you" ? "YOU" : esc(NAME().toUpperCase())}</span>${esc(t.length > 260 ? "…" + t.slice(-260) : t)}` : "";
+  el.style.opacity = t ? 1 : 0;
+  if (t && who === "stella" && !S.busy) AV.captionTimer = setTimeout(() => { if (!SPEAK.speaking && !S.busy) el.style.opacity = 0; }, 12000);
+}
+function updateAvatarState() {
+  if (!AV.avatar) return;
+  let st = "idle";
+  if (MIC.rec) st = "listening";
+  else if (SPEAK.speaking && (SPEAK.playing || SPEAK.queue.length)) st = "talking";
+  else if (S.busy) st = S.streaming && S.streaming.text ? "talking" : "thinking";
+  else if (AV.remote && Date.now() < AV.remoteUntil) st = AV.remote;
+  AV.avatar.setState(st);
+  const dotTxt = { idle: WAKE.det ? `Say “${wakeLabel()}”` : "", listening: "Listening…", thinking: "Thinking…", talking: "" }[st];
+  const s = $("#avState"); if (s) s.textContent = dotTxt || "";
+}
+function animUrl(a) { return "/avatar/bin/animations/" + encodeURIComponent(a.file) + "?key=" + encodeURIComponent(KEY); }
+function lightOn() { return AV.cfg.light === "on" || (AV.cfg.light === "auto" && (AV.slow || AV.autoLight)); }
+async function loadAvatarConfig() {
+  try { AV.cfg = await api("/avatar/config"); } catch (e) { avatarStatus("Couldn't load avatar settings: " + e.message); return; }
+  AV.rev = AV.cfg.rev;
+  SPEAK.enabled = AV.cfg.speak;
+  const st = AV.cfg.status || {}, vs = st.voice || "", libs = st.libs || "";
+  avatarStatus(vs && vs !== "ready" ? "Voice: " + vs + (vs.startsWith("failed") ? "" : "…")
+    : libs.startsWith("failed") ? "Avatar files: " + libs : libs === "downloading" ? "Downloading avatar files…" : "");
+  if ((vs && vs !== "ready" && !vs.startsWith("failed")) || libs === "downloading") setTimeout(loadAvatarConfig, 4000);
+  if (!AV.avatar) return;
+  AV.avatar.setCamera(AV.cfg.camera); AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setLight(lightOn());
+  AV.avatar.setGestures(AV.cfg.gestures);
+  AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
+  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY),
+    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || ""));
+  AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
+  if (libs !== "downloading") startWake();
+}
+
+// ---- wake word on this screen (the phone app's avatar screen uses the app's own)
+const WAKE = { det: null, sig: "", error: "" };
+function chime() {
+  try { const ctx = SPEAK.audio(), now = ctx.currentTime;
+    for (const [f, d] of [[880, 0], [1320, 0.09]]) { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = f;
+      g.gain.setValueAtTime(0, now + d); g.gain.linearRampToValueAtTime(0.12, now + d + 0.02); g.gain.exponentialRampToValueAtTime(0.001, now + d + 0.25);
+      o.connect(g); g.connect(ctx.destination); o.start(now + d); o.stop(now + d + 0.3); } } catch {}
+}
+function wakeLabel() { const w = (AV.cfg.wake_words || []).find(x => x.id === AV.cfg.wake_word); return w ? w.label : "Hey Jarvis"; }
+async function startWake() {
+  const want = AV.cfg.wake && !document.body.classList.contains("inapp") && window.isSecureContext && !!navigator.mediaDevices;
+  const sig = want ? AV.cfg.wake_word + "|" + AV.cfg.wake_sensitivity : "";
+  if (sig === WAKE.sig) return;
+  if (WAKE.det) { WAKE.det.stop(); WAKE.det = null; }
+  WAKE.sig = sig; WAKE.error = "";
+  if (!want) return;
+  const id = AV.cfg.wake_word || "hey_jarvis";
+  const custom = id.startsWith("custom:");
+  try {
+    const mod = await import("/avatar/avatar.js");
+    WAKE.det = await mod.createWakeWord({
+      modelUrl: custom ? "/wakewords/" + encodeURIComponent(id.slice(7)) + ".onnx" : "/avatar/lib/oww/" + id + "_v0.1.onnx",
+      headers: custom ? { Authorization: "Bearer " + KEY } : {},
+      threshold: 1 - AV.cfg.wake_sensitivity,
+      isBusy: () => !!MIC.rec, isSpeaking: () => SPEAK.speaking,
+      onWake: () => { chime(); if (SPEAK.speaking) SPEAK.cancel(); if (!MIC.rec) micToggle(); },
+      onError: e => { WAKE.error = e.message; },
+    });
+  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
+}
+async function pollAvatarEvents() {
+  try {
+    const r = await api("/avatar/events?since=" + AV.since);
+    const first = !AV.polled; AV.polled = true; AV.since = r.seq;
+    // something changed in the shared bin or the settings (on any screen, or files dropped on the server): reload
+    if (r.avatar_rev && AV.rev && r.avatar_rev !== AV.rev && AV.avatar && !document.querySelector(".overlay")) { AV.rev = r.avatar_rev; loadAvatarConfig(); }
+    if (first) return;      // don't replay what happened before this screen opened
+    for (const ev of r.events) {
+      if (ev.source === CLIENT_ID) continue;
+      if (ev.state === "reply") {
+        AV.remote = null; avatarCaption(ev.text, "stella"); AV.avatar && AV.avatar.react(ev.text);
+        if (AV.cfg.speak && AV.cfg.speak_others && ev.text) { SPEAK.cancel(); SPEAK.say(ev.text); }
+      } else if (ev.state === "idle") { AV.remote = null; }
+      else { AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
+        if (ev.state === "listening") avatarCaption("…", "you"); }
+    }
+  } catch {}
+}
+const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
+const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["quiet", "After a long quiet"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"], ["off", "Off"]];
+function openAvatarSettings() {
+  const c = AV.cfg;
+  const anims = c.animations || [];
+  const d = dialog(`<h2>✦ Avatar</h2>
+    <label class="sub">Look</label>
+    <div style="display:flex;gap:8px;margin:4px 0 10px"><button id="stOrb" class="${c.style === "orb" ? "primary" : ""}">Space orb</button>
+      <button id="stVrm" class="${c.style === "vrm" ? "primary" : ""}">3D character</button></div>
+    ${(c.characters || []).length ? `<label class="sub">Character</label><div style="display:flex;gap:8px;margin:4px 0 6px"><select id="chr">${c.characters.map(ch =>
+      `<option value="${esc(ch.file)}" ${c.character === ch.file ? "selected" : ""}>${esc(ch.name)} (${Math.round(ch.size / 1e6)} MB)</option>`).join("")}</select></div>` : ""}
+    <div class="sub">${c.has_model ? "" : "No character yet."} Use a female <b>.vrm</b> character: make one free in
+      <a href="https://vroid.com/en/studio" target="_blank" rel="noopener">VRoid Studio</a>, or download one whose license allows it from
+      <a href="https://hub.vroid.com/en" target="_blank" rel="noopener">VRoid Hub</a>.
+      <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
+      <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
+      <p class="sub" style="margin-top:8px">📁 <b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
+      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
+    <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
+    <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
+    <label class="sub" style="display:block;margin-top:10px">Camera</label>
+    <select id="cam">${[["face", "Face close-up"], ["upper", "Head and shoulders"], ["full", "Whole body"]].map(([v, l]) => `<option value="${v}" ${c.camera === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <h3 class="hud" style="margin-top:16px">Animations</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
+    <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
+    <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
+      <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <button class="ghost" data-play="${a.id}" title="Play">▶</button><button class="ghost" data-adel="${a.id}" title="Delete">✕</button></div>`).join("")
+      || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
+      <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
+    <h3 class="hud" style="margin-top:16px">Voice</h3>
+    <div style="display:flex;gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select><button id="hear">▶ Hear</button></div>
+    <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
+    <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="oth" style="width:auto" ${c.speak_others ? "checked" : ""}> Also speak replies to the phone and other devices</label>
+    <h3 class="hud" style="margin-top:16px">Wake word</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="wk" style="width:auto" ${c.wake ? "checked" : ""}> Listen for a wake word on this screen</label>
+    <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
+    <label class="sub" style="display:block;margin-top:8px">Sensitivity: <span id="wsv">${Math.round(c.wake_sensitivity * 100)}%</span> (higher hears you more easily, but triggers by mistake more often)</label>
+    <input id="ws" type="range" min="0.2" max="0.9" step="0.05" value="${c.wake_sensitivity}">
+    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see 🎤)." : ""}</p>
+    <h3 class="hud" style="margin-top:16px">Performance</h3>
+    <select id="lt"><option value="auto" ${c.light === "auto" ? "selected" : ""}>Light mode: automatic${AV.slow || AV.autoLight ? " (on for this device)" : ""}</option>
+      <option value="on" ${c.light === "on" ? "selected" : ""}>Light mode: on (Raspberry Pi, old phones)</option><option value="off" ${c.light === "off" ? "selected" : ""}>Light mode: off (best quality)</option></select>
+    <p class="sub">Running at ${Math.round(AV.avatar ? AV.avatar.fps() : 0)} frames a second. Settings are saved on the server, so every avatar screen uses them.</p>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save</button></div>`);
+  let style = c.style;
+  const $d = q => d.querySelector(q);
+  const mark = () => { $d("#stOrb").className = style === "orb" ? "primary" : ""; $d("#stVrm").className = style === "vrm" ? "primary" : ""; };
+  $d("#stOrb").onclick = () => { style = "orb"; mark(); };
+  $d("#stVrm").onclick = () => { style = "vrm"; mark(); if (!c.has_model) $d("#vrmFile").click(); };
+  $d("#sp").oninput = e => { $d("#spv").textContent = (+e.target.value).toFixed(2) + "×"; };
+  $d("#ws").oninput = e => { $d("#wsv").textContent = Math.round(e.target.value * 100) + "%"; };
+  $d("#ht").oninput = e => { $d("#hv").textContent = cmToFtIn(+e.target.value); $d("#hcm").textContent = `(${(+e.target.value).toFixed(0)} cm)`;
+    if (AV.avatar) AV.avatar.setHeight(+e.target.value); };
+  $d("#upl").onclick = () => $d("#vrmFile").click();
+  $d("#vrmFile").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    $d("#uplState").textContent = `Uploading ${Math.round(f.size / 1e6)} MB…`;
+    try { AV.cfg = await api("/avatar/model?name=" + encodeURIComponent(f.name), { method: "PUT", body: f, headers: { "Content-Type": "model/gltf-binary" } });
+      d.remove(); if (AV.avatar) await AV.avatar.setStyle("orb"); loadAvatarConfig(); }
+    catch (err) { $d("#uplState").textContent = "Couldn't upload: " + err.message; }
+  };
+  if ($d("#rm")) $d("#rm").onclick = async () => { const ch = $d("#chr") ? $d("#chr").value : true;
+    AV.cfg = await api("/avatar/config", { method: "POST", json: { remove_model: ch } }); d.remove(); loadAvatarConfig(); };
+  d.querySelectorAll("[data-try]").forEach(b => b.onclick = () => { if (!AV.avatar || AV.avatar.style !== "vrm") return alertBox("Gestures are for the 3D character."); AV.avatar.play(b.dataset.try); });
+  d.querySelectorAll("[data-play]").forEach(b => b.onclick = () => { if (AV.avatar && !AV.avatar.play(b.dataset.play)) alertBox("That animation couldn't be loaded on this character (or the 3D character isn't showing)."); });
+  d.querySelectorAll("[data-when]").forEach(sel => sel.onchange = async () => {
+    try { await api("/avatar/anims/" + sel.dataset.when, { method: "POST", json: { when: sel.value } }); } catch (e) { alertBox(e.message); } });
+  d.querySelectorAll("[data-adel]").forEach(b => b.onclick = async () => {
+    try { await api("/avatar/anims/" + b.dataset.adel, { method: "POST", json: { delete: true } }); b.closest(".row").remove(); } catch (e) { alertBox(e.message); } });
+  $d("#anUp").onclick = () => $d("#anFile").click();
+  $d("#anFile").onchange = async e => {
+    for (const f of e.target.files) {
+      const ext = (f.name.split(".").pop() || "").toLowerCase(), name = f.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+      $d("#anState").textContent = `Uploading ${f.name}…`;
+      try { await api(`/avatar/anims?type=${ext}&when=${$d("#anWhen").value}&name=${encodeURIComponent(name)}`, { method: "PUT", body: f, headers: { "Content-Type": "application/octet-stream" } }); }
+      catch (err) { $d("#anState").textContent = `${f.name}: ${err.message}`; return; }
+    }
+    d.remove(); await loadAvatarConfig(); openAvatarSettings();
+  };
+  $d("#hear").onclick = () => {
+    const was = SPEAK.enabled; SPEAK.enabled = true; SPEAK.cancel();
+    const prevVoice = AV.cfg.voice, prevSpeed = AV.cfg.speed;
+    AV.cfg.voice = $d("#vc").value; AV.cfg.speed = +$d("#sp").value;
+    SPEAK.say(`Hi, I'm ${NAME()}. This is how I sound.`);
+    AV.cfg.voice = prevVoice; AV.cfg.speed = prevSpeed; SPEAK.enabled = was;
+  };
+  $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
+  $d("#save").onclick = async () => {
+    try {
+      AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
+        speed: +$d("#sp").value, speak: $d("#spk").checked, speak_others: $d("#oth").checked, height_cm: +$d("#ht").value,
+        gestures: $d("#ges").checked, wake: $d("#wk").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+      d.remove(); loadAvatarConfig();
+    } catch (e) { alertBox(e.message); }
+  };
+}
+async function startAvatarScreen() {
+  document.body.classList.add("avatar");
+  $("#input").placeholder = "Message " + NAME() + "…  (or press Space to talk)";
+  if (new URLSearchParams(location.search).get("app") === "1") document.body.classList.add("inapp");
+  await pollAvatarEvents();      // remember where the event list is now, so nothing that happens while loading is missed
+  const mod = await import("/avatar/avatar.js");
+  AV.slow = mod.looksLikeSlowDevice();
+  try { AV.cfg = await api("/avatar/config"); } catch {}
+  AV.avatar = mod.createAvatar($("#avatarHost"), { camera: AV.cfg.camera, height: AV.cfg.height_cm, light: lightOn(), gestures: AV.cfg.gestures,
+    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m) });
+  await AV.avatar.setStyle("orb");
+  await loadAvatarConfig();
+  // Automatic light mode: switch on if this device draws too slowly
+  setTimeout(() => { if (AV.avatar && AV.cfg.light === "auto" && !AV.slow && AV.avatar.fps() < 32) { AV.autoLight = true; AV.avatar.setLight(true); } }, 8000);
+  // Browsers only allow sound after a tap: ask once if needed
+  const ctx = SPEAK.audio();
+  if (ctx.state === "suspended") {
+    $("#tapStart").style.display = "flex";
+    const go = async () => { try { await ctx.resume(); } catch {} $("#tapStart").style.display = "none"; };
+    $("#tapStart").onclick = go; document.addEventListener("keydown", go, { once: true });
+  }
+  setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
+  (function loop() {
+    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); updateAvatarState(); }
+    requestAnimationFrame(loop);
+  })();
+  $("#avChat").onclick = () => document.body.classList.toggle("showchat");
+  $("#avNew").onclick = () => { newChat(); avatarCaption(""); };
+  $("#avSet").onclick = openAvatarSettings;
+  $("#avFull").onclick = () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}); };
+  // Space bar: push to talk (when not typing)
+  document.addEventListener("keydown", e => { if (e.code === "Space" && document.activeElement !== $("#input") && !e.repeat && !document.querySelector(".overlay")) { e.preventDefault(); micToggle(); } });
+}
+
+$("#mic").onclick = micToggle;
+
 async function start() {
   if (!KEY) { askKey(); return; }
   S.current = store.get("current", "") || null;
@@ -4483,6 +4900,7 @@ async function start() {
   if (S.current && !S.convs.has(S.current)) S.current = null;
   await loadMeta();
   renderSide(); renderMsgs(); updateMeter();
+  if (AVATAR_MODE && !AV.avatar) { $("#avName").textContent = NAME().toUpperCase(); startAvatarScreen().catch(e => avatarStatus("Avatar: " + e.message)); }
 }
 setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);
@@ -4491,6 +4909,1275 @@ start();
 </body>
 </html>
 """  # end of web chat
+
+
+# ----------------------------------------------------------------------------- avatar screen and voice
+# A full-screen page (/avatar) with a 3D VRM character or an animated orb that listens, thinks and talks.
+# Stella's voice is Piper (local neural text-to-speech). Everything is downloaded on first use.
+import zipfile
+
+AVATAR = {"dir": "", "lock": threading.Lock(), "status": {}}
+THREE_VERSION = "0.180.0"
+AVATAR_LIBS = {   # path under the lib folder -> URLs to try
+    "build/three.module.js": [f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/build/three.module.js",
+                              f"https://unpkg.com/three@{THREE_VERSION}/build/three.module.js"],
+    "build/three.core.js": [f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/build/three.core.js",
+                            f"https://unpkg.com/three@{THREE_VERSION}/build/three.core.js"],
+    "examples/jsm/loaders/GLTFLoader.js": [
+        f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/examples/jsm/loaders/GLTFLoader.js",
+        f"https://unpkg.com/three@{THREE_VERSION}/examples/jsm/loaders/GLTFLoader.js"],
+    "examples/jsm/utils/BufferGeometryUtils.js": [
+        f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/examples/jsm/utils/BufferGeometryUtils.js",
+        f"https://unpkg.com/three@{THREE_VERSION}/examples/jsm/utils/BufferGeometryUtils.js"],
+    "three-vrm.module.min.js": ["https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js",
+                                "https://unpkg.com/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"],
+    # animations: .vrma (VRM Animation) and .fbx (Mixamo)
+    "three-vrm-animation.module.min.js": [
+        "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3/lib/three-vrm-animation.module.min.js",
+        "https://unpkg.com/@pixiv/three-vrm-animation@3/lib/three-vrm-animation.module.min.js"],
+}
+for _rel in ("loaders/FBXLoader.js", "libs/fflate.module.js", "curves/NURBSCurve.js", "curves/NURBSUtils.js"):
+    AVATAR_LIBS["examples/jsm/" + _rel] = [f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/examples/jsm/{_rel}",
+                                           f"https://unpkg.com/three@{THREE_VERSION}/examples/jsm/{_rel}"]
+# Wake word in the browser: ONNX Runtime Web + the same openWakeWord models as the phone app
+ORT_VERSION = "1.20.1"
+for _f in ("ort.wasm.min.js", "ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"):
+    AVATAR_LIBS["ort/" + _f] = [f"https://cdn.jsdelivr.net/npm/onnxruntime-web@{ORT_VERSION}/dist/{_f}",
+                                f"https://unpkg.com/onnxruntime-web@{ORT_VERSION}/dist/{_f}"]
+OWW_MODELS = ("melspectrogram.onnx", "embedding_model.onnx", "hey_jarvis_v0.1.onnx", "alexa_v0.1.onnx",
+              "hey_mycroft_v0.1.onnx")
+for _f in OWW_MODELS:
+    AVATAR_LIBS["oww/" + _f] = [f"https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/{_f}"]
+LIB_TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
+             ".wasm": "application/wasm", ".onnx": "application/octet-stream"}
+PIPER_RELEASE = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/"
+VOICES = {   # Piper voices (huggingface.co/rhasspy/piper-voices), ~60 MB each
+    "en_US-lessac-medium": "Lessac: clear, warm (US)",
+    "en_US-amy-medium": "Amy: bright, friendly (US)",
+    "en_US-hfc_female-medium": "HFC: soft, calm (US)",
+    "en_US-kristin-medium": "Kristin: expressive (US)",
+    "en_GB-alba-medium": "Alba: gentle Scottish accent (UK)",
+    "en_GB-jenny_dioco-medium": "Jenny: natural British (UK)",
+}
+DEFAULT_VOICE = "en_US-lessac-medium"
+
+
+def _voice_url(name, ext):
+    lang, rest = name.split("-", 1)
+    speaker, quality = rest.rsplit("-", 1)
+    return (f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang.split('_')[0]}/{lang}/{speaker}/"
+            f"{quality}/{name}.onnx{ext}")
+
+
+def _avatar_path(*parts):
+    return os.path.join(AVATAR["dir"], *parts)
+
+
+def avatar_config():
+    cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
+           "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
+           "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": ""}
+    try:
+        with open(_avatar_path("config.json")) as f:
+            saved = json.load(f)
+        cfg.update({k: v for k, v in saved.items() if k in cfg})
+    except (OSError, ValueError):
+        pass
+    if cfg["voice"] not in VOICES:
+        cfg["voice"] = DEFAULT_VOICE
+    chars = list_characters()
+    if cfg.get("character") not in [c["file"] for c in chars]:
+        cfg["character"] = chars[0]["file"] if chars else ""     # newest one
+    cfg["characters"] = chars
+    cfg["has_model"] = bool(cfg["character"])
+    cfg["model_v"] = next((c["v"] for c in chars if c["file"] == cfg["character"]), 0)
+    cfg["rev"] = avatar_rev()
+    cfg["bin"] = _avatar_path("bin")
+    if cfg["style"] == "vrm" and not cfg["has_model"]:
+        cfg["style"] = "orb"
+    cfg["voices"] = [{"id": k, "label": v} for k, v in VOICES.items()]
+    cfg["animations"] = list_animations()
+    cfg["wake_words"] = [{"id": "hey_jarvis", "label": "Hey Jarvis"}, {"id": "alexa", "label": "Alexa"},
+                         {"id": "hey_mycroft", "label": "Hey Mycroft"}] + [
+        {"id": "custom:" + n, "label": n.replace("_", " ").title()} for n in custom_wakewords()]
+    cfg["status"] = dict(AVATAR["status"])
+    return cfg
+
+
+def save_avatar_config(new):
+    cur = {k: v for k, v in avatar_config().items()
+           if k not in ("has_model", "model_v", "voices", "status", "animations", "wake_words", "characters", "rev", "bin")}
+    if new.get("style") in ("orb", "vrm"):
+        cur["style"] = new["style"]
+    if new.get("voice") in VOICES:
+        cur["voice"] = new["voice"]
+    if "height_cm" in new:
+        cur["height_cm"] = round(max(140.0, min(200.0, float(new["height_cm"]))), 1)
+    if new.get("light") in ("auto", "on", "off"):
+        cur["light"] = new["light"]
+    if "wake_sensitivity" in new:
+        cur["wake_sensitivity"] = round(max(0.2, min(0.9, float(new["wake_sensitivity"]))), 2)
+    if isinstance(new.get("wake_word"), str) and re.fullmatch(r"(custom:)?[A-Za-z0-9_.-]{1,64}", new["wake_word"]):
+        cur["wake_word"] = new["wake_word"]
+    for k in ("speak", "speak_others", "name_tag", "wake", "gestures"):
+        if k in new:
+            cur[k] = bool(new[k])
+    if "speed" in new:
+        cur["speed"] = max(0.6, min(1.6, float(new["speed"])))
+    if new.get("camera") in ("face", "upper", "full"):
+        cur["camera"] = new["camera"]
+    if isinstance(new.get("character"), str) and new["character"] in [c["file"] for c in list_characters()]:
+        cur["character"] = new["character"]
+    if new.get("remove_model"):
+        name = new.get("remove_model") if isinstance(new.get("remove_model"), str) else cur.get("character")
+        if name and _safe_bin_name(name):
+            try:
+                os.remove(_avatar_path("bin", "characters", name))
+            except OSError:
+                pass
+        if not list_characters():
+            cur["style"] = "orb"
+    os.makedirs(AVATAR["dir"], exist_ok=True)
+    with open(_avatar_path("config.json.part"), "w") as f:
+        json.dump(cur, f, indent=1)
+    os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
+    if cur["voice"] != TTS.voice:
+        threading.Thread(target=ensure_voice, args=(cur["voice"],), daemon=True).start()
+    return avatar_config()
+
+
+def _fetch_first(urls, dest):
+    err = None
+    for u in urls:
+        try:
+            _download_file(u, dest, {})
+            return
+        except (urllib.error.URLError, OSError) as e:
+            err = e
+            try:
+                os.remove(dest + ".part")
+            except OSError:
+                pass
+    raise OSError(f"couldn't download {os.path.basename(dest)}: {err}")
+
+
+def ensure_avatar_libs():
+    """three.js and three-vrm for the 3D character (~1.6 MB, once)."""
+    missing = [p for p in AVATAR_LIBS if not os.path.isfile(_avatar_path("lib", p))]
+    if not missing:
+        AVATAR["status"]["libs"] = "ready"
+        return True
+    AVATAR["status"]["libs"] = "downloading"
+    try:
+        for p in missing:
+            dest = _avatar_path("lib", p)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            _fetch_first(AVATAR_LIBS[p], dest)
+        AVATAR["status"]["libs"] = "ready"
+        return True
+    except OSError as e:
+        AVATAR["status"]["libs"] = f"failed: {e}"
+        log(f"avatar: {e}")
+        return False
+
+
+def piper_exe():
+    d = _avatar_path("piper")
+    for name in ("piper.exe", "piper"):
+        if os.path.isfile(os.path.join(d, name)):
+            return os.path.join(d, name)
+    return ""
+
+
+def ensure_piper():
+    """The Piper speech engine (~25 MB, once)."""
+    if piper_exe():
+        return True
+    import platform
+    import tarfile
+    machine = platform.machine().lower()
+    if os.name == "nt":
+        asset = "piper_windows_amd64.zip"
+    elif machine in ("x86_64", "amd64"):
+        asset = "piper_linux_x86_64.tar.gz"
+    elif machine in ("aarch64", "arm64"):
+        asset = "piper_linux_aarch64.tar.gz"
+    elif machine.startswith("armv7"):
+        asset = "piper_linux_armv7l.tar.gz"
+    else:
+        AVATAR["status"]["voice"] = f"failed: no Piper build for {machine}"
+        return False
+    AVATAR["status"]["voice"] = "downloading the speech engine"
+    tmp = _avatar_path(asset)
+    try:
+        os.makedirs(AVATAR["dir"], exist_ok=True)
+        _download_file(PIPER_RELEASE + asset, tmp, {})
+        target = os.path.realpath(AVATAR["dir"])
+        if asset.endswith(".zip"):
+            with zipfile.ZipFile(tmp) as z:
+                for n in z.namelist():
+                    if not os.path.realpath(os.path.join(target, n)).startswith(target + os.sep):
+                        raise OSError("unsafe file in the Piper download")
+                z.extractall(target)
+        else:
+            with tarfile.open(tmp) as t:
+                for m in t.getmembers():
+                    if not os.path.realpath(os.path.join(target, m.name)).startswith(target + os.sep) \
+                            or m.issym() or m.islnk() and not os.path.realpath(
+                                os.path.join(target, m.linkname)).startswith(target + os.sep):
+                        raise OSError("unsafe file in the Piper download")
+                t.extractall(target)
+        exe = piper_exe()
+        if exe and os.name != "nt":
+            os.chmod(exe, 0o755)
+        return bool(exe)
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as e:
+        AVATAR["status"]["voice"] = f"failed: {e}"
+        log(f"avatar voice: {e}")
+        return False
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def ensure_voice(name):
+    if not ensure_piper():
+        return False
+    model = _avatar_path("voices", name + ".onnx")
+    if os.path.isfile(model) and os.path.isfile(model + ".json"):
+        AVATAR["status"]["voice"] = "ready"
+        return True
+    AVATAR["status"]["voice"] = f"downloading the voice {VOICES.get(name, name).split(':')[0]}"
+    try:
+        os.makedirs(os.path.dirname(model), exist_ok=True)
+        _download_file(_voice_url(name, ".json"), model + ".json", {})
+        _download_file(_voice_url(name, ""), model, {})
+        AVATAR["status"]["voice"] = "ready"
+        return True
+    except (urllib.error.URLError, OSError) as e:
+        AVATAR["status"]["voice"] = f"failed: {e}"
+        log(f"avatar voice: {e}")
+        return False
+
+
+def prepare_avatar():
+    """Downloads what the avatar screen needs, once, in the background (called when the page first opens)."""
+    if AVATAR.get("preparing"):
+        return
+    AVATAR["preparing"] = True
+
+    def work():
+        try:
+            ensure_avatar_libs()
+            ensure_voice(avatar_config()["voice"])
+        finally:
+            AVATAR["preparing"] = False
+    threading.Thread(target=work, daemon=True).start()
+
+
+SPEAKABLE_DROP = [
+    (re.compile(r"```[\s\S]*?(```|$)"), " (the code is on screen) "),
+    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),
+    (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),
+    (re.compile(r"https?://\S+"), " a link "),
+    (re.compile(r"`([^`]*)`"), r"\1"),
+    (re.compile(r"[*_#>|~]+"), " "),
+    (re.compile(r"^\s*[-+]\s+", re.M), ""),
+    (re.compile(r"\s+"), " "),
+]
+
+
+def speakable(text):
+    """What to say out loud for a reply: no code blocks, markdown symbols or long links."""
+    for rx, rep in SPEAKABLE_DROP:
+        text = rx.sub(rep, text)
+    return text.strip()[:1200]
+
+
+class PiperTTS:
+    """A Piper process kept running (the voice stays loaded): one JSON line in, one WAV file out."""
+
+    def __init__(self):
+        self.proc, self.voice, self.speed, self.lock, self.lines = None, "", 1.0, threading.Lock(), None
+
+    def _start(self, voice, speed):
+        import queue
+        self.stop()
+        exe = piper_exe()
+        model = _avatar_path("voices", voice + ".onnx")
+        if not exe or not os.path.isfile(model):
+            raise RuntimeError("the voice isn't downloaded yet")
+        env = dict(os.environ)
+        if os.name != "nt":
+            env["LD_LIBRARY_PATH"] = os.path.dirname(exe) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        self.proc = subprocess.Popen(
+            [exe, "--model", model, "--json-input", "--output_dir", _avatar_path("tts"),
+             "--length_scale", str(round(1.0 / max(0.5, speed), 3)), "--sentence_silence", "0.15", "--quiet"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=os.path.dirname(exe),
+            env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.voice, self.speed = voice, speed
+        lines = self.lines = queue.Queue()
+        out = self.proc.stdout
+
+        def reader():   # Piper prints each finished file's name; read it without blocking the caller forever
+            for raw in iter(out.readline, b""):
+                lines.put(raw.decode("utf-8", "replace").strip())
+            lines.put(None)
+        threading.Thread(target=reader, daemon=True).start()
+
+    def stop(self):
+        if self.proc:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+        self.proc = None
+
+    def say(self, text, voice, speed=1.0):
+        import queue
+        text = speakable(text)
+        if not text:
+            return b""
+        out_dir = _avatar_path("tts")
+        os.makedirs(out_dir, exist_ok=True)
+        out = os.path.join(out_dir, uuid.uuid4().hex + ".wav")
+        with self.lock:
+            for attempt in range(2):
+                if not self.proc or self.proc.poll() is not None or self.voice != voice or self.speed != speed:
+                    self._start(voice, speed)
+                try:
+                    self.proc.stdin.write((json.dumps({"text": text, "output_file": out}) + "\n").encode("utf-8"))
+                    self.proc.stdin.flush()
+                    deadline, got = time.time() + 60, False
+                    while time.time() < deadline:
+                        line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+                        if line is None:
+                            break
+                        if os.path.basename(out) in line:
+                            got = True
+                            break
+                    if got and os.path.isfile(out):
+                        break
+                except (OSError, ValueError, queue.Empty):
+                    pass
+                self.stop()
+            else:
+                raise RuntimeError("the speech engine stopped")
+        try:
+            with open(out, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+
+
+TTS = PiperTTS()
+
+
+def _tts_speakable_ok():
+    return bool(piper_exe()) and os.path.isfile(_avatar_path("voices", avatar_config()["voice"] + ".onnx"))
+
+
+class AvatarBus:
+    """What Stella is doing on any device (listening, thinking, replying), for avatar screens to show.
+    Screens poll /avatar/events?since=N about once a second."""
+
+    def __init__(self):
+        self.events, self.seq, self.lock = [], 0, threading.Lock()
+
+    def post(self, ev):
+        state = str(ev.get("state", ""))
+        if state not in ("idle", "listening", "thinking", "talking", "reply"):
+            raise ValueError("unknown state")
+        with self.lock:
+            self.seq += 1
+            self.events.append({"seq": self.seq, "ts": time.time(), "state": state,
+                                "source": str(ev.get("source", ""))[:64],
+                                "device": str(ev.get("device", ""))[:40],
+                                "text": str(ev.get("text", ""))[:4000],
+                                "voice": bool(ev.get("voice"))})
+            self.events = self.events[-50:]
+            return self.seq
+
+    def since(self, seq):
+        with self.lock:
+            return {"seq": self.seq, "events": [e for e in self.events if e["seq"] > seq and time.time() - e["ts"] < 120]}
+
+
+AVATAR_BUS = AvatarBus()
+
+WAKE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def custom_wakewords():
+    if not WAKEWORD_DIR:
+        return []
+    try:
+        return sorted(f[:-5] for f in os.listdir(WAKEWORD_DIR) if f.endswith(".onnx") and WAKE_NAME.fullmatch(f[:-5])
+                      and ".." not in f)
+    except (OSError, NameError):
+        return []
+
+
+# ---- The avatar "bin": one shared folder on the server with every character and animation.
+#   bin/characters/*.vrm               characters (the newest is used unless you pick one)
+#   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy)
+# Drop files in (file manager, network share, scp) or upload them on any avatar screen. Every screen checks the
+# bin's revision about once a second and loads what's new; deleted files disappear from every screen.
+ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "off")
+BIN_NAME = re.compile(r"[^/\\\x00]{1,120}")
+_REV_CACHE = {"t": 0.0, "rev": ""}
+
+
+def _safe_bin_name(name):
+    return bool(BIN_NAME.fullmatch(name)) and name not in (".", "..") and not name.startswith(".")
+
+
+def _bin_files(kind, exts):
+    d = _avatar_path("bin", kind)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        full = os.path.join(d, n)
+        if _safe_bin_name(n) and n.lower().endswith(exts) and os.path.isfile(full):
+            st = os.stat(full)
+            out.append((n, int(st.st_mtime), st.st_size))
+    return sorted(out, key=lambda x: -x[1])
+
+
+def list_characters():
+    return [{"file": n, "name": os.path.splitext(n)[0].replace("_", " "), "v": v, "size": size}
+            for n, v, size in _bin_files("characters", (".vrm",))]
+
+
+def _anim_meta():
+    try:
+        with open(_avatar_path("animations.json")) as f:
+            meta = json.load(f)
+        return meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_anim_meta(meta):
+    os.makedirs(AVATAR["dir"], exist_ok=True)
+    with open(_avatar_path("animations.json.part"), "w") as f:
+        json.dump(meta, f, indent=1)
+    os.replace(_avatar_path("animations.json.part"), _avatar_path("animations.json"))
+
+
+def _anim_id(name, v, size):
+    import hashlib
+    return hashlib.sha1(f"{name}|{v}|{size}".encode()).hexdigest()[:12]
+
+
+def list_animations():
+    meta, out = _anim_meta(), []
+    for n, v, size in _bin_files("animations", (".vrma", ".fbx")):
+        base, ext = os.path.splitext(n)
+        m = re.fullmatch(r"(.*?)@(idle|greeting|quiet|happy|kiss|dance|off)", base, re.I)
+        when = (meta.get(n) or {}).get("when") or (m.group(2).lower() if m else "idle")
+        out.append({"id": _anim_id(n, v, size), "file": n, "type": ext[1:].lower(), "v": v,
+                    "name": (m.group(1) if m else base).replace("_", " ").strip() or base, "when": when})
+    return sorted(out, key=lambda a: a["name"].lower())
+
+
+def avatar_rev():
+    """Changes whenever anything in the bin (or the avatar settings) changes."""
+    now = time.time()
+    if now - _REV_CACHE["t"] < 1.0 and _REV_CACHE["rev"]:
+        return _REV_CACHE["rev"]
+    import hashlib
+    h = hashlib.sha1()
+    for kind, exts in (("characters", (".vrm",)), ("animations", (".vrma", ".fbx"))):
+        for item in _bin_files(kind, exts):
+            h.update(repr((kind,) + item).encode())
+    for f in ("config.json", "animations.json"):
+        try:
+            h.update(str(os.path.getmtime(_avatar_path(f))).encode())
+        except OSError:
+            pass
+    _REV_CACHE.update(t=now, rev=h.hexdigest()[:12])
+    return _REV_CACHE["rev"]
+
+
+def _free_name(folder, name):
+    base, ext = os.path.splitext(name)
+    cand, i = name, 2
+    while os.path.exists(os.path.join(folder, cand)):
+        cand, i = f"{base} ({i}){ext}", i + 1
+    return cand
+
+
+def _clean_name(name, ext):
+    name = re.sub(r"[^\w .()@-]+", "_", os.path.basename(name or "")).strip(" .") or "file"
+    if not name.lower().endswith("." + ext):
+        name += "." + ext
+    return name[-120:]
+
+
+def add_character(data, name):
+    if not data or data[:4] != b"glTF":
+        raise ValueError("send a .vrm file (VRoid Studio exports these), under 120 MB")
+    folder = _avatar_path("bin", "characters")
+    os.makedirs(folder, exist_ok=True)
+    fname = _free_name(folder, _clean_name(name or "character", "vrm"))
+    with open(os.path.join(folder, fname + ".part"), "wb") as f:
+        f.write(data)
+    os.replace(os.path.join(folder, fname + ".part"), os.path.join(folder, fname))
+    _REV_CACHE["t"] = 0
+    return fname
+
+
+def add_animation(data, name, when, ext):
+    if ext not in ("vrma", "fbx"):
+        raise ValueError("animations must be .vrma (VRM Animation) or .fbx (Mixamo)")
+    if ext == "vrma" and data[:4] != b"glTF":
+        raise ValueError("that isn't a .vrma file")
+    if ext == "fbx" and not (data[:18] == b"Kaydara FBX Binary" or b"FBXHeaderExtension" in data[:2000]):
+        raise ValueError("that isn't an .fbx file")
+    folder = _avatar_path("bin", "animations")
+    os.makedirs(folder, exist_ok=True)
+    fname = _free_name(folder, _clean_name(name or "animation", ext))
+    with open(os.path.join(folder, fname), "wb") as f:
+        f.write(data)
+    meta = _anim_meta()
+    meta[fname] = {"when": when if when in ANIM_WHEN else "idle"}
+    _save_anim_meta(meta)
+    _REV_CACHE["t"] = 0
+    return list_animations()
+
+
+def update_animation(aid, change):
+    for a in list_animations():
+        if a["id"] != aid:
+            continue
+        meta = _anim_meta()
+        if change.get("delete"):
+            try:
+                os.remove(_avatar_path("bin", "animations", a["file"]))
+            except OSError:
+                pass
+            meta.pop(a["file"], None)
+        elif change.get("when") in ANIM_WHEN:
+            meta.setdefault(a["file"], {})["when"] = change["when"]
+        _save_anim_meta(meta)
+        _REV_CACHE["t"] = 0
+        return list_animations()
+    raise KeyError("no such animation")
+
+
+def migrate_avatar_files():
+    """Earlier versions kept model.vrm and anims/ next to the settings; move them into the bin."""
+    try:
+        old = _avatar_path("model.vrm")
+        if os.path.isfile(old):
+            os.makedirs(_avatar_path("bin", "characters"), exist_ok=True)
+            os.replace(old, os.path.join(_avatar_path("bin", "characters"), _free_name(_avatar_path("bin", "characters"), "character.vrm")))
+        try:
+            with open(_avatar_path("animations.json")) as f:
+                old_list = json.load(f)
+        except (OSError, ValueError):
+            old_list = None
+        if isinstance(old_list, list):
+            new_meta = {}
+            os.makedirs(_avatar_path("bin", "animations"), exist_ok=True)
+            for a in old_list:
+                src = _avatar_path("anims", a.get("file", ""))
+                if os.path.isfile(src):
+                    fname = _free_name(_avatar_path("bin", "animations"), _clean_name(a.get("name"), a.get("type", "fbx")))
+                    os.replace(src, os.path.join(_avatar_path("bin", "animations"), fname))
+                    new_meta[fname] = {"when": a.get("when", "idle")}
+            _save_anim_meta(new_meta)
+    except OSError as e:
+        log(f"avatar: couldn't move old files into the bin: {e}")
+
+
+AVATAR_JS = r"""// StellAI avatar: an animated space orb (no libraries) or a 3D VRM character (three.js + three-vrm).
+// Used by the web chat's avatar screen (/avatar). States: idle, listening, thinking, talking.
+// setLevel(0..1) is the loudness of Stella's voice right now (moves the mouth / pulses the orb).
+// Also: createWakeWord() — openWakeWord in the browser (ONNX Runtime Web), same models as the phone app.
+
+const COLORS = { idle: [92, 225, 230], listening: [77, 232, 160], thinking: [155, 123, 255], talking: [120, 235, 255] };
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const smoothstep = x => { x = clamp(x); return x * x * (3 - 2 * x); };
+
+/** Slow devices (Raspberry Pi and similar): fewer pixels and frames. */
+export function looksLikeSlowDevice() {
+  const ua = navigator.userAgent || "", cores = navigator.hardwareConcurrency || 4;
+  return /aarch64|armv7|armv8|Raspbian|CrOS armv/i.test(ua) && !/Android|iPhone|iPad/i.test(ua) || cores <= 2;
+}
+
+export function createAvatar(host, opts = {}) {
+  let impl = null, style = "", state = "idle", level = 0, destroyed = false;
+  const o = { camera: "upper", height: 172.7, light: false, gestures: true, animations: [], key: "", ...opts };
+  const onError = o.onError || (() => {});
+
+  let ver = "";
+  async function setStyle(next, modelUrl, version = "") {
+    if (next === style && impl && (next !== "vrm" || version === ver)) return;
+    ver = version;
+    if (impl) impl.destroy();
+    impl = null; style = next; host.innerHTML = "";
+    if (next === "vrm") {
+      try {
+        impl = await createVRM(host, modelUrl, o);
+        if (destroyed || style !== "vrm") { impl.destroy(); return; }
+      } catch (e) {
+        onError(e);
+        style = "orb"; host.innerHTML = "";
+        impl = createOrb(host, o);
+      }
+    } else {
+      impl = createOrb(host, o);
+    }
+    impl.setState(state); impl.setLevel(level);
+  }
+  const call = (fn, ...a) => impl && impl[fn] && impl[fn](...a);
+  return {
+    setStyle,
+    get style() { return style; },
+    setState(s) { state = s; call("setState", s); },
+    setLevel(x) { level = x; call("setLevel", x); },
+    setCamera(c) { o.camera = c; call("setCamera", c); },
+    setHeight(cm) { o.height = cm; call("setHeight", cm); },
+    setLight(on) { o.light = !!on; call("setLight", o.light); },
+    setGestures(on) { o.gestures = !!on; },
+    setAnimations(list) { o.animations = list || []; call("setAnimations", o.animations); },
+    play(what) { return call("play", what); },
+    trigger(tag) { call("trigger", tag); },
+    react(text) { call("react", text); },
+    fps() { return impl && impl.fps ? impl.fps() : 0; },
+    destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; host.innerHTML = ""; },
+  };
+}
+
+// ------------------------------------------------------------------ the orb
+function createOrb(host, o) {
+  const canvas = document.createElement("canvas");
+  canvas.style.cssText = "width:100%;height:100%;display:block";
+  host.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+  let state = "idle", level = 0, smooth = 0, raf = 0, w = 0, h = 0, dpr = 1, last = performance.now(), t = 0, fps = 60, acc = 0;
+  let color = COLORS.idle.slice(), spin = 0, ripple = 0;
+  const stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.3 + 0.2, s: Math.random() * 0.6 + 0.2, p: Math.random() * 6 }));
+  const sparks = Array.from({ length: 36 }, (_, i) => ({ a: (i / 36) * Math.PI * 2, ring: i % 3 }));
+  const ro = new ResizeObserver(resize); ro.observe(host);
+  function resize() {
+    dpr = o.light ? 1 : Math.min(2, window.devicePixelRatio || 1);
+    w = host.clientWidth; h = host.clientHeight;
+    canvas.width = Math.max(1, w * dpr); canvas.height = Math.max(1, h * dpr);
+  }
+  resize();
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    const step = (now - last) / 1000;
+    if (o.light && step < 1 / 31) return;          // light mode: 30 frames a second
+    const dt = Math.min(0.05, step); last = now; t += dt;
+    fps = lerp(fps, 1 / Math.max(step, 1e-3), 0.05);
+    smooth = lerp(smooth, level, level > smooth ? 0.5 : 0.15);
+    const target = COLORS[state] || COLORS.idle;
+    for (let i = 0; i < 3; i++) color[i] = lerp(color[i], target[i], 0.06);
+    const speed = state === "thinking" ? 2.4 : state === "listening" ? 0.9 : state === "talking" ? 0.7 : 0.35;
+    spin += dt * speed;
+    ripple = state === "listening" ? (ripple + dt * 0.55) % 1 : 0;
+    const c = `${color[0] | 0},${color[1] | 0},${color[2] | 0}`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const nStars = o.light ? 60 : stars.length;
+    for (let i = 0; i < nStars; i++) {
+      const s = stars[i], tw = 0.5 + 0.5 * Math.sin(t * s.s * 2 + s.p);
+      ctx.fillStyle = `rgba(200,215,255,${0.15 + tw * 0.5})`;
+      ctx.beginPath(); ctx.arc(((s.x + t * 0.004 * s.s) % 1) * w, s.y * h, s.r, 0, 7); ctx.fill();
+    }
+    const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.17;
+    const r = R * (1 + 0.035 * Math.sin(t * 1.6)) * (1 + smooth * 0.22);
+    let g = ctx.createRadialGradient(cx, cy, r * 0.2, cx, cy, r * 3.2);
+    g.addColorStop(0, `rgba(${c},0.35)`); g.addColorStop(0.4, `rgba(${c},0.10)`); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r * 3.2, 0, 7); ctx.fill();
+    if (state === "listening") {
+      for (let k = 0; k < 3; k++) {
+        const p = (ripple + k / 3) % 1;
+        ctx.strokeStyle = `rgba(${c},${(1 - p) * 0.55})`; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cx, cy, r * (1.1 + p * 1.6), 0, 7); ctx.stroke();
+      }
+    }
+    for (let k = 0; k < 3; k++) {
+      const tilt = [0.32, -0.55, 0.9][k], rx = r * (1.55 + k * 0.32), ry = rx * (0.28 + k * 0.08);
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(tilt + spin * (k % 2 ? -0.15 : 0.12));
+      ctx.strokeStyle = `rgba(${c},${0.18 + (state === "thinking" ? 0.15 : 0)})`; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, 7); ctx.stroke();
+      for (const s of sparks) {
+        if (s.ring !== k) continue;
+        const a = s.a + spin * (1 + k * 0.35) * (k % 2 ? -1 : 1), front = Math.sin(a) > 0;
+        ctx.fillStyle = `rgba(${c},${front ? 0.95 : 0.35})`;
+        ctx.beginPath(); ctx.arc(Math.cos(a) * rx, Math.sin(a) * ry, (front ? 2.4 : 1.4) * (state === "thinking" ? 1.3 : 1), 0, 7); ctx.fill();
+      }
+      ctx.restore();
+    }
+    if (smooth > 0.02 || state === "talking") {
+      const n = o.light ? 48 : 72;
+      ctx.strokeStyle = `rgba(${c},0.85)`; ctx.lineWidth = 2; ctx.beginPath();
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2, wob = Math.sin(a * 6 + t * 9) * 0.5 + Math.sin(a * 11 - t * 13) * 0.5;
+        const rr = r * (1.18 + smooth * 0.35 * (0.6 + 0.4 * wob));
+        const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke();
+    }
+    g = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.05, cx, cy, r);
+    g.addColorStop(0, "rgba(255,255,255,0.95)"); g.addColorStop(0.35, `rgba(${c},0.95)`); g.addColorStop(1, `rgba(${c},0.25)`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+    if (state === "thinking") {
+      for (let i = 0; i < 14; i++) {
+        const a = spin * 2.2 - i * 0.09;
+        ctx.fillStyle = `rgba(255,255,255,${0.8 * (1 - i / 14)})`;
+        ctx.beginPath(); ctx.arc(cx + Math.cos(a) * r * 1.25, cy + Math.sin(a) * r * 1.25, 2.6 * (1 - i / 16), 0, 7); ctx.fill();
+      }
+    }
+  }
+  raf = requestAnimationFrame(frame);
+  return {
+    setState(s) { state = s; },
+    setLevel(x) { level = clamp(x); },
+    setLight() { resize(); },
+    fps: () => fps,
+    destroy() { cancelAnimationFrame(raf); ro.disconnect(); canvas.remove(); },
+  };
+}
+
+// ------------------------------------------------------------------ the 3D character
+// Mixamo bone names -> VRM humanoid bones (for .fbx animations from mixamo.com)
+const MIXAMO = { Hips: "hips", Spine: "spine", Spine1: "chest", Spine2: "upperChest", Neck: "neck", Head: "head",
+  LeftShoulder: "leftShoulder", LeftArm: "leftUpperArm", LeftForeArm: "leftLowerArm", LeftHand: "leftHand",
+  RightShoulder: "rightShoulder", RightArm: "rightUpperArm", RightForeArm: "rightLowerArm", RightHand: "rightHand",
+  LeftUpLeg: "leftUpperLeg", LeftLeg: "leftLowerLeg", LeftFoot: "leftFoot", LeftToeBase: "leftToes",
+  RightUpLeg: "rightUpperLeg", RightLeg: "rightLowerLeg", RightFoot: "rightFoot", RightToeBase: "rightToes" };
+for (const side of ["Left", "Right"]) {
+  const s = side.toLowerCase();
+  MIXAMO[side + "HandThumb1"] = s + "ThumbMetacarpal"; MIXAMO[side + "HandThumb2"] = s + "ThumbProximal"; MIXAMO[side + "HandThumb3"] = s + "ThumbDistal";
+  for (const f of ["Index", "Middle", "Ring", "Pinky"]) {
+    const v = f === "Pinky" ? "Little" : f;
+    MIXAMO[side + "Hand" + f + "1"] = s + v + "Proximal"; MIXAMO[side + "Hand" + f + "2"] = s + v + "Intermediate"; MIXAMO[side + "Hand" + f + "3"] = s + v + "Distal";
+  }
+}
+const BODY = ["hips", "spine", "chest", "upperChest", "neck", "head", "leftShoulder", "rightShoulder", "leftUpperArm", "rightUpperArm",
+  "leftLowerArm", "rightLowerArm", "leftHand", "rightHand", "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg",
+  "leftFoot", "rightFoot", "leftToes", "rightToes"];
+const FINGERS = []; for (const s of ["left", "right"]) for (const f of ["Thumb", "Index", "Middle", "Ring", "Little"])
+  for (const j of f === "Thumb" ? ["Metacarpal", "Proximal", "Distal"] : ["Proximal", "Intermediate", "Distal"]) FINGERS.push(s + f + j);
+
+// Built-in gestures: offsets (radians) added to the relaxed pose, shaped by an envelope over `len` seconds.
+// p = 0..1 progress, e = envelope 0..1, A = arm sign for this character. Tags say when each can play.
+const GESTURES = {
+  "Look around": { len: 4.5, tags: ["idle"], fn: (p, e) => ({ neck: [0, Math.sin(p * Math.PI * 2) * 0.35 * e, 0], head: [0, Math.sin(p * Math.PI * 2) * 0.25 * e, 0], spine: [0, Math.sin(p * Math.PI * 2) * 0.08 * e, 0], look: Math.sin(p * Math.PI * 2) * 1.6 * e }) },
+  "Head tilt": { len: 3, tags: ["idle", "happy"], fn: (p, e) => ({ neck: [0, 0, 0.16 * e], head: [-0.05 * e, 0.05 * e, 0.1 * e], happy: 0.45 * e }) },
+  "Weight shift": { len: 4, tags: ["idle"], fn: (p, e) => ({ hips: [0, 0.06 * e, Math.sin(p * Math.PI) * 0.05 * e], spine: [0, -0.04 * e, -Math.sin(p * Math.PI) * 0.05 * e], neck: [0, 0, -Math.sin(p * Math.PI) * 0.03 * e] }) },
+  "Shoulder roll": { len: 2.6, tags: ["idle"], fn: (p, e, A) => { const s = Math.sin(p * Math.PI * 2) * e;
+    return { leftShoulder: [0, 0, -0.12 * s * A], rightShoulder: [0, 0, 0.12 * s * A], chest: [-0.05 * e, 0, 0], neck: [0.06 * e, 0, 0] }; } },
+  "Stretch": { len: 5, tags: ["quiet"], fn: (p, e, A) => { const up = smoothstep(clamp(p * 2.5)) * smoothstep(clamp((1 - p) * 2.5));
+    return { leftUpperArm: [0, 0, 2.6 * up * A], rightUpperArm: [0, 0, -2.6 * up * A], leftLowerArm: [0, 0, 0.3 * up * A], rightLowerArm: [0, 0, -0.3 * up * A],
+      spine: [-0.12 * up, 0, 0], chest: [-0.08 * up, 0, 0], head: [-0.15 * up, 0, 0], blink: up * 0.85, relaxed: up * 0.6 }; } },
+  "Wave": { len: 3.2, tags: ["greeting"], fn: (p, e, A) => { const wv = Math.sin(p * Math.PI * 7) * 0.35 * e;
+    return { rightUpperArm: [0, -0.3 * e * A, -1.5 * e * A], rightLowerArm: [0, 0, (-1.35 + wv) * e * A], rightHand: [0, 0, 0.1 * e],
+      head: [0, -0.06 * e, -0.06 * e], happy: 0.7 * e }; } },
+  // Blowing a kiss: right hand comes up to her lips (pucker, eyes closed), then sweeps out toward you
+  // with an open hand and a wink and a smile. Uses arm IK so the hand really reaches her mouth on any character.
+  "Blow a kiss": { len: 3.4, tags: ["kiss"], fn: (p, e) => {
+    const ramp = (a, b) => smoothstep((p - a) / (b - a));
+    const toLips = ramp(0.0, 0.28), out = ramp(0.48, 0.66), back = ramp(0.8, 1.0);
+    const reach = toLips * (1 - back) * e;
+    const pucker = toLips * (1 - out);
+    return {
+      ik: [{ side: "right", w: reach, target: out < 1e-3 ? { at: "lips" } : { at: "lips", to: "front", mix: out },
+             pole: [0.3, -0.45, 0.05] }],
+      straighten: { right: reach },
+      neck: [0.04 * pucker - 0.03 * out, -0.06 * pucker, -0.06 * pucker + 0.05 * out],
+      head: [0.05 * pucker - 0.06 * out, 0, -0.04 * pucker],
+      spine: [0.02 * pucker - 0.02 * out, -0.04 * reach, 0],
+      ou: 0.85 * pucker * e, blink: 0.75 * pucker * e,
+      blinkLeft: out * (1 - ramp(0.72, 0.84)) * e,             // a quick wink as the kiss flies
+      happy: (0.25 * pucker + 0.75 * out * (1 - back)) * e,
+    }; } },
+  // Hip-sway dance: both hands behind her head (elbows up and out), hips swaying right-to-left with a little
+  // bounce on each step, upper body leaning the other way (an S-curve), head tilting with the beat, open smile.
+  // Hair swings on its own (spring bones). Feet stay roughly planted.
+  "Hip sway": { len: 9.6, tags: ["dance", "idle"], fn: (p, e) => {
+    const ramp = (a, b) => smoothstep((p - a) / (b - a));
+    const arms = ramp(0, 0.06) * (1 - ramp(0.94, 1)) * e;      // hands go up first, come down last
+    const sw = Math.sin(p * Math.PI * 12) * ramp(0.04, 0.1) * (1 - ramp(0.9, 0.97)) * e;   // 6 sways, starting to her right
+    const bounce = Math.abs(Math.sin(p * Math.PI * 12));      // up on each step
+    const shift = -sw;                                        // + = toward her left
+    const tilt = 0.14 * shift, twist = 0.12 * shift;
+    const legL = 0.8, slide = Math.asin(clamp(0.05 * shift / legL, -0.2, 0.2));
+    const bentL = Math.max(0, -shift), bentR = Math.max(0, shift);        // the leg without the weight bends
+    return {
+      ik: [{ side: "left", w: arms, target: { at: "behindHead" }, pole: [0.42, 0.3, 0.02] },
+           { side: "right", w: arms, target: { at: "behindHead" }, pole: [0.42, 0.3, 0.02] }],
+      hips: [0, twist, tilt], hipsX: 0.05 * shift, hipsY: 0.012 * bounce * e - 0.015 * e,
+      leftUpperLeg: [-0.08 * bentL - 0.04 * e, 0, -tilt - slide], rightUpperLeg: [-0.08 * bentR - 0.04 * e, 0, -tilt - slide],
+      leftLowerLeg: [0.22 * bentL + 0.08 * e, 0, 0], rightLowerLeg: [0.22 * bentR + 0.08 * e, 0, 0],
+      leftFoot: [-0.12 * bentL, 0, 0], rightFoot: [-0.12 * bentR, 0, 0],
+      spine: [-0.04 * e, -0.6 * twist, -0.75 * tilt], chest: [-0.03 * e, -0.3 * twist, -0.35 * tilt],
+      neck: [0, 0.25 * twist, -0.2 * tilt], head: [0.03 * bounce * e, 0, 0.5 * tilt],
+      happy: 0.3 * e, relaxed: 0.25 * e, aa: 0.35 * e,
+    }; } },
+  // Happy bounce: eyes closed in a big smile, hands tucked behind her back, shoulders up, bouncing on the beat
+  // (knees dip, then she springs up with her head tipping back), head rocking side to side with each bounce.
+  "Bounce": { len: 3.6, tags: ["happy", "greeting", "idle"], fn: (p, e, A) => {
+    const beats = 7, ph = p * beats;                         // ~2 bounces a second
+    const up = Math.pow(Math.abs(Math.sin(Math.PI * ph)), 0.7) * e, dip = (1 - Math.pow(Math.abs(Math.sin(Math.PI * ph)), 0.7)) * e;
+    const side = Math.sin(Math.PI * ph) * e;                 // changes sign every bounce: rock left, then right
+    return {
+      leftUpperArm: [0, 0.45 * e * A, 0.1 * e * A], rightUpperArm: [0, -0.45 * e * A, -0.1 * e * A],     // arms swung back
+      leftLowerArm: [0, 0.35 * e * A, 0], rightLowerArm: [0, -0.35 * e * A, 0],                          // hands meet behind
+      leftShoulder: [0, 0, 0.1 * e * A], rightShoulder: [0, 0, -0.1 * e * A],                            // shoulders up
+      leftUpperLeg: [-0.22 * dip, 0, 0], rightUpperLeg: [-0.22 * dip, 0, 0],                             // knees dip
+      leftLowerLeg: [0.42 * dip, 0, 0], rightLowerLeg: [0.42 * dip, 0, 0],
+      leftFoot: [-0.2 * dip, 0, 0], rightFoot: [-0.2 * dip, 0, 0],
+      hipsY: (0.012 * up - 0.03 * dip),
+      spine: [-0.05 * up, 0, 0.02 * side], chest: [-0.04 * up, 0, 0],
+      neck: [0, 0.04 * side, 0.09 * side], head: [-0.1 * up, 0, 0.05 * side],
+      happy: 0.95 * e, aa: 0.3 * up,
+    }; } },
+};
+
+async function createVRM(host, url, o) {
+  const THREE = await import("three");
+  const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+  const { VRMLoaderPlugin, VRMUtils } = await import("@pixiv/three-vrm");
+
+  let light = !!o.light;
+  const renderer = new THREE.WebGLRenderer({ antialias: !light, alpha: true, powerPreference: light ? "low-power" : "default" });
+  const pixelRatio = () => light ? Math.min(1, window.devicePixelRatio || 1) * 0.85 : Math.min(2, window.devicePixelRatio || 1);
+  renderer.setPixelRatio(pixelRatio());
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.domElement.style.cssText = "width:100%;height:100%;display:block";
+  host.appendChild(renderer.domElement);
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(28, 1, 0.05, 60);
+  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x1a1030, 1.6));
+  const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1, 2, 3); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x5ce1e6, 1.4); rim.position.set(-2, 1.5, -2); scene.add(rim);
+
+  const loader = new GLTFLoader();
+  loader.register(parser => new VRMLoaderPlugin(parser));
+  const gltf = await new Promise((res, rej) => loader.load(url, res, undefined, e => rej(new Error("couldn't load the character: " + (e && e.message || e)))));
+  const vrm = gltf.userData.vrm;
+  if (!vrm) throw new Error("that file isn't a VRM character");
+  VRMUtils.removeUnnecessaryVertices && VRMUtils.removeUnnecessaryVertices(gltf.scene);
+  (VRMUtils.combineSkeletons || VRMUtils.removeUnnecessaryJoints || (() => {}))(gltf.scene);
+  VRMUtils.rotateVRM0 && VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(obj => { obj.frustumCulled = false; });
+  scene.add(vrm.scene);
+
+  const bone = n => vrm.humanoid && vrm.humanoid.getNormalizedBoneNode(n);
+  const raw = n => vrm.humanoid && (vrm.humanoid.getRawBoneNode ? vrm.humanoid.getRawBoneNode(n) : bone(n));
+  const ex = vrm.expressionManager;
+  const setEx = (n, v) => { try { ex && ex.setValue(n, clamp(v)); } catch {} };
+  const lookTarget = new THREE.Object3D(); scene.add(lookTarget);
+  if (vrm.lookAt) { vrm.lookAt.target = lookTarget; if ("autoUpdate" in vrm.lookAt) vrm.lookAt.autoUpdate = true; }
+  const bones = {}; for (const n of BODY.concat(FINGERS)) { const b = bone(n); if (b) bones[n] = b; }
+  const hipsRest = bones.hips ? bones.hips.position.clone() : new THREE.Vector3();
+
+  // ---- size: scale the character to the chosen height (default 5'8" = 172.7 cm)
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const nativeHeight = Math.max(0.3, box.max.y - box.min.y);
+  const headPos = new THREE.Vector3();
+  function measureHead() { vrm.scene.updateMatrixWorld(true); (raw("head") || vrm.scene).getWorldPosition(headPos); }
+  function setHeight(cm) {
+    const s = clamp((+cm || 172.7) / 100, 1.2, 2.2) / nativeHeight;
+    vrm.scene.scale.setScalar(s);
+    measureHead(); setCamera(cameraMode, true);
+  }
+
+  // ---- relaxed pose: arms down instead of the T-pose. The sign is checked (models differ), then fixed.
+  let A = 1;
+  const P = (n, x, y, z) => { const b = bones[n]; if (b) { b.rotation.x += x; b.rotation.y += y; b.rotation.z += z; } };
+  function resetPose() {
+    for (const n in bones) bones[n].quaternion.identity();
+    if (bones.hips) bones.hips.position.copy(hipsRest);
+  }
+  function relaxed() {
+    P("leftUpperArm", 0, 0, -1.22 * A); P("rightUpperArm", 0, 0, 1.22 * A);
+    P("leftLowerArm", 0, -0.15, -0.12 * A); P("rightLowerArm", 0, 0.15, 0.12 * A);
+    for (const s of ["left", "right"]) for (const f of ["Index", "Middle", "Ring", "Little"]) {   // soft, slightly curled fingers
+      const sg = s === "left" ? -1 : 1; P(s + f + "Proximal", 0, 0, 0.18 * sg * A); P(s + f + "Intermediate", 0, 0, 0.22 * sg * A);
+    }
+  }
+  // Arm IK (for gestures where a hand has to reach a spot, like her lips): rest directions of each arm bone
+  const restDir = {}, V3 = THREE.Vector3, Q = THREE.Quaternion;
+  resetPose(); vrm.update(0); vrm.scene.updateMatrixWorld(true);
+  for (const sd of ["left", "right"]) {
+    const U = bones[sd + "UpperArm"], L = bones[sd + "LowerArm"], H = bones[sd + "Hand"];
+    if (!U || !L || !H) continue;
+    const pU = U.getWorldPosition(new V3()), pL = L.getWorldPosition(new V3()), pH = H.getWorldPosition(new V3());
+    restDir[sd + "UpperArm"] = pL.clone().sub(pU).normalize().applyQuaternion(U.parent.getWorldQuaternion(new Q()).invert());
+    restDir[sd + "LowerArm"] = pH.clone().sub(pL).normalize().applyQuaternion(U.getWorldQuaternion(new Q()).invert());
+  }
+  const hipsW = bones.hips ? bones.hips.getWorldPosition(new V3()) : new V3();
+  const rightSign = bones.rightUpperArm ? Math.sign(bones.rightUpperArm.getWorldPosition(new V3()).x - hipsW.x) || -1 : -1;
+  function reach(sd, T, pole, w) {     // two-bone IK: shoulder -> elbow -> wrist to target T (world), elbow toward pole
+    const U = bones[sd + "UpperArm"], L = bones[sd + "LowerArm"], H = bones[sd + "Hand"];
+    if (!U || !L || !H || !restDir[sd + "UpperArm"] || w <= 0) return;
+    vrm.scene.updateMatrixWorld(true);
+    const S = U.getWorldPosition(new V3()), E0 = L.getWorldPosition(new V3()), H0 = H.getWorldPosition(new V3());
+    const L1 = S.distanceTo(E0), L2 = E0.distanceTo(H0);
+    const dir = T.clone().sub(S); const d = clamp(dir.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3); dir.normalize();
+    const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+    const pp = pole.clone().sub(S); const perp = pp.sub(dir.clone().multiplyScalar(pp.dot(dir))).normalize();
+    const E = S.clone().add(dir.clone().multiplyScalar(a)).add(perp.multiplyScalar(h));
+    const Hn = S.clone().add(dir.clone().multiplyScalar(d));
+    const u = E.clone().sub(S).normalize().applyQuaternion(U.parent.getWorldQuaternion(new Q()).invert());
+    U.quaternion.slerp(new Q().setFromUnitVectors(restDir[sd + "UpperArm"], u), w);
+    U.updateMatrixWorld(true);
+    const f = Hn.clone().sub(E).normalize().applyQuaternion(U.getWorldQuaternion(new Q()).invert());
+    L.quaternion.slerp(new Q().setFromUnitVectors(restDir[sd + "LowerArm"], f), w);
+    L.updateMatrixWorld(true);
+  }
+  function ikTargets(spec, sd) {       // named spots, in metres for a 170 cm person, scaled to her height
+    const k = (o.height || 172.7) / 170, sx = sd === "right" ? rightSign : -rightSign;
+    const head = (bones.head || vrm.scene).getWorldPosition(new V3());
+    const sh = bones[sd + "UpperArm"].getWorldPosition(new V3());
+    const spot = n => n === "lips" ? head.clone().add(new V3(sx * 0.03 * k, -0.06 * k, 0.13 * k))
+      : n === "front" ? sh.clone().add(new V3(sx * 0.1 * k, 0.12 * k, 0.48 * k))
+      : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k)) : head.clone();
+    const T = spot(spec.at);
+    if (spec.to) T.lerp(spot(spec.to), spec.mix || 0);
+    return T;
+  }
+
+  resetPose(); relaxed(); vrm.update(0); vrm.scene.updateMatrixWorld(true);
+  const pa = new THREE.Vector3(), pb = new THREE.Vector3();
+  if (raw("leftHand") && raw("leftUpperArm")) {
+    raw("leftHand").getWorldPosition(pa); raw("leftUpperArm").getWorldPosition(pb);
+    if (pa.y > pb.y - 0.05) A = -1;
+  }
+
+  // ---- camera framing
+  let cameraMode = o.camera || "upper";
+  const camGoal = new THREE.Vector3(), camAim = new THREE.Vector3(), aimNow = new THREE.Vector3();
+  function setCamera(mode, jump) {
+    cameraMode = mode;
+    const y = headPos.y, hgt = y / 0.93;
+    if (mode === "face") { camAim.set(0, y + 0.02, 0); camGoal.set(0, y + 0.04, 0.75); }
+    else if (mode === "full") { camAim.set(0, hgt * 0.52, 0); camGoal.set(0, hgt * 0.58, hgt * 2.5); }
+    else { camAim.set(0, y - 0.18, 0); camGoal.set(0, y - 0.08, 1.75); }
+    if (jump) { cam.position.copy(camGoal); aimNow.copy(camAim); }
+  }
+  setHeight(o.height);
+
+  function resize() {
+    const w = host.clientWidth || 1, h = host.clientHeight || 1;
+    renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+  }
+  const ro = new ResizeObserver(resize); ro.observe(host); resize();
+
+  // ---- animation clips (uploaded .vrma / Mixamo .fbx)
+  const mixer = new THREE.AnimationMixer(vrm.scene);
+  const clips = new Map();      // id -> {name, when, clip}
+  let anim = null;              // {kind:"clip"|"gesture", ...}
+  async function loadClip(a) {
+    const u = a.url;
+    if (a.type === "vrma") {
+      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import("@pixiv/three-vrm-animation");
+      const l = new GLTFLoader(); l.register(parser => new VRMAnimationLoaderPlugin(parser));
+      const g = await l.loadAsync(u);
+      const va = g.userData.vrmAnimations && g.userData.vrmAnimations[0];
+      if (!va) throw new Error("no animation in " + a.name);
+      return createVRMAnimationClip(va, vrm);
+    }
+    const { FBXLoader } = await import("three/addons/loaders/FBXLoader.js");
+    const asset = await new FBXLoader().loadAsync(u);
+    const src = THREE.AnimationClip.findByName(asset.animations, "mixamo.com") || asset.animations[0];
+    if (!src) throw new Error("no animation in " + a.name);
+    const tracks = [], restInv = new THREE.Quaternion(), parentRest = new THREE.Quaternion(), q = new THREE.Quaternion(), v = new THREE.Vector3();
+    const mHips = asset.getObjectByName("mixamorigHips");
+    const hipsH = mHips ? mHips.position.y : 1;
+    const vrmHipsH = bones.hips ? Math.abs(bones.hips.getWorldPosition(v).y - vrm.scene.getWorldPosition(new THREE.Vector3()).y) / vrm.scene.scale.y : 1;
+    const scaleHips = vrmHipsH / (hipsH || 1);
+    const v0 = vrm.meta && vrm.meta.metaVersion === "0";
+    for (const track of src.tracks) {
+      const [rigName, prop] = track.name.split(".");
+      const vrmBone = MIXAMO[rigName.replace(/^mixamorig:?/, "")];
+      const node = vrmBone && bone(vrmBone), rigNode = asset.getObjectByName(rigName);
+      if (!node || !rigNode) continue;
+      rigNode.getWorldQuaternion(restInv).invert();
+      rigNode.parent.getWorldQuaternion(parentRest);
+      if (track instanceof THREE.QuaternionKeyframeTrack) {
+        const vals = track.values.slice();
+        for (let i = 0; i < vals.length; i += 4) {
+          q.fromArray(vals, i).premultiply(parentRest).multiply(restInv).toArray(vals, i);
+        }
+        tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.${prop}`, track.times, vals.map((x, i) => v0 && i % 2 === 0 ? -x : x)));
+      } else if (track instanceof THREE.VectorKeyframeTrack && vrmBone === "hips") {
+        // keep the bob, drop walking away: horizontal movement is made relative to the first frame
+        const vals = track.values.map((x, i) => (v0 && i % 3 !== 1 ? -x : x) * scaleHips);
+        const x0 = vals[0] - hipsRest.x, z0 = vals[2] - hipsRest.z;
+        for (let i = 0; i < vals.length; i += 3) { vals[i] -= x0; vals[i + 2] -= z0; }
+        tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.${prop}`, track.times, vals));
+      }
+    }
+    return new THREE.AnimationClip(a.name, src.duration, tracks);
+  }
+  async function setAnimations(list) {
+    for (const a of list || []) {
+      if (clips.has(a.id)) { clips.get(a.id).when = a.when; continue; }
+      try { clips.set(a.id, { name: a.name, when: a.when, clip: await loadClip(a) }); }
+      catch (e) { (o.onInfo || console.warn)("Animation " + a.name + ": " + e.message); }
+    }
+    const keep = new Set((list || []).map(a => a.id));
+    for (const id of [...clips.keys()]) if (!keep.has(id)) clips.delete(id);
+  }
+
+  // ---- what plays when
+  let state = "idle", level = 0, mouth = 0, t = 0, raf = 0, last = performance.now(), fps = 60;
+  let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
+  let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
+  const sm = { lean: 0, tilt: 0, nod: 0 };
+  const emo = { happy: 0, sad: 0, surprised: 0, relaxed: 0 };
+  function candidates(tag) {
+    const out = [];
+    for (const [id, c] of clips) if (c.when === tag) out.push({ kind: "clip", id, name: c.name, clip: c.clip });
+    if (o.gestures !== false) for (const [name, g] of Object.entries(GESTURES)) if (g.tags.includes(tag)) out.push({ kind: "gesture", name, g });
+    // uploaded animations are preferred when there are any for this moment
+    const up = out.filter(x => x.kind === "clip");
+    return up.length && Math.random() < 0.8 ? up : out;
+  }
+  function start(c) {
+    if (!c) return false;
+    stopAnim(true);
+    if (c.kind === "clip") {
+      const action = mixer.clipAction(c.clip); action.reset(); action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; action.play();
+      anim = { ...c, action, t0: t, len: c.clip.duration, w: 0, out: false };
+    } else anim = { ...c, t0: t, len: c.g.len, w: 1, out: false };
+    return true;
+  }
+  function stopAnim(now) {
+    if (!anim) return;
+    if (now) { if (anim.action) anim.action.stop(); anim = null; } else anim.out = true;
+  }
+  let pending = null;   // a gesture to play as soon as she's finished talking
+  function trigger(tag) {
+    if (state !== "idle" && tag !== "happy") { if (tag === "kiss" || tag === "dance") pending = tag; return; }
+    const list = candidates(tag);
+    if (list.length) start(list[Math.floor(Math.random() * list.length)]);
+  }
+  function play(what) {
+    for (const [id, c] of clips) if (id === what || c.name === what) return start({ kind: "clip", id, name: c.name, clip: c.clip });
+    if (GESTURES[what]) return start({ kind: "gesture", name: what, g: GESTURES[what] });
+    return false;
+  }
+  function react(text) {
+    const s = String(text || "").toLowerCase();
+    let e = null;
+    if (/\b(sorry|unfortunately|sad|can't|cannot|failed|error)\b/.test(s)) e = "sad";
+    else if (/(!|\b(great|awesome|glad|love|nice|yay|congrat|happy|perfect|fun)\b)/.test(s)) e = "happy";
+    else if (/\b(wow|whoa|really\?|interesting)\b/.test(s)) e = "surprised";
+    if (e) { emotion = e; emotionUntil = t + 3.5; }
+    if (/\b(love you|good ?night|sweet dreams|kisses?|xoxo|mwah)\b|💋|😘|😚/.test(s)) pending = "kiss";
+    else if (/\b(danc(e|es|ing)|let'?s groove|💃)/.test(s) || /💃/.test(s)) pending = "dance";
+    else if (e === "happy" && Math.random() < 0.35) setTimeout(() => trigger("happy"), 400);
+  }
+
+  const qProc = {}; for (const n in bones) qProc[n] = new THREE.Quaternion();
+  const hipsProc = new THREE.Vector3();
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    const step = (now - last) / 1000;
+    if (light && step < (state === "idle" && !anim ? 1 / 25 : 1 / 31)) return;   // light mode: 30 fps (25 when idle)
+    const dt = Math.min(0.05, step); last = now; t += dt;
+    fps = lerp(fps, 1 / Math.max(step, 1e-3), 0.05);
+    if (state !== "idle") { lastActive = t; quietDone = false; if (anim && anim.kind === "clip" ? true : anim && !(anim.name === "Bounce" || anim.name === "Head tilt")) stopAnim(false); }
+
+    // scheduler: an idle animation every 20–60 s; a stretch after 10 quiet minutes
+    if (state === "idle" && !anim && pending) { const tg = pending; pending = null; trigger(tg); lastActive = t; }
+    if (state === "idle" && !anim) {
+      if (!quietDone && t - lastActive > 600) { quietDone = true; trigger("quiet"); }
+      else if (t - lastActive > nextIdleAt) { trigger("idle"); lastActive = t; nextIdleAt = 20 + Math.random() * 40; }
+    }
+
+    // 1. the living base pose: relaxed arms, breathing, sway, listening lean, thinking tilt
+    resetPose(); relaxed();
+    sm.lean = lerp(sm.lean, state === "listening" ? 0.06 : 0, 0.08);
+    sm.tilt = lerp(sm.tilt, state === "thinking" ? 0.1 : 0, 0.05);
+    sm.nod = lerp(sm.nod, state === "thinking" ? -0.08 : (state === "talking" ? Math.sin(t * 3.1) * 0.03 : 0), 0.1);
+    P("spine", sm.lean + Math.sin(t * 1.4) * 0.012, Math.sin(t * 0.37) * 0.025, 0);
+    P(bones.chest ? "chest" : "upperChest", Math.sin(t * 1.4 + 0.6) * 0.015, 0, 0);
+    P("neck", 0, Math.sin(t * 0.5) * 0.05, sm.tilt + Math.sin(t * 0.31) * 0.02);
+    P("head", sm.nod, 0, 0);
+    const sway = Math.sin(t * 0.9) * 0.03;
+    P("leftUpperArm", 0, 0, sway * A); P("rightUpperArm", 0, 0, -sway * A);
+
+    // 2. a built-in gesture adds on top; an uploaded clip blends in and out
+    let extra = {}, look = 0;
+    if (anim) {
+      const p = clamp((t - anim.t0) / anim.len);
+      if (anim.kind === "gesture") {
+        let e = smoothstep(Math.min(p / 0.2, (1 - p) / 0.25));
+        if (anim.out) { anim.w = Math.max(0, anim.w - dt * 4); e *= anim.w; }
+        extra = anim.g.fn(p, e, A) || {};
+        for (const [n, r] of Object.entries(extra)) if (Array.isArray(r)) P(n, r[0], r[1], r[2]);
+        if (extra.hipsY && bones.hips) bones.hips.position.y += extra.hipsY / vrm.scene.scale.y;
+        if (extra.hipsX && bones.hips) bones.hips.position.x += -rightSign * extra.hipsX / vrm.scene.scale.x;   // + = her left
+        for (const sd in extra.straighten || {}) {           // open the hand (undo the relaxed finger curl)
+          const w = extra.straighten[sd];
+          for (const n of FINGERS) if (n.startsWith(sd) && bones[n]) bones[n].quaternion.slerp(new Q(), w);
+        }
+        for (const ik of extra.ik || []) {
+          if (ik.w <= 0) continue;
+          const S = bones[ik.side + "UpperArm"]; if (!S) continue;
+          const k = (o.height || 172.7) / 170, sx = ik.side === "right" ? rightSign : -rightSign;
+          const pole = S.getWorldPosition(new V3()).add(new V3(sx * ik.pole[0] * k, ik.pole[1] * k, ik.pole[2] * k));
+          reach(ik.side, ikTargets(ik.target, ik.side), pole, ik.w);
+        }
+        look = extra.look || 0;
+        if (p >= 1 || (anim.out && anim.w <= 0)) anim = null;
+      } else {
+        for (const n in bones) qProc[n].copy(bones[n].quaternion);
+        if (bones.hips) hipsProc.copy(bones.hips.position);
+        mixer.update(dt);
+        anim.w = anim.out ? Math.max(0, anim.w - dt * 4) : Math.min(1, anim.w + dt * 2.5);
+        const fadeEnd = smoothstep((anim.len - (t - anim.t0)) / 0.5);
+        const w = anim.w * fadeEnd;
+        for (const n in bones) { const b = bones[n]; const aq = b.quaternion.clone(); b.quaternion.copy(qProc[n]).slerp(aq, w); }
+        if (bones.hips) bones.hips.position.lerpVectors(hipsProc, bones.hips.position.clone(), w);
+        if (p >= 1 || (anim.out && anim.w <= 0)) { anim.action.stop(); anim = null; }
+      }
+    }
+
+    // eyes: look at the camera, glance away now and then (up when thinking)
+    if (t > glanceAt) { glance = Math.random() < 0.5 ? 0 : (Math.random() - 0.5) * 0.5; glanceAt = t + 1.5 + Math.random() * 3; }
+    const sc = vrm.scene.scale.y;
+    lookTarget.position.lerp(new THREE.Vector3(cam.position.x + (state === "thinking" ? 0.4 : glance) * sc + look,
+      cam.position.y + (state === "thinking" ? 0.35 * sc : 0), cam.position.z), 0.08);
+
+    // blinking
+    if (t > blinkAt && blinkT < 0) blinkT = 0;
+    let blink = 0;
+    if (blinkT >= 0) { blinkT += dt; blink = blinkT < 0.07 ? blinkT / 0.07 : blinkT < 0.16 ? 1 - (blinkT - 0.07) / 0.09 : 0;
+      if (blinkT >= 0.16) { blinkT = -1; blinkAt = t + 2 + Math.random() * 4; } }
+    setEx("blink", Math.max(blink, extra.blink || 0));
+    setEx("blinkLeft", extra.blinkLeft || 0); setEx("blinkRight", extra.blinkRight || 0);
+
+    // mouth follows the voice; the vowel shape changes a few times a second
+    mouth = lerp(mouth, clamp(level * 1.6), level > mouth ? 0.55 : 0.25);
+    if (t > vowelAt) { vowel = ["aa", "aa", "oh", "ih", "ou", "ee"][Math.floor(Math.random() * 6)]; vowelAt = t + 0.09 + Math.random() * 0.12; }
+    for (const v of ["aa", "ih", "ou", "ee", "oh"]) setEx(v, Math.max(v === vowel ? mouth : (v === "aa" ? mouth * 0.3 : 0), extra[v] || 0));
+
+    // feelings fade in and out
+    if (t > emotionUntil) emotion = null;
+    const goal = { happy: Math.max(emotion === "happy" ? 0.65 : (state === "idle" ? 0.12 : 0), extra.happy || 0),
+      sad: emotion === "sad" ? 0.45 : 0, surprised: emotion === "surprised" ? 0.5 : 0,
+      relaxed: Math.max(state === "listening" ? 0.25 : 0, extra.relaxed || 0) };
+    for (const k in emo) { emo[k] = lerp(emo[k], goal[k], 0.08); setEx(k, emo[k] * (1 - mouth * 0.5)); }
+
+    cam.position.lerp(camGoal, 0.05); aimNow.lerp(camAim, 0.05); cam.lookAt(aimNow);
+    vrm.update(dt);
+    renderer.render(scene, cam);
+  }
+  raf = requestAnimationFrame(frame);
+  setTimeout(() => trigger("greeting"), 1200);    // a little wave when the screen opens
+  setAnimations(o.animations);
+  return {
+    setState(s) { state = s; },
+    setLevel(x) { level = clamp(x); },
+    setCamera: m => setCamera(m),
+    setHeight,
+    setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); },
+    setAnimations, play, trigger, react,
+    fps: () => fps,
+    destroy() {
+      cancelAnimationFrame(raf); ro.disconnect(); mixer.stopAllAction();
+      try { VRMUtils.deepDispose && VRMUtils.deepDispose(vrm.scene); } catch {}
+      renderer.dispose(); renderer.domElement.remove();
+    },
+  };
+}
+
+// ------------------------------------------------------------------ wake word (openWakeWord in the browser)
+// Same pipeline as the phone app: 80 ms chunks of 16 kHz audio -> mel spectrogram -> embeddings -> wake word score.
+export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, threshold = 0.5, isBusy = () => false, isSpeaking = () => false }) {
+  if (!window.ort) await new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = "/avatar/lib/ort/ort.wasm.min.js"; s.onload = res;
+    s.onerror = () => rej(new Error("the wake word engine isn't downloaded yet")); document.head.appendChild(s);
+  });
+  const ort = window.ort;
+  ort.env.wasm.wasmPaths = "/avatar/lib/ort/"; ort.env.wasm.numThreads = 1;
+  const fetchModel = async (u, h) => { const r = await fetch(u, { headers: h }); if (!r.ok) throw new Error("couldn't load " + u.split("/").pop()); return new Uint8Array(await r.arrayBuffer()); };
+  const opts = { executionProviders: ["wasm"] };
+  const mel = await ort.InferenceSession.create(await fetchModel("/avatar/lib/oww/melspectrogram.onnx"), opts);
+  const emb = await ort.InferenceSession.create(await fetchModel("/avatar/lib/oww/embedding_model.onnx"), opts);
+  const wake = await ort.InferenceSession.create(await fetchModel(modelUrl, headers), opts);
+  const FRAMES = 16, CHUNK = 1280, CTX = 480, BINS = 32, WIN = 76;
+
+  let tail = new Float32Array(CTX), melFrames = [], feats = [], preds = 0, cooldownUntil = 0;
+  function reset() { melFrames = Array.from({ length: WIN }, () => new Float32Array(BINS).fill(1)); feats = []; preds = 0; }
+  reset();
+  async function run(sess, data, dims) {
+    const out = await sess.run({ [sess.inputNames[0]]: new ort.Tensor("float32", data, dims) });
+    return out[sess.outputNames[0]].data;
+  }
+  async function processChunk(chunk) {     // chunk: 1280 samples as int16-range floats
+    const audio = new Float32Array(CTX + CHUNK); audio.set(tail, 0); audio.set(chunk, CTX); tail = audio.slice(audio.length - CTX);
+    const m = await run(mel, audio, [1, audio.length]);
+    for (let f = 0; f < m.length / BINS; f++) { const fr = new Float32Array(BINS); for (let b = 0; b < BINS; b++) fr[b] = m[f * BINS + b] / 10 + 2; melFrames.push(fr); }
+    if (melFrames.length > 200) melFrames.splice(0, melFrames.length - 200);
+    const win = new Float32Array(WIN * BINS), st = melFrames.length - WIN;
+    for (let i = 0; i < WIN; i++) win.set(melFrames[st + i], i * BINS);
+    feats.push(Float32Array.from(await run(emb, win, [1, WIN, BINS, 1])));
+    if (feats.length > FRAMES * 2) feats.splice(0, feats.length - FRAMES * 2);
+    if (feats.length < FRAMES) return 0;
+    const dim = feats[0].length, inp = new Float32Array(FRAMES * dim), s0 = feats.length - FRAMES;
+    for (let i = 0; i < FRAMES; i++) inp.set(feats[s0 + i], i * dim);
+    const score = (await run(wake, inp, [1, FRAMES, dim]))[0];
+    return ++preds <= 5 ? 0 : score;
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1);
+  const ratio = ctx.sampleRate / 16000; let pos = 0, carry = new Float32Array(0), pending = [], working = false, stopped = false;
+  proc.onaudioprocess = ev => {
+    if (stopped) return;
+    const inp = ev.inputBuffer.getChannelData(0), all = new Float32Array(carry.length + inp.length);
+    all.set(carry, 0); all.set(inp, carry.length);
+    const out = []; while (pos + ratio <= all.length) { let s = 0; const a = Math.floor(pos), b = Math.floor(pos + ratio);
+      for (let j = a; j < b; j++) s += all[j]; out.push((s / Math.max(1, b - a)) * 32767); pos += ratio; }
+    const used = Math.floor(pos); carry = all.slice(used); pos -= used;
+    for (const x of out) pending.push(x);
+    if (pending.length > CHUNK * 6) pending.splice(0, pending.length - CHUNK * 6);   // falling behind: drop old audio
+    pump();
+  };
+  async function pump() {
+    if (working) return; working = true;
+    try {
+      while (pending.length >= CHUNK && !stopped) {
+        const chunk = Float32Array.from(pending.splice(0, CHUNK));
+        if (isBusy()) { reset(); continue; }                 // already recording a question
+        const score = await processChunk(chunk);
+        const need = isSpeaking() ? Math.min(0.92, threshold + 0.3) : threshold;  // harder while Stella talks
+        if (score >= need && performance.now() > cooldownUntil) { cooldownUntil = performance.now() + 2000; reset(); onWake && onWake(score); }
+      }
+    } catch (e) { onError && onError(e); }
+    working = false;
+  }
+  src.connect(proc); proc.connect(ctx.destination);
+  return {
+    setThreshold(x) { threshold = x; },
+    stop() { stopped = true; try { proc.disconnect(); src.disconnect(); } catch {} stream.getTracks().forEach(tr => tr.stop()); ctx.close(); },
+  };
+}
+"""  # end of avatar script
 
 
 # ----------------------------------------------------------------------------- HTTP API
@@ -4523,6 +6210,45 @@ def make_http_handler(cfg, chats):
                     return self.send_json(503, {"error": "speech recognition unavailable"})
                 log(f'phone: {seconds:.1f}s -> "{text}" ({time.time() - started:.1f}s)')
                 return self.send_json(200, {"text": text})
+
+            if path == "/tts":
+                try:
+                    req = json.loads(self.read_body(100_000) or b"{}")
+                    ac = avatar_config()
+                    voice = req.get("voice") if req.get("voice") in VOICES else ac["voice"]
+                    if not os.path.isfile(_avatar_path("voices", voice + ".onnx")):
+                        prepare_avatar() if voice == ac["voice"] else threading.Thread(
+                            target=ensure_voice, args=(voice,), daemon=True).start()
+                        return self.send_json(503, {"error": "The voice is still downloading", "status": AVATAR["status"]})
+                    wav = TTS.say(str(req.get("text", "")), voice, float(req.get("speed") or ac["speed"]))
+                except (ValueError, TypeError) as e:
+                    return self.send_json(400, {"error": str(e)})
+                except (RuntimeError, OSError) as e:
+                    return self.send_json(503, {"error": f"speech failed: {e}"})
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(wav)))
+                self.end_headers()
+                self.wfile.write(wav)
+                return
+            if path == "/avatar/event":
+                try:
+                    seq = AVATAR_BUS.post(json.loads(self.read_body(100_000) or b"{}"))
+                except ValueError as e:
+                    return self.send_json(400, {"error": str(e)})
+                return self.send_json(200, {"seq": seq})
+            m = re.fullmatch(r"/avatar/anims/([0-9a-f]{12})", path)
+            if m:
+                try:
+                    return self.send_json(200, {"animations": update_animation(
+                        m.group(1), json.loads(self.read_body(10_000) or b"{}"))})
+                except (KeyError, ValueError) as e:
+                    return self.send_json(404, {"error": str(e)})
+            if path == "/avatar/config":
+                try:
+                    return self.send_json(200, save_avatar_config(json.loads(self.read_body(100_000) or b"{}")))
+                except (ValueError, TypeError, OSError) as e:
+                    return self.send_json(400, {"error": str(e)})
 
             if path == "/sync":
                 body = self.read_body(20_000_000)
@@ -4710,15 +6436,28 @@ def make_http_handler(cfg, chats):
             self.end_headers()
             self.wfile.write(body)
 
-        def send_file(self, file, content_type):
+        def send_file(self, file, content_type, revalidate=False):
             if not os.path.isfile(file):
                 return self.send_json(404, {"error": "not found"})
+            etag = None
+            if revalidate:
+                st = os.stat(file)
+                etag = f'"{int(st.st_mtime)}-{st.st_size}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.end_headers()
+                    return
             with open(file, "rb") as f:
                 data = f.read()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+            if etag:
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, no-cache")
+            else:
+                self.send_header("Cache-Control", "private, max-age=31536000, immutable")
             self.end_headers()
             self.wfile.write(data)
 
@@ -4739,6 +6478,23 @@ def make_http_handler(cfg, chats):
                     return self.send_json(400, {"error": str(e)})
                 log(f"project file {name}: {len(data) // 1024} KB ({time.time() - started:.1f}s)")
                 return self.send_json(200, {"id": fid, "project": chats.project(m.group(1))})
+            if path == "/avatar/anims":
+                q = parse_qs(urlparse(self.path).query)
+                try:
+                    items = add_animation(self.read_body(60_000_000) or b"", q.get("name", [""])[0],
+                                          q.get("when", ["idle"])[0], q.get("type", [""])[0].lower())
+                except ValueError as e:
+                    return self.send_json(400, {"error": str(e)})
+                return self.send_json(200, {"animations": items})
+            if path == "/avatar/model":
+                try:
+                    fname = add_character(self.read_body(120_000_000),
+                                          parse_qs(urlparse(self.path).query).get("name", ["character"])[0])
+                except ValueError as e:
+                    return self.send_json(400, {"error": str(e)})
+                cfg_now = save_avatar_config({"style": "vrm", "character": fname})
+                log(f"avatar: new character {fname}")
+                return self.send_json(200, cfg_now)
             m = re.fullmatch(r"/images/([0-9a-f]{16})\.jpg", path)
             if not m:
                 return self.send_json(404, {"error": "not found"})
@@ -4780,15 +6536,33 @@ def make_http_handler(cfg, chats):
             path = urlparse(self.path).path
             if path == "/health":
                 return self.send_json(200, {"ok": True})
-            if path in ("/", "/index.html", "/chat"):
+            if path == "/avatar/avatar.js":
+                body = AVATAR_JS.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path.startswith("/avatar/lib/"):
+                rel = path[len("/avatar/lib/"):]
+                if rel not in AVATAR_LIBS:          # only the files listed above, never anything else
+                    return self.send_json(404, {"error": "not found"})
+                return self.send_file(_avatar_path("lib", *rel.split("/")),
+                                      LIB_TYPES.get(os.path.splitext(rel)[1], "application/octet-stream"))
+            if path in ("/", "/index.html", "/chat", "/avatar"):
+                if path == "/avatar":
+                    prepare_avatar()
                 body = WEBCHAT_HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; "
-                                 "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
-                                 "connect-src 'self'; frame-ancestors 'none'")
+                                 "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+                                 "connect-src 'self' blob:; media-src 'self' blob:; worker-src 'self' blob:; "
+                                 "frame-ancestors 'none'")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(body)
@@ -4797,6 +6571,24 @@ def make_http_handler(cfg, chats):
                 return self.send_json(404, {"error": "none"})
             if not self.authorized():
                 return self.send_json(401, {"error": "wrong API key"})
+            if path == "/avatar/config":
+                return self.send_json(200, avatar_config())
+            if path == "/avatar/events":
+                try:
+                    since = int(parse_qs(urlparse(self.path).query).get("since", ["0"])[0])
+                except ValueError:
+                    since = 0
+                return self.send_json(200, dict(AVATAR_BUS.since(since), avatar_rev=avatar_rev()))
+            if path.startswith("/avatar/bin/"):
+                kind, _, name = urllib.parse.unquote(path[len("/avatar/bin/"):]).partition("/")
+                if kind not in ("characters", "animations") or not _safe_bin_name(name):
+                    return self.send_json(404, {"error": "not found"})
+                # revalidated each time (not cached forever), so a replaced file replaces the screen's copy
+                return self.send_file(_avatar_path("bin", kind, name), "application/octet-stream", revalidate=True)
+            if path == "/avatar/model.vrm":
+                ch = avatar_config()["character"]
+                return self.send_file(_avatar_path("bin", "characters", ch), "model/gltf-binary", revalidate=True) \
+                    if ch else self.send_json(404, {"error": "no character"})
             if path == "/tools":
                 return self.send_json(200, {"tools": [t[1] for t in SERVER_TOOLS.values()],
                                             "approval": sorted(APPROVAL_TOOLS)})
@@ -4889,6 +6681,8 @@ def parse_args(argv=None):
     p.add_argument("--model-conf", default="", help="Linux launcher's model.conf (enables switching models from the app)")
     p.add_argument("--models-dir", default="", help="folder with the .gguf models")
     p.add_argument("--llama-pid", default="", help="file with llama-server's process id")
+    p.add_argument("--avatar-dir", default="", help="avatar screen files: voice, 3D libraries, your character "
+                                                    "(default: avatar next to the database)")
     p.add_argument("--restore", default="", help="restore this backup zip (with the server stopped) and exit")
     p.add_argument("--searxng", default="", help="SearXNG URL for web search, e.g. http://127.0.0.1:8888 "
                                                  "(optional; DuckDuckGo is used otherwise)")
@@ -4930,6 +6724,10 @@ def start(cfg):
     BACKUP["config"] = os.path.join(base, "backup.json")
     BACKUP["paths"] = {"projects": PROJECT_DIR, "images": IMAGE_DIR, "diagrams": DIAGRAM_DIR, "wakewords": WAKEWORD_DIR}
     DOCTOR["whisper"] = cfg.whisper
+    AVATAR["dir"] = os.path.abspath(getattr(cfg, "avatar_dir", "") or os.path.join(base, "avatar"))
+    migrate_avatar_files()
+    for kind in ("characters", "animations"):
+        os.makedirs(_avatar_path("bin", kind), exist_ok=True)
     if getattr(cfg, "model_conf", "") and getattr(cfg, "models_dir", ""):
         SERVER_CONTROL = LinuxServerControl(cfg.model_conf, cfg.models_dir, cfg.llama_pid)
     SEARXNG_URL = getattr(cfg, "searxng", "") or ""

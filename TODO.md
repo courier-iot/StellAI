@@ -6,6 +6,18 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 1. [ ] **Quick launch** (app, S)
    A Quick Settings tile and a home-screen widget to talk to Stella in one tap.
 
+### Next: long chats that don't run out, and working more like Claude (agreed, not started)
+
+2. [ ] **Bigger context windows** (setup, S): 32K for 4B, 32–64K for 9B, 64K for 35B, sized from free RAM/VRAM (Qwen3.5's hybrid attention keeps the cost low).
+3. [ ] **Background rolling summaries** (server + clients, M): summarize the oldest turns while idle from ~60% full, fold old summaries together; no waiting.
+4. [ ] **Recall inside the current chat** (server, M): search the summarized-away part of the same chat and bring exact passages back.
+5. [ ] **Pinned working notes per chat** (all, M): goals, decisions, names, story facts; always included, never summarized.
+6. [ ] **Documents beside the chat** (all, L): long code and chapters live in a side panel Stella edits by section; the chat keeps a reference.
+7. [ ] **Automatic memory** (server, M): pull lasting facts from quiet chats into Memory, with a review list.
+8. [ ] **Code runner** (server, M): run Python on the server to check maths, test code and analyze files.
+9. [ ] **Personality and working style** (prompt, S): direct, asks one clarifying question, admits uncertainty, checks its work.
+10. [ ] **Conveniences** (all, S): auto-continue at the length limit; "Continue in a new chat" carrying notes and summary.
+
 ## Also discussed, not yet built
 
 - [ ] **"Hey Stella" wake word**: the app support is done; train the model in the Colab notebook (see the app README) and drop `hey_stella.onnx` into `~/llm/wakewords/` on the server.
@@ -13,6 +25,12 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [ ] **Security hardening**: firewall rules limited to Tailscale and your home network, Android backup turned off for the app, and a command to replace the API key.
 
 ## Done
+
+- [ ] **Your animation ideas**: hand-made versions of the list you're putting together (send it over).
+- [x] **Avatar animations, wake word, light mode, height**: built-in gestures plus uploaded .vrma/Mixamo .fbx with when-to-play; wake word in the browser (openWakeWord via ONNX Runtime Web); automatic light mode on a Pi; height (default 5′8″); CM5/Raspberry Pi display setup script.
+- [x] **Avatar screen**: full-screen orb or 3D VRM character with Piper voice and lip sync; on the server PC, a spare phone/tablet (app), any browser or a Raspberry Pi kiosk; speaks replies from every device.
+
+- [x] **Package autodetect**: installers pick packages for the distribution, GPU, driver and runtimes (Linux: apt/dnf/pacman/zypper, matched CUDA toolkit, Vulkan for AMD, private Node.js; Windows: driver-matched CUDA build, Visual C++ runtime, Vulkan check).
 
 - [x] **Server screen**: status, model switching and downloads from the phone or desktop chat.
 - [x] **Health check**: `stellai-doctor` checks every part of the server and says how to fix what's wrong (app, desktop chat, Linux menu, Windows app).

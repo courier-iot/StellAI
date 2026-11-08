@@ -41,6 +41,23 @@ class App : Application() {
     var assistantRunning by mutableStateOf(false)
         private set
 
+    /** True while the avatar screen is open: the avatar speaks replies with the server's voice instead. */
+    @Volatile
+    var avatarScreenOpen = false
+
+    /** Tells avatar screens what Stella is doing on this phone (listening, thinking, a reply). Best effort. */
+    fun avatarEvent(state: String, text: String = "", voice: Boolean = false) {
+        if (settings.serverUrl.isBlank()) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                HubApi.avatarEvent(settings.serverUrl, settings.apiKey, org.json.JSONObject()
+                    .put("state", state).put("text", text).put("voice", voice)
+                    .put("source", "phone-" + android.os.Build.MODEL).put("device", "phone"))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private var appVisible = false
 
     /** True while an app screen is in the foreground. */

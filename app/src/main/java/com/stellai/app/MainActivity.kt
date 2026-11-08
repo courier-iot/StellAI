@@ -1,6 +1,7 @@
 package com.stellai.app
 
 import android.content.Intent
+import android.net.Uri
 import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -22,6 +23,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 class MainActivity : ComponentActivity() {
 
@@ -32,6 +36,44 @@ class MainActivity : ComponentActivity() {
 
     /** Server address + key from a pairing QR code, waiting for the user to confirm. */
     private var pendingPair by mutableStateOf<Pair<String, String>?>(null)
+
+    /** A problem with scanning, shown in a dialog. */
+    private var scanMessage by mutableStateOf<String?>(null)
+
+    /** Opens the QR scanner for the pairing code shown by StellAI Server. */
+    fun scanPairCode() {
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .build()
+        try {
+            GmsBarcodeScanning.getClient(this, options).startScan()
+                .addOnSuccessListener { code ->
+                    val raw = code.rawValue.orEmpty().trim()
+                    if (!offerPair(Uri.parse(raw))) {
+                        scanMessage = "That isn't a StellAI pairing code. Scan the QR code shown by StellAI Server " +
+                            "(Windows: the server window; Linux: the StellAI Server terminal)."
+                    }
+                }
+                .addOnFailureListener { e ->
+                    scanMessage = "Couldn't open the scanner (${e.message ?: "Google Play services needed"}). " +
+                        "You can scan the code with the phone's camera app instead, or type the address and API key."
+                }
+        } catch (e: Exception) {
+            scanMessage = "Couldn't open the scanner: ${e.message}. Type the address and API key instead."
+        }
+    }
+
+    /** A stellai://pair link (from a scan or the camera app): ask before using it. */
+    private fun offerPair(data: Uri?): Boolean {
+        if (data?.scheme != "stellai" || data.host != "pair") return false
+        val url = AppSettings.normalizeUrl(data.getQueryParameter("url").orEmpty())
+        val key = data.getQueryParameter("key").orEmpty().trim()
+        val validUrl = Regex("^https?://[A-Za-z0-9.:\\[\\]-]+(:\\d+)?$").matches(url)
+        if (!validUrl || key.length !in 8..200 || key.any { it.isWhitespace() }) return false
+        pendingPair = url to key
+        return true
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +98,7 @@ class MainActivity : ComponentActivity() {
                 when (screen) {
                     "settings" -> {
                         BackHandler { screen = "chat" }
-                        SettingsScreen(onDone = { screen = "chat" }, onOpenMemory = { screen = "memory" })
+                        SettingsScreen(onDone = { screen = "chat" }, onOpenMemory = { screen = "memory" }, onScan = { scanPairCode() })
                     }
                     "tasks" -> {
                         BackHandler { screen = "chat" }
@@ -65,6 +107,10 @@ class MainActivity : ComponentActivity() {
                     "modes" -> {
                         BackHandler { screen = "chat" }
                         ModesScreen(onDone = { screen = "chat" })
+                    }
+                    "avatar" -> {
+                        BackHandler { screen = "chat" }
+                        AvatarScreen(onDone = { screen = "chat" })
                     }
                     "server" -> {
                         BackHandler { screen = "chat" }
@@ -90,8 +136,16 @@ class MainActivity : ComponentActivity() {
                             onOpenModes = { screen = "modes" },
                             onOpenTasks = { screen = "tasks" },
                             onOpenServer = { screen = "server" },
+                            onOpenAvatar = { screen = "avatar" },
                         )
                     }
+                }
+                scanMessage?.let { m ->
+                    AlertDialog(
+                        onDismissRequest = { scanMessage = null },
+                        text = { Text(m) },
+                        confirmButton = { TextButton(onClick = { scanMessage = null }) { Text("OK") } },
+                    )
                 }
                 pendingPair?.let { (url, key) ->
                     PairDialog(
@@ -138,10 +192,7 @@ class MainActivity : ComponentActivity() {
         }
         val data = intent.data
         if (intent.action == Intent.ACTION_VIEW && data?.scheme == "stellai" && data.host == "pair") {
-            val url = AppSettings.normalizeUrl(data.getQueryParameter("url").orEmpty())
-            val key = data.getQueryParameter("key").orEmpty().trim()
-            val validUrl = Regex("^https?://[A-Za-z0-9.:\\[\\]-]+(:\\d+)?$").matches(url)
-            if (validUrl && key.length in 8..200 && key.none { it.isWhitespace() }) pendingPair = url to key
+            offerPair(data)
             setIntent(Intent(this, MainActivity::class.java))
             return
         }

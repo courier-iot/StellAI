@@ -178,12 +178,35 @@ def choose_backend(gpus, nvidia):
     return "cpu", None, ""
 
 
+def _system_dll(name):
+    return os.path.isfile(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name))
+
+
+VCREDIST_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+
+def vcredist_present():
+    """The Microsoft Visual C++ runtime that llama.cpp and whisper.cpp are built against."""
+    return os.name != "nt" or all(_system_dll(d) for d in VCREDIST_DLLS)
+
+
+def vulkan_present():
+    """The Vulkan loader, installed with any current AMD, Intel or NVIDIA graphics driver."""
+    return os.name != "nt" or _system_dll("vulkan-1.dll")
+
+
 def detect():
     cpu, cores, logical = _cpu()
     gpus = _registry_gpus()
     nvidia = _nvidia()
     backend, gpu, cuda = choose_backend(gpus, nvidia)
-    return {"ram_gb": _ram_gb(), "cpu": cpu, "cores": cores, "threads": logical,
+    notes = []
+    if backend == "vulkan" and not vulkan_present():
+        notes.append(f"{gpu['name'] if gpu else 'The graphics card'} needs a newer graphics driver for Vulkan; "
+                     "using the CPU until it's updated")
+        backend, gpu, cuda = "cpu", None, ""
+    return {"notes": notes, "vcredist": vcredist_present(),"ram_gb": _ram_gb(), "cpu": cpu, "cores": cores, "threads": logical,
             "gpus": [g["name"] for g in gpus] or ([nvidia["name"]] if nvidia else []),
             "backend": backend, "gpu": gpu["name"] if gpu else "", "vram_gb": gpu["vram_gb"] if gpu else 0,
             "cuda": cuda, "cuda_driver": nvidia["cuda"] if nvidia else ""}
@@ -487,8 +510,49 @@ def cuda_driver_version(pl=None):
     return (nv or {}).get("cuda") or (pl or {}).get("cuda_driver", "")
 
 
+def _zip_ok(path, size=0, digest=""):
+    """True if path is a complete, readable zip (matching the release's size and SHA-256 when known)."""
+    import hashlib
+    try:
+        if size and os.path.getsize(path) != size:
+            return False
+        if digest.startswith("sha256:"):
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+            if h.hexdigest() != digest.split(":", 1)[1].lower():
+                return False
+        with zipfile.ZipFile(path) as z:
+            return z.testzip() is None
+    except (OSError, zipfile.BadZipFile, ValueError, RuntimeError, EOFError):
+        return False
+
+
+def fetch_zip(asset, folder, progress=None, cancel=None):
+    """Downloads a release zip and checks it; a damaged or stale copy is deleted and fetched again."""
+    dest = os.path.join(folder, asset["name"])
+    size, digest = int(asset.get("size") or 0), str(asset.get("digest") or "")
+    for attempt in range(2):
+        if os.path.exists(dest) and not _zip_ok(dest, size, digest):
+            os.remove(dest)
+        if attempt and os.path.exists(dest + ".part"):
+            os.remove(dest + ".part")         # don't resume a download that produced a bad file
+        download(asset["browser_download_url"], dest, progress, cancel)
+        if _zip_ok(dest, size, digest):
+            return dest
+    try:
+        os.remove(dest)
+    except OSError:
+        pass
+    raise RuntimeError(f"{asset['name']} was damaged twice while downloading; check the connection and try again")
+
+
 def install_llama(cfg, pl, status, prog, cancel):
-    """Downloads the llama.cpp build for plan pl (if it isn't there yet). Returns its assets."""
+    """Downloads the llama.cpp build for plan pl (if it isn't there yet). Returns its assets.
+
+    The new build is unpacked next to the old one and only swapped in once it's complete, so a failed
+    download never leaves StellAI without a working engine."""
     bin_llama, dl = cfg.p("bin", "llama"), cfg.p("downloads")
     os.makedirs(dl, exist_ok=True)
     status("Finding the latest llama.cpp build…")
@@ -498,13 +562,21 @@ def install_llama(cfg, pl, status, prog, cancel):
                                skip=cfg.get("bad_cuda") or [])
     want_tag = f"{rel['tag_name']}:{pl['backend']}:{assets[0]['name']}"
     if cfg.get("llama_build") != want_tag or not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
-        shutil.rmtree(bin_llama, ignore_errors=True)
+        new = bin_llama + ".new"
+        shutil.rmtree(new, ignore_errors=True)
         for a in assets:
-            z = download(a["browser_download_url"], os.path.join(dl, a["name"]), prog(a["name"]), cancel)
+            z = fetch_zip(a, dl, prog(a["name"]), cancel)
             status(f"Unpacking {a['name']}…")
-            extract_flat(z, bin_llama)
-        if not os.path.isfile(os.path.join(bin_llama, "llama-server.exe")):
+            extract_flat(z, new)
+        if not os.path.isfile(os.path.join(new, "llama-server.exe")):
+            shutil.rmtree(new, ignore_errors=True)
             raise RuntimeError("llama-server.exe wasn't in the download")
+        old = bin_llama + ".old"
+        shutil.rmtree(old, ignore_errors=True)
+        if os.path.isdir(bin_llama):
+            os.replace(bin_llama, old)
+        os.replace(new, bin_llama)
+        shutil.rmtree(old, ignore_errors=True)
         cfg.set(llama_build=want_tag)
     return assets
 
@@ -543,7 +615,13 @@ def recover_from_cuda_failure(cfg, status=lambda t: None, cancel=None):
         pl["backend"] = "vulkan"
     def prog(label):
         return lambda done, total: status(f"{label}: {done / 2**20:.0f} MB")
-    assets = install_llama(cfg, pl, status, prog, cancel)
+    try:
+        assets = install_llama(cfg, pl, status, prog, cancel)
+    except RuntimeError:
+        if pl.get("backend") != "cuda":
+            raise
+        pl["backend"] = "vulkan"             # couldn't get a CUDA build: Vulkan still uses the GPU
+        assets = install_llama(cfg, pl, status, prog, cancel)
     if "-cuda-" not in assets[0]["name"]:
         pl["backend"] = "vulkan"
         hw = dict(cfg.get("hardware") or {})
@@ -555,6 +633,61 @@ def recover_from_cuda_failure(cfg, status=lambda t: None, cancel=None):
     return (f"Your NVIDIA driver can't run the CUDA {ver or ''} build, so StellAI switched to "
             + (f"the CUDA {current_cuda_build(cfg)} build." if "-cuda-" in used else "Vulkan (still uses the GPU).")
             + " Updating the NVIDIA driver lets it use the newest build.")
+
+
+def packages(hw):
+    """What setup will install on this PC and why: [(name, detail)], plus tips. Shown before installing."""
+    out = []
+    be = hw.get("backend", "cpu")
+    drv = hw.get("cuda_driver", "")
+    if be == "cuda":
+        newest = "13.x" if hw.get("cuda") == "13" else "12.x"
+        out.append(("AI engine", f"llama.cpp, NVIDIA CUDA build: the newest CUDA {newest} build your driver "
+                                 f"(CUDA {drv or '?'}) can run, with its CUDA runtime"))
+        out.append(("Voice", "whisper.cpp CUDA 12.4 build (bundles its own CUDA files)"))
+    elif be == "vulkan":
+        out.append(("AI engine", f"llama.cpp, Vulkan build for {hw.get('gpu') or 'the graphics card'}"))
+        out.append(("Voice", "whisper.cpp CPU build"))
+    else:
+        out.append(("AI engine", "llama.cpp CPU build (uses AVX2/AVX-512 automatically when the processor has it)"))
+        out.append(("Voice", "whisper.cpp CPU build"))
+    out.append(("Visual C++ runtime", "already installed" if hw.get("vcredist", True)
+                else "Microsoft Visual C++ runtime (Windows asks for permission once)"))
+    tips = list(hw.get("notes") or [])
+    if drv and _version_tuple(drv) < (13, 0) and hw.get("gpu"):
+        tips.append(f"Your NVIDIA driver supports CUDA {drv}. Updating it (nvidia.com or the NVIDIA app) lets "
+                    "StellAI use the newest, fastest CUDA build.")
+    return out, tips
+
+
+def ensure_vcredist(cfg, status, cancel=None):
+    """Installs the Microsoft Visual C++ runtime if it's missing (one UAC prompt). Returns True when present."""
+    if vcredist_present():
+        return True
+    status("Installing the Microsoft Visual C++ runtime (Windows will ask for permission)…")
+    exe = cfg.p("downloads", "vc_redist.x64.exe")
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    try:
+        download(VCREDIST_URL, exe, None, cancel)
+        with open(exe, "rb") as f:
+            if f.read(2) != b"MZ":
+                raise RuntimeError("the download isn't a Windows program")
+        ps = ("$p = Start-Process -FilePath '" + exe.replace("'", "''") + "' -ArgumentList '/install','/quiet',"
+              "'/norestart' -Verb RunAs -Wait -PassThru; exit $p.ExitCode")
+        p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                           text=True, timeout=600, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+        if p.returncode not in (0, 1638, 3010):     # 1638: a newer one is installed; 3010: restart pending
+            raise RuntimeError(f"installer exit code {p.returncode}")
+    except Exception as e:
+        status(f"Couldn't install the Visual C++ runtime ({e}). If the AI engine won't start, install it from "
+               "https://aka.ms/vs/17/release/vc_redist.x64.exe")
+        return False
+    finally:
+        try:
+            os.remove(exe)
+        except OSError:
+            pass
+    return vcredist_present()
 
 
 def install(cfg, pl, status, progress, cancel):
@@ -573,13 +706,14 @@ def install(cfg, pl, status, progress, cancel):
                 status(f"{label}: {done / 2**20:.0f} MB")
         return f
 
+    ensure_vcredist(cfg, status, cancel)
     assets = install_llama(cfg, pl, status, prog, cancel)
 
     if not os.path.isfile(os.path.join(bin_whisper, "whisper-server.exe")):
         status("Finding the latest whisper.cpp build…")
         try:
             tag, a = whisper_asset(gpu=pl["backend"] == "cuda")
-            z = download(a["browser_download_url"], os.path.join(dl, a["name"]), prog("Whisper"), cancel)
+            z = fetch_zip(a, dl, prog("Whisper"), cancel)
             extract_flat(z, bin_whisper)
             cfg.set(whisper_gpu="cuda" in a["name"])
         except (RuntimeError, urllib.error.URLError, OSError) as e:
@@ -695,7 +829,7 @@ def hub_args(cfg):
     args = ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
             "--image-dir", cfg.p("images"), "--wakeword-dir", cfg.p("wakewords"),
             "--llama", f"http://127.0.0.1:{LLAMA_PORT}", "--whisper", f"http://127.0.0.1:{WHISPER_PORT}",
-            "--mmdc", shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT)]
+            "--mmdc", shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT), "--avatar-dir", cfg.p("avatar")]
     if os.path.isfile(cfg.p("models", EMBED_FILE)):
         args += ["--embed", f"http://127.0.0.1:{EMBED_PORT}"]
     if cfg.get("searxng"):
@@ -706,6 +840,26 @@ def hub_args(cfg):
 def web_chat_url(cfg):
     from urllib.parse import quote
     return f"http://127.0.0.1:{HUB_PORT}/#key={quote(api_key(cfg), safe='')}"
+
+
+def avatar_url(cfg):
+    from urllib.parse import quote
+    return f"http://127.0.0.1:{HUB_PORT}/avatar#key={quote(api_key(cfg), safe='')}"
+
+
+def open_avatar(cfg):
+    """Stella's avatar screen, full screen in Edge/Chrome's app mode (allowed to talk without a click)."""
+    url = avatar_url(cfg)
+    pf = [os.environ.get(k, "") for k in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")]
+    for exe in [shutil.which("msedge"), shutil.which("chrome")] + \
+               [os.path.join(b, *rel) for b in pf if b for rel in (("Microsoft", "Edge", "Application", "msedge.exe"),
+                                                                    ("Google", "Chrome", "Application", "chrome.exe"))]:
+        if exe and os.path.isfile(exe):
+            subprocess.Popen([exe, f"--app={url}", "--start-fullscreen", "--autoplay-policy=no-user-gesture-required",
+                              f"--user-data-dir={cfg.p('avatar-browser')}", "--no-first-run"], close_fds=True)
+            return
+    import webbrowser
+    webbrowser.open(url)
 
 
 # ---- Private web search: SearXNG in Docker Desktop (optional; DuckDuckGo otherwise) ----

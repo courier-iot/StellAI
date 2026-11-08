@@ -318,6 +318,7 @@ class ChatEngine(private val app: App) {
         val mode = modeOf(convId)
         val turn = mutableListOf<JSONObject>() // this turn's tool calls and results, in API format
         var finalReply = ""
+        app.avatarEvent("thinking", voice = fromVoice)
         try {
             withContext(Dispatchers.IO) {
                 // Share new photos with your other devices (the model gets them directly below).
@@ -442,7 +443,10 @@ class ChatEngine(private val app: App) {
             if (remindersChanged) app.scope.launch { app.reminders.refresh() }
             if (gen == generation) updateMeter()
             app.memory.scheduleLearning(convId)
-            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.speakReplies) {
+            if (finalReply.isNotEmpty() && !stopRequested) app.avatarEvent("reply", finalReply, fromVoice)
+            app.avatarEvent("idle")
+            // With the avatar screen open on this phone, the avatar says it (server voice, lip sync)
+            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.speakReplies && !app.avatarScreenOpen) {
                 app.speaker.speak(finalReply)
             }
         }

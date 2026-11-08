@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StellAI</title>
+<script type="importmap">{"imports":{"three":"/avatar/lib/build/three.module.js","three/addons/":"/avatar/lib/examples/jsm/","@pixiv/three-vrm":"/avatar/lib/three-vrm.module.min.js","@pixiv/three-vrm-core":"/avatar/lib/three-vrm.module.min.js","@pixiv/three-vrm-animation":"/avatar/lib/three-vrm-animation.module.min.js"}}</script>
 <style>
 :root{--void:#04060d;--top:#070b1a;--panel:#0c1326;--panel2:#141d38;--line:#26335c;--text:#e6ecff;--muted:#8a96bf;
 --accent:#5ce1e6;--glow:#9b7bff;--gold:#ffd166;--red:#ff6b7a;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
@@ -78,6 +79,22 @@ a{color:var(--accent)}
 .bar2{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}.bar2 div{height:100%;background:var(--accent)}
 .zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:20;cursor:zoom-out}
 .zoom img{max-width:95vw;max-height:95vh;background:#fff;border-radius:8px}
+#stage{display:none;position:relative;flex:1;min-height:0;overflow:hidden}
+#avatarHost{position:absolute;inset:0}
+#caption{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:min(900px,92%);text-align:center;font-size:clamp(17px,2.4vw,27px);line-height:1.35;text-shadow:0 2px 14px #000,0 0 3px #000;transition:opacity .5s;opacity:0;pointer-events:none}
+#caption .who{display:block;font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--accent);margin-bottom:4px}
+#avName{position:absolute;top:14px;left:18px;font-family:var(--mono);letter-spacing:6px;color:var(--accent);font-weight:700}
+#avState{position:absolute;top:36px;left:18px;font-family:var(--mono);font-size:12px;letter-spacing:2px;color:var(--muted)}
+#avStatus{position:absolute;top:58px;left:18px;right:18px;font-size:12px;color:var(--gold);display:none}
+#stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
+#tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
+#mic.on{background:var(--red);border-color:var(--red);color:#fff}
+body.avatar #side,body.avatar #bar{display:none}
+body.avatar #stage{display:block}
+body.avatar #msgs{display:none}
+body.avatar.showchat #msgs{display:block;flex:0 0 40%;border-top:1px solid var(--line);background:rgba(4,6,13,.6)}
+body.avatar #composer{background:rgba(4,6,13,.35);border-top:none}
+body.inapp #composer,body.inapp #avChat,body.inapp #avFull{display:none}
 @media (max-width:760px){#side{position:fixed;z-index:5;height:100%;transform:translateX(-100%);transition:transform .2s}#side.open{transform:none}}
 </style>
 </head>
@@ -111,6 +128,14 @@ a{color:var(--accent)}
       <button class="chip" id="projectChip" style="display:none"></button>
       <div id="meter" title="How full Stella's memory is for this chat"><span class="hud">Context</span><div class="track"><div class="fill" id="meterFill" style="width:0"></div></div><span class="hud" id="meterPct"></span></div>
     </div>
+    <div id="stage">
+      <div id="avatarHost"></div>
+      <div id="avName">STELLA</div><div id="avState"></div><div id="avStatus"></div>
+      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat">💬</button>
+        <button class="ghost" id="avSet" title="Avatar settings">⚙</button><button class="ghost" id="avFull" title="Full screen">⛶</button></div>
+      <div id="caption"></div>
+      <div id="tapStart"><div>✦ Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
+    </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
     <div id="composer">
       <div id="notice"></div>
@@ -119,6 +144,7 @@ a{color:var(--accent)}
         <button class="ghost" id="attach" title="Add a photo">📷</button>
         <input type="file" id="file" accept="image/*" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message Stella… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)">🎤</button>
         <button class="primary" id="send">Send</button>
       </div>
     </div>
@@ -140,8 +166,9 @@ const store = { get(k, d) { try { const v = localStorage.getItem("stellai." + k)
 // Key from the link the server app opens (#key=...), or saved earlier
 (function () {
   const m = location.hash.match(/key=([^&]+)/);
-  if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); }
+  if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname + location.search); }
 })();
+const AVATAR_MODE = location.pathname === "/avatar";
 let KEY = store.get("key", "");
 const NAME = () => store.get("name", "Stella");
 
@@ -480,7 +507,7 @@ async function send() {
   renderSide(); renderMsgs();
   await run(convId, photos);
 }
-function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; }
+function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
   if (S.busy || !S.current) return; const list = msgsOf(S.current);
   const lastUser = list.map(m => m.role).lastIndexOf("user"); if (lastUser < 0) return;
@@ -494,6 +521,7 @@ function truncateFrom(id) {
 
 async function run(convId, photos) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
+  SPEAK.cancel(); postAvatar({ state: "thinking" });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
     let p = await prepare(convId, photos.length);
@@ -524,6 +552,8 @@ async function run(convId, photos) {
       const result = await stream(body);
       const finalText = result.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
       S.streaming = null;
+      if (AVATAR_MODE) { SPEAK.feed(finalText, true); avatarCaption(finalText); if (finalText && AV.avatar) AV.avatar.react(finalText); }
+      if (finalText && !result.toolCalls.length) postAvatar({ state: "reply", text: finalText });
       if (finalText || !result.toolCalls.length) addMsg(convId, "assistant", finalText || "(no reply)", result.reasoning);
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
@@ -563,6 +593,7 @@ async function run(convId, photos) {
   } finally {
     if (S.stopRequested) S.error = "Stopped.";
     S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
+    postAvatar({ state: "idle" });
     touch(convId); renderSide(); renderMsgs(); renderBar();
     sync().then(updateMeter);
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
@@ -579,7 +610,7 @@ async function stream(body) {
   const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
   const res = { content: "", reasoning: "", toolCalls: [] }; const calls = [];
   S.streaming = { id: "live", role: "assistant", text: "", reasoning: "" };
-  let last = 0;
+  let last = 0; SPEAK.begin();
   for (;;) {
     const { value, done } = await reader.read(); if (done) break;
     buf += dec.decode(value, { stream: true });
@@ -599,7 +630,8 @@ async function stream(body) {
     }
     S.streaming.text = res.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trimStart(); S.streaming.reasoning = res.reasoning;
     S.status = !S.streaming.text && res.reasoning ? "Thinking…" : "Writing…";
-    if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); }
+    if (AVATAR_MODE) SPEAK.feed(S.streaming.text);
+    if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); if (AVATAR_MODE && S.streaming.text) avatarCaption(S.streaming.text); }
   }
   res.toolCalls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || "call_" + i }));
   return res;
@@ -915,6 +947,372 @@ $("#wrap").onclick = e => {
   if (t.tagName === "IMG") { const z = document.createElement("div"); z.className = "zoom"; z.innerHTML = `<img src="${t.src}">`; z.onclick = () => z.remove(); document.body.appendChild(z); }
 };
 
+// ---------------------------------------------------------------- voice input (microphone → Whisper on the server)
+const MIC = { rec: null };
+function micHelp() {
+  alertBox("The microphone only works on a secure page. Options: open the chat on the server computer itself " +
+    "(http://localhost:8092), use Tailscale HTTPS (run 'sudo tailscale serve --bg 8092' on the server and open the https://… address it shows), " +
+    "or in Chrome open chrome://flags/#unsafely-treat-insecure-origin-as-secure, add this address (" + location.origin + ") and restart Chrome.");
+}
+async function micToggle() {
+  if (MIC.rec) { MIC.rec.stop(); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { micHelp(); return; }
+  if (S.busy) stop();
+  SPEAK.cancel();
+  let streamIn;
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } }); }
+  catch (e) { alertBox("Couldn't use the microphone: " + e.message); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(streamIn);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = []; let heard = false, quietSince = 0, startedAt = performance.now(), done = false;
+  proc.onaudioprocess = ev => {
+    const d = ev.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d));
+    let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] * d[i];
+    const rms = Math.sqrt(sum / (d.length / 4)); AV.micLevel = Math.min(1, rms * 8);
+    const now = performance.now();
+    if (rms > 0.02) { heard = true; quietSince = now; }
+    if ((heard && now - quietSince > 1300) || now - startedAt > 30000 || (!heard && now - startedAt > 8000)) rec.stop();
+  };
+  src.connect(proc); proc.connect(ctx.destination);
+  const rec = MIC.rec = {
+    async stop() {
+      if (done) return; done = true; MIC.rec = null; AV.micLevel = 0;
+      try { proc.disconnect(); src.disconnect(); } catch {}
+      streamIn.getTracks().forEach(t => t.stop());
+      const rate = ctx.sampleRate; ctx.close();
+      $("#mic").classList.remove("on"); updateAvatarState();
+      if (!heard) return;
+      const len = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(len); let o = 0;
+      for (const c of chunks) { all.set(c, o); o += c.length; }
+      const ratio = rate / 16000, out = new Int16Array(Math.floor(len / ratio));
+      for (let i = 0; i < out.length; i++) {   // average the samples that fall into each 16 kHz sample
+        const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio)); let s = 0;
+        for (let j = a; j < b; j++) s += all[j];
+        out[i] = Math.max(-1, Math.min(1, s / Math.max(1, b - a))) * 32767;
+      }
+      S.status = "Listening… transcribing"; renderBar(); avatarCaption("…", "you");
+      try {
+        const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
+          "Content-Type": "application/octet-stream" }, body: out.buffer });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        S.status = ""; renderBar();
+        const text = (j.text || "").trim();
+        if (!text) { avatarCaption("(didn't catch that)", "you"); return; }
+        $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
+        avatarCaption(text, "you");
+        send();
+      } catch (e) { S.status = ""; renderBar(); notice("Couldn't transcribe: " + e.message); }
+    },
+  };
+  $("#mic").classList.add("on"); updateAvatarState();
+  postAvatar({ state: "listening" });
+}
+
+// ---------------------------------------------------------------- Stella's voice (Piper on the server)
+const SPEAK = {
+  ctx: null, analyser: null, data: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  audio() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.analyser = this.ctx.createAnalyser(); this.analyser.fftSize = 512; this.analyser.connect(this.ctx.destination);
+      this.data = new Uint8Array(this.analyser.fftSize);
+    }
+    return this.ctx;
+  },
+  level() {
+    if (!this.playing || !this.analyser) return 0;
+    this.analyser.getByteTimeDomainData(this.data); let s = 0;
+    for (let i = 0; i < this.data.length; i++) { const v = (this.data[i] - 128) / 128; s += v * v; }
+    return Math.min(1, Math.sqrt(s / this.data.length) * 4);
+  },
+  get speaking() { return !!this.playing || this.queue.length > 0 || this.busyFetch > 0; },
+  begin() { this.fed = 0; },
+  // Speak finished sentences of a reply that's still streaming in; finish() says the rest
+  feed(text, finish = false) {
+    if (!this.enabled) return;
+    let rest = text.slice(this.fed);
+    const fences = (text.slice(0, this.fed).match(/```/g) || []).length;
+    if (!finish && fences % 2 === 1) return;    // inside a code block: wait until it closes
+    let cut = -1;
+    if (finish) cut = rest.length;
+    else {
+      const rx = /[.!?…:;]["')\]]?\s+|\n{2,}/g; let m;
+      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= 40 || /\n/.test(m[0])) { cut = m.index + m[0].length; } }
+      const fence = rest.indexOf("```"); if (fence >= 0 && (cut < 0 || fence < cut)) {
+        const close = rest.indexOf("```", fence + 3);
+        if (close < 0) cut = fence > 0 ? fence : -1; else cut = close + 3;
+      }
+    }
+    if (cut <= 0) return;
+    const piece = rest.slice(0, cut); this.fed += cut;
+    if (piece.trim()) this.say(piece);
+  },
+  say(text) {
+    const gen = this.gen; this.busyFetch++;
+    const p = fetch("/tts", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed }) })
+      .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ("HTTP " + r.status)); } return r.arrayBuffer(); })
+      .then(buf => buf.byteLength > 44 ? this.audio().decodeAudioData(buf) : null)
+      .catch(e => { if (gen === this.gen) avatarStatus("Voice: " + e.message); return null; })
+      .finally(() => { this.busyFetch--; });
+    this.queue.push({ p, gen }); this.pump();
+  },
+  async pump() {
+    if (this.playing || !this.queue.length) return;
+    const item = this.queue.shift(); this.playing = item;
+    const buf = await item.p;
+    if (buf && item.gen === this.gen) {
+      const ctx = this.audio(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+      await new Promise(res => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(this.analyser); s.onended = res; item.src = s; s.start(); });
+    }
+    this.playing = null;
+    if (this.queue.length) this.pump(); else { updateAvatarState(); if (this.onIdle) this.onIdle(); }
+  },
+  cancel() {
+    this.gen++; this.queue = [];
+    if (this.playing && this.playing.src) { try { this.playing.src.stop(); } catch {} }
+    this.playing = null; this.fed = 0;
+  },
+};
+
+// ---------------------------------------------------------------- what Stella is doing, shared with avatar screens
+const CLIENT_ID = uuid();
+const DEVICE = AVATAR_MODE ? "avatar screen" : "desktop chat";
+function postAvatar(ev) {
+  if (!KEY) return;
+  fetch("/avatar/event", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(Object.assign({ source: CLIENT_ID, device: DEVICE }, ev)) }).catch(() => {});
+}
+
+// ---------------------------------------------------------------- the avatar screen (/avatar)
+const AV = { avatar: null, cfg: { style: "orb", voice: "", speed: 1, speak: true, speak_others: true, camera: "upper", voices: [] },
+  remote: null, remoteUntil: 0, since: 0, micLevel: 0, captionTimer: 0 };
+function avatarStatus(text) { const el = $("#avStatus"); if (el) { el.textContent = text || ""; el.style.display = text ? "" : "none"; } }
+function avatarCaption(text, who = "stella") {
+  const el = $("#caption"); if (!el) return;
+  clearTimeout(AV.captionTimer);
+  const t = String(text || "").replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*#`>]|(^|\s)_+|_+(\s|$)/g, "$1$2").replace(/\s+/g, " ").trim();
+  el.innerHTML = t ? `<span class="who">${who === "you" ? "YOU" : esc(NAME().toUpperCase())}</span>${esc(t.length > 260 ? "…" + t.slice(-260) : t)}` : "";
+  el.style.opacity = t ? 1 : 0;
+  if (t && who === "stella" && !S.busy) AV.captionTimer = setTimeout(() => { if (!SPEAK.speaking && !S.busy) el.style.opacity = 0; }, 12000);
+}
+function updateAvatarState() {
+  if (!AV.avatar) return;
+  let st = "idle";
+  if (MIC.rec) st = "listening";
+  else if (SPEAK.speaking && (SPEAK.playing || SPEAK.queue.length)) st = "talking";
+  else if (S.busy) st = S.streaming && S.streaming.text ? "talking" : "thinking";
+  else if (AV.remote && Date.now() < AV.remoteUntil) st = AV.remote;
+  AV.avatar.setState(st);
+  const dotTxt = { idle: WAKE.det ? `Say “${wakeLabel()}”` : "", listening: "Listening…", thinking: "Thinking…", talking: "" }[st];
+  const s = $("#avState"); if (s) s.textContent = dotTxt || "";
+}
+function animUrl(a) { return "/avatar/bin/animations/" + encodeURIComponent(a.file) + "?key=" + encodeURIComponent(KEY); }
+function lightOn() { return AV.cfg.light === "on" || (AV.cfg.light === "auto" && (AV.slow || AV.autoLight)); }
+async function loadAvatarConfig() {
+  try { AV.cfg = await api("/avatar/config"); } catch (e) { avatarStatus("Couldn't load avatar settings: " + e.message); return; }
+  AV.rev = AV.cfg.rev;
+  SPEAK.enabled = AV.cfg.speak;
+  const st = AV.cfg.status || {}, vs = st.voice || "", libs = st.libs || "";
+  avatarStatus(vs && vs !== "ready" ? "Voice: " + vs + (vs.startsWith("failed") ? "" : "…")
+    : libs.startsWith("failed") ? "Avatar files: " + libs : libs === "downloading" ? "Downloading avatar files…" : "");
+  if ((vs && vs !== "ready" && !vs.startsWith("failed")) || libs === "downloading") setTimeout(loadAvatarConfig, 4000);
+  if (!AV.avatar) return;
+  AV.avatar.setCamera(AV.cfg.camera); AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setLight(lightOn());
+  AV.avatar.setGestures(AV.cfg.gestures);
+  AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
+  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY),
+    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || ""));
+  AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
+  if (libs !== "downloading") startWake();
+}
+
+// ---- wake word on this screen (the phone app's avatar screen uses the app's own)
+const WAKE = { det: null, sig: "", error: "" };
+function chime() {
+  try { const ctx = SPEAK.audio(), now = ctx.currentTime;
+    for (const [f, d] of [[880, 0], [1320, 0.09]]) { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = f;
+      g.gain.setValueAtTime(0, now + d); g.gain.linearRampToValueAtTime(0.12, now + d + 0.02); g.gain.exponentialRampToValueAtTime(0.001, now + d + 0.25);
+      o.connect(g); g.connect(ctx.destination); o.start(now + d); o.stop(now + d + 0.3); } } catch {}
+}
+function wakeLabel() { const w = (AV.cfg.wake_words || []).find(x => x.id === AV.cfg.wake_word); return w ? w.label : "Hey Jarvis"; }
+async function startWake() {
+  const want = AV.cfg.wake && !document.body.classList.contains("inapp") && window.isSecureContext && !!navigator.mediaDevices;
+  const sig = want ? AV.cfg.wake_word + "|" + AV.cfg.wake_sensitivity : "";
+  if (sig === WAKE.sig) return;
+  if (WAKE.det) { WAKE.det.stop(); WAKE.det = null; }
+  WAKE.sig = sig; WAKE.error = "";
+  if (!want) return;
+  const id = AV.cfg.wake_word || "hey_jarvis";
+  const custom = id.startsWith("custom:");
+  try {
+    const mod = await import("/avatar/avatar.js");
+    WAKE.det = await mod.createWakeWord({
+      modelUrl: custom ? "/wakewords/" + encodeURIComponent(id.slice(7)) + ".onnx" : "/avatar/lib/oww/" + id + "_v0.1.onnx",
+      headers: custom ? { Authorization: "Bearer " + KEY } : {},
+      threshold: 1 - AV.cfg.wake_sensitivity,
+      isBusy: () => !!MIC.rec, isSpeaking: () => SPEAK.speaking,
+      onWake: () => { chime(); if (SPEAK.speaking) SPEAK.cancel(); if (!MIC.rec) micToggle(); },
+      onError: e => { WAKE.error = e.message; },
+    });
+  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
+}
+async function pollAvatarEvents() {
+  try {
+    const r = await api("/avatar/events?since=" + AV.since);
+    const first = !AV.polled; AV.polled = true; AV.since = r.seq;
+    // something changed in the shared bin or the settings (on any screen, or files dropped on the server): reload
+    if (r.avatar_rev && AV.rev && r.avatar_rev !== AV.rev && AV.avatar && !document.querySelector(".overlay")) { AV.rev = r.avatar_rev; loadAvatarConfig(); }
+    if (first) return;      // don't replay what happened before this screen opened
+    for (const ev of r.events) {
+      if (ev.source === CLIENT_ID) continue;
+      if (ev.state === "reply") {
+        AV.remote = null; avatarCaption(ev.text, "stella"); AV.avatar && AV.avatar.react(ev.text);
+        if (AV.cfg.speak && AV.cfg.speak_others && ev.text) { SPEAK.cancel(); SPEAK.say(ev.text); }
+      } else if (ev.state === "idle") { AV.remote = null; }
+      else { AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
+        if (ev.state === "listening") avatarCaption("…", "you"); }
+    }
+  } catch {}
+}
+const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
+const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["quiet", "After a long quiet"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"], ["off", "Off"]];
+function openAvatarSettings() {
+  const c = AV.cfg;
+  const anims = c.animations || [];
+  const d = dialog(`<h2>✦ Avatar</h2>
+    <label class="sub">Look</label>
+    <div style="display:flex;gap:8px;margin:4px 0 10px"><button id="stOrb" class="${c.style === "orb" ? "primary" : ""}">Space orb</button>
+      <button id="stVrm" class="${c.style === "vrm" ? "primary" : ""}">3D character</button></div>
+    ${(c.characters || []).length ? `<label class="sub">Character</label><div style="display:flex;gap:8px;margin:4px 0 6px"><select id="chr">${c.characters.map(ch =>
+      `<option value="${esc(ch.file)}" ${c.character === ch.file ? "selected" : ""}>${esc(ch.name)} (${Math.round(ch.size / 1e6)} MB)</option>`).join("")}</select></div>` : ""}
+    <div class="sub">${c.has_model ? "" : "No character yet."} Use a female <b>.vrm</b> character: make one free in
+      <a href="https://vroid.com/en/studio" target="_blank" rel="noopener">VRoid Studio</a>, or download one whose license allows it from
+      <a href="https://hub.vroid.com/en" target="_blank" rel="noopener">VRoid Hub</a>.
+      <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
+      <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
+      <p class="sub" style="margin-top:8px">📁 <b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
+      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
+    <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
+    <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
+    <label class="sub" style="display:block;margin-top:10px">Camera</label>
+    <select id="cam">${[["face", "Face close-up"], ["upper", "Head and shoulders"], ["full", "Whole body"]].map(([v, l]) => `<option value="${v}" ${c.camera === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <h3 class="hud" style="margin-top:16px">Animations</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
+    <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
+    <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
+      <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <button class="ghost" data-play="${a.id}" title="Play">▶</button><button class="ghost" data-adel="${a.id}" title="Delete">✕</button></div>`).join("")
+      || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
+      <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
+    <h3 class="hud" style="margin-top:16px">Voice</h3>
+    <div style="display:flex;gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select><button id="hear">▶ Hear</button></div>
+    <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
+    <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="oth" style="width:auto" ${c.speak_others ? "checked" : ""}> Also speak replies to the phone and other devices</label>
+    <h3 class="hud" style="margin-top:16px">Wake word</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="wk" style="width:auto" ${c.wake ? "checked" : ""}> Listen for a wake word on this screen</label>
+    <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
+    <label class="sub" style="display:block;margin-top:8px">Sensitivity: <span id="wsv">${Math.round(c.wake_sensitivity * 100)}%</span> (higher hears you more easily, but triggers by mistake more often)</label>
+    <input id="ws" type="range" min="0.2" max="0.9" step="0.05" value="${c.wake_sensitivity}">
+    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see 🎤)." : ""}</p>
+    <h3 class="hud" style="margin-top:16px">Performance</h3>
+    <select id="lt"><option value="auto" ${c.light === "auto" ? "selected" : ""}>Light mode: automatic${AV.slow || AV.autoLight ? " (on for this device)" : ""}</option>
+      <option value="on" ${c.light === "on" ? "selected" : ""}>Light mode: on (Raspberry Pi, old phones)</option><option value="off" ${c.light === "off" ? "selected" : ""}>Light mode: off (best quality)</option></select>
+    <p class="sub">Running at ${Math.round(AV.avatar ? AV.avatar.fps() : 0)} frames a second. Settings are saved on the server, so every avatar screen uses them.</p>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save</button></div>`);
+  let style = c.style;
+  const $d = q => d.querySelector(q);
+  const mark = () => { $d("#stOrb").className = style === "orb" ? "primary" : ""; $d("#stVrm").className = style === "vrm" ? "primary" : ""; };
+  $d("#stOrb").onclick = () => { style = "orb"; mark(); };
+  $d("#stVrm").onclick = () => { style = "vrm"; mark(); if (!c.has_model) $d("#vrmFile").click(); };
+  $d("#sp").oninput = e => { $d("#spv").textContent = (+e.target.value).toFixed(2) + "×"; };
+  $d("#ws").oninput = e => { $d("#wsv").textContent = Math.round(e.target.value * 100) + "%"; };
+  $d("#ht").oninput = e => { $d("#hv").textContent = cmToFtIn(+e.target.value); $d("#hcm").textContent = `(${(+e.target.value).toFixed(0)} cm)`;
+    if (AV.avatar) AV.avatar.setHeight(+e.target.value); };
+  $d("#upl").onclick = () => $d("#vrmFile").click();
+  $d("#vrmFile").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    $d("#uplState").textContent = `Uploading ${Math.round(f.size / 1e6)} MB…`;
+    try { AV.cfg = await api("/avatar/model?name=" + encodeURIComponent(f.name), { method: "PUT", body: f, headers: { "Content-Type": "model/gltf-binary" } });
+      d.remove(); if (AV.avatar) await AV.avatar.setStyle("orb"); loadAvatarConfig(); }
+    catch (err) { $d("#uplState").textContent = "Couldn't upload: " + err.message; }
+  };
+  if ($d("#rm")) $d("#rm").onclick = async () => { const ch = $d("#chr") ? $d("#chr").value : true;
+    AV.cfg = await api("/avatar/config", { method: "POST", json: { remove_model: ch } }); d.remove(); loadAvatarConfig(); };
+  d.querySelectorAll("[data-try]").forEach(b => b.onclick = () => { if (!AV.avatar || AV.avatar.style !== "vrm") return alertBox("Gestures are for the 3D character."); AV.avatar.play(b.dataset.try); });
+  d.querySelectorAll("[data-play]").forEach(b => b.onclick = () => { if (AV.avatar && !AV.avatar.play(b.dataset.play)) alertBox("That animation couldn't be loaded on this character (or the 3D character isn't showing)."); });
+  d.querySelectorAll("[data-when]").forEach(sel => sel.onchange = async () => {
+    try { await api("/avatar/anims/" + sel.dataset.when, { method: "POST", json: { when: sel.value } }); } catch (e) { alertBox(e.message); } });
+  d.querySelectorAll("[data-adel]").forEach(b => b.onclick = async () => {
+    try { await api("/avatar/anims/" + b.dataset.adel, { method: "POST", json: { delete: true } }); b.closest(".row").remove(); } catch (e) { alertBox(e.message); } });
+  $d("#anUp").onclick = () => $d("#anFile").click();
+  $d("#anFile").onchange = async e => {
+    for (const f of e.target.files) {
+      const ext = (f.name.split(".").pop() || "").toLowerCase(), name = f.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+      $d("#anState").textContent = `Uploading ${f.name}…`;
+      try { await api(`/avatar/anims?type=${ext}&when=${$d("#anWhen").value}&name=${encodeURIComponent(name)}`, { method: "PUT", body: f, headers: { "Content-Type": "application/octet-stream" } }); }
+      catch (err) { $d("#anState").textContent = `${f.name}: ${err.message}`; return; }
+    }
+    d.remove(); await loadAvatarConfig(); openAvatarSettings();
+  };
+  $d("#hear").onclick = () => {
+    const was = SPEAK.enabled; SPEAK.enabled = true; SPEAK.cancel();
+    const prevVoice = AV.cfg.voice, prevSpeed = AV.cfg.speed;
+    AV.cfg.voice = $d("#vc").value; AV.cfg.speed = +$d("#sp").value;
+    SPEAK.say(`Hi, I'm ${NAME()}. This is how I sound.`);
+    AV.cfg.voice = prevVoice; AV.cfg.speed = prevSpeed; SPEAK.enabled = was;
+  };
+  $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
+  $d("#save").onclick = async () => {
+    try {
+      AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
+        speed: +$d("#sp").value, speak: $d("#spk").checked, speak_others: $d("#oth").checked, height_cm: +$d("#ht").value,
+        gestures: $d("#ges").checked, wake: $d("#wk").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+      d.remove(); loadAvatarConfig();
+    } catch (e) { alertBox(e.message); }
+  };
+}
+async function startAvatarScreen() {
+  document.body.classList.add("avatar");
+  $("#input").placeholder = "Message " + NAME() + "…  (or press Space to talk)";
+  if (new URLSearchParams(location.search).get("app") === "1") document.body.classList.add("inapp");
+  await pollAvatarEvents();      // remember where the event list is now, so nothing that happens while loading is missed
+  const mod = await import("/avatar/avatar.js");
+  AV.slow = mod.looksLikeSlowDevice();
+  try { AV.cfg = await api("/avatar/config"); } catch {}
+  AV.avatar = mod.createAvatar($("#avatarHost"), { camera: AV.cfg.camera, height: AV.cfg.height_cm, light: lightOn(), gestures: AV.cfg.gestures,
+    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m) });
+  await AV.avatar.setStyle("orb");
+  await loadAvatarConfig();
+  // Automatic light mode: switch on if this device draws too slowly
+  setTimeout(() => { if (AV.avatar && AV.cfg.light === "auto" && !AV.slow && AV.avatar.fps() < 32) { AV.autoLight = true; AV.avatar.setLight(true); } }, 8000);
+  // Browsers only allow sound after a tap: ask once if needed
+  const ctx = SPEAK.audio();
+  if (ctx.state === "suspended") {
+    $("#tapStart").style.display = "flex";
+    const go = async () => { try { await ctx.resume(); } catch {} $("#tapStart").style.display = "none"; };
+    $("#tapStart").onclick = go; document.addEventListener("keydown", go, { once: true });
+  }
+  setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
+  (function loop() {
+    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); updateAvatarState(); }
+    requestAnimationFrame(loop);
+  })();
+  $("#avChat").onclick = () => document.body.classList.toggle("showchat");
+  $("#avNew").onclick = () => { newChat(); avatarCaption(""); };
+  $("#avSet").onclick = openAvatarSettings;
+  $("#avFull").onclick = () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}); };
+  // Space bar: push to talk (when not typing)
+  document.addEventListener("keydown", e => { if (e.code === "Space" && document.activeElement !== $("#input") && !e.repeat && !document.querySelector(".overlay")) { e.preventDefault(); micToggle(); } });
+}
+
+$("#mic").onclick = micToggle;
+
 async function start() {
   if (!KEY) { askKey(); return; }
   S.current = store.get("current", "") || null;
@@ -923,6 +1321,7 @@ async function start() {
   if (S.current && !S.convs.has(S.current)) S.current = null;
   await loadMeta();
   renderSide(); renderMsgs(); updateMeter();
+  if (AVATAR_MODE && !AV.avatar) { $("#avName").textContent = NAME().toUpperCase(); startAvatarScreen().catch(e => avatarStatus("Avatar: " + e.message)); }
 }
 setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);

@@ -112,6 +112,7 @@ fun ChatScreen(
     onOpenModes: () -> Unit,
     onOpenTasks: () -> Unit,
     onOpenServer: () -> Unit = {},
+    onOpenAvatar: () -> Unit = {},
 ) {
     val app = App.instance
     val engine = app.engine
@@ -357,7 +358,10 @@ fun ChatScreen(
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                     TextButton(onClick = { onOpenProject(ProjectManager.LIBRARY); closeDrawer() }) { Text("📚 Library") }
                     TextButton(onClick = { onOpenTasks(); closeDrawer() }) { Text("⏰ Reminders") }
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                     TextButton(onClick = { onOpenServer(); closeDrawer() }) { Text("🖥 Server") }
+                    TextButton(onClick = { onOpenAvatar(); closeDrawer() }) { Text("✦ Avatar screen") }
                 }
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     val sync = app.sync

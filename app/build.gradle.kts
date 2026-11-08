@@ -12,8 +12,8 @@ android {
         applicationId = "com.stellai.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.10.0"
+        versionCode = 13
+        versionName = "0.11.0"
 
         // ONNX Runtime (wake word) ships native code; phones only need ARM.
         ndk {
@@ -54,4 +54,6 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // QR scanner from Google Play services: no camera permission needed, the scanner UI is Google's
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }

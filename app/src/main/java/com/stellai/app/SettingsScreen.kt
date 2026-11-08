@@ -67,7 +67,7 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
+fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> Unit = {}) {
     val app = App.instance
     val s = app.settings
     val context = LocalContext.current
@@ -146,7 +146,8 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit) {
         ) {
             // ---- Connection --------------------------------------------------------------
             SectionTitle("Server connection")
-            Hint("On your server computer, open \"StellAI Server\". Its terminal shows the server address and API key. Use the Tailscale address to reach it from anywhere.")
+            Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) { Text("📷  Scan to connect") }
+            Hint("Scan the QR code shown by StellAI Server on your computer (Windows: the server window; Linux: the StellAI Server terminal). Or type the server address and API key it shows. Use the Tailscale address to reach it from anywhere.")
             OutlinedTextField(
                 value = url,
                 onValueChange = { url = it },

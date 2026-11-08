@@ -176,17 +176,40 @@ def test_cuda_recovery():
         ws.llama_release = lambda *a, **k: {"tag_name": TAG, "assets": ASSETS}
         ws._nvidia = lambda: None
         def fake_download(url, dest, *a, **k):
-            got.setdefault("dl", []).append(os.path.basename(dest)); return dest
-        def fake_extract(z, folder):
-            os.makedirs(folder, exist_ok=True); open(os.path.join(folder, "llama-server.exe"), "w").close()
-        ws.download, ws.extract_flat = fake_download, fake_extract
+            got.setdefault("dl", []).append(os.path.basename(dest))
+            n = len(got["dl"])
+            if n == 1:                          # first download arrives damaged: must be fetched again
+                with open(dest, "wb") as f:
+                    f.write(b"PK\x03\x04 broken")
+                return dest
+            with zipfile.ZipFile(dest, "w") as z:
+                z.writestr("llama-server.exe", "exe")
+            return dest
+        ws.download = fake_download
         msg = ws.recover_from_cuda_failure(c)
         assert c.get("bad_cuda") == ["13.4"] and ws.current_cuda_build(c) == "12.4", (c.get("bad_cuda"), c.get("llama_build"))
         assert "CUDA 12.4" in msg and c.get("plan")["backend"] == "cuda"
+        assert os.path.isfile(c.p("bin", "llama", "llama-server.exe")) and not os.path.exists(c.p("bin", "llama.new"))
+        assert got["dl"][0] == got["dl"][1], got   # the damaged zip was downloaded again
         msg = ws.recover_from_cuda_failure(c)   # 12.4 fails too: Vulkan
         assert "Vulkan" in msg and c.get("plan")["backend"] == "vulkan" and c.get("hardware")["backend"] == "vulkan"
     finally:
         ws.llama_release, ws.download, ws.extract_flat, ws._nvidia = orig_rel, orig_dl, orig_ex, orig_nv
+
+
+def test_packages():
+    hw = {"backend": "cuda", "cuda": "13", "cuda_driver": "13.0", "gpu": "NVIDIA GeForce RTX 2060", "vcredist": False}
+    items, tips = ws.packages(hw)
+    d = dict(items)
+    assert "CUDA 13.0" in d["AI engine"] and "CUDA 12.4" in d["Voice"] and "permission" in d["Visual C++ runtime"]
+    assert not tips
+    items, tips = ws.packages({**hw, "cuda": "12", "cuda_driver": "12.6", "vcredist": True})
+    assert dict(items)["Visual C++ runtime"] == "already installed" and any("12.6" in t for t in tips)
+    items, tips = ws.packages({"backend": "cpu", "notes": ["needs a newer graphics driver"]})
+    assert "CPU build" in dict(items)["AI engine"] and tips == ["needs a newer graphics driver"]
+    assert ws.vcredist_present() and ws.vulkan_present()      # not Windows: nothing to install
+    c = ws.Config(tempfile.mkdtemp())
+    assert ws.ensure_vcredist(c, lambda t: None)
 
 
 def test_misc():

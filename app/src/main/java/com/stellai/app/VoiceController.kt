@@ -84,6 +84,7 @@ class VoiceController(private val app: App) {
     private fun updatePhase(p: VoicePhase) {
         if (p == postedPhase) return
         postedPhase = p
+        if (p == VoicePhase.LISTENING) app.avatarEvent("listening")
         main.post { phase = p }
     }
 

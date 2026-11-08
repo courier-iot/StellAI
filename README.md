@@ -45,7 +45,7 @@ Both servers keep themselves up to date from this GitHub repo, checking every 30
 
 ## Set up
 
-1. On the laptop or desktop (whichever is your server), start **StellAI Server**. It shows the **server address** and **API key** (on Windows, also a QR code: scan it with the phone's camera and tap **Connect**).
+1. On the laptop or desktop (whichever is your server), start **StellAI Server**. It shows the **server address** and **API key** and a QR code. In the app, tap **Settings → Scan to connect**, scan the code and tap **Connect** (the phone's camera app works too).
 2. In the app's **Settings**, enter both and tap **Test connection**. Both lines should show ✓.
 3. **Use the Tailscale address** (`http://100.x.x.x:8080`) so the app works both at home and away. Install Tailscale on the phone and sign in with the same account as the server.
 
@@ -66,6 +66,13 @@ A notification, "Listening for Hey Jarvis", stays while the wake word is on. And
 
 Wake word heard on the phone (beep) → you speak → it stops after a short pause (second beep) → the audio goes to Whisper on the server → the text goes to the AI → the AI runs phone actions and answers out loud.
 
+## What setup installs (detected automatically)
+
+Both installers look at the computer first and install only what fits it:
+
+- **Linux**: works on Mint/Ubuntu/Debian (apt), Fedora (dnf), Arch (pacman) and openSUSE (zypper), with package names translated for each. NVIDIA cards get a CUDA build. Setup reads the driver's CUDA version and the card's compute capability, reuses an installed toolkit if it fits, otherwise installs the matching `cuda-toolkit-X-Y` from NVIDIA (Ubuntu/Mint/Debian) or the distribution's own, and compiles exactly for that card. AMD cards with their own memory get a Vulkan build (Mesa). Everything else gets a CPU build tuned to the processor. Node.js older than 18.19 is replaced by a private Node.js 22 LTS for diagrams, and zram uses zramswap or zram-generator as the distribution prefers.
+- **Windows**: picks the llama.cpp build your NVIDIA driver can run (newest CUDA version up to what the driver supports), Vulkan for AMD/Intel cards, or the CPU build; the matching whisper.cpp build; and installs the Microsoft Visual C++ runtime if it's missing. The setup page lists all of this under **Will install**, with a tip when a driver update would make it faster.
+
 ## Desktop chat
 
 Chat with Stella from any computer's browser at **http://SERVER:8092** (on the server itself: *StellAI Web Chat* in the Linux menu, or *Open chat in browser* in the Windows app). It's the same chats as your phones, synced live, with modes, projects (including adding files by drag and drop), the library, reminders and lists, photos (paste or 📷), diagrams and the context meter. Enter the API key once per browser. Phone actions (alarms, apps, texts) only work on the phone.
@@ -78,6 +85,27 @@ Drawer → **🖥 Server** on the phone, or **🖥 Server** at the bottom of the
 - **Switch model**: the models that fit this machine are listed with their size. Tap **Download** to fetch one (progress shows; it keeps going if you close the app), then **Switch**. Stella is away for about a minute while the new model loads; chats and settings stay the same. On Linux this rewrites `~/llm/model.conf` and restarts only the model server.
 - **Health check** (*Check everything*): AI model, voice, meaning search, web search, chat database, disk space, backups, PDF reading, diagrams, GitHub, Tailscale and updates, each with a fix when something is wrong. On the server itself: `~/llm/stellai-doctor.sh` (Linux, also in the app menu as *StellAI Health Check*) or *Check everything* in the Windows app.
 - **Backups**: every night (between 2 and 5 am when Stella is idle) the server zips your chats, memories, projects, photos, diagrams and wake words into `~/llm/backups` (Windows: `%LOCALAPPDATA%\StellAI\backups`) and keeps the last 14. The GitHub token is left out. *Back up now* makes one immediately, and you can set a second folder (a USB drive, a NAS mount) that every backup is copied to. To restore: `~/llm/stellai-restore.sh` on Linux, or *Restore a backup…* in the Windows app; the old database is kept beside the restored one.
+
+## Avatar screen
+
+Stella gets a face and a voice: a full-screen page with an animated **space orb** or your own **3D character**, which listens, thinks, talks with a natural voice and moves her mouth while speaking. Replies to the phone and the desktop chat are spoken there too (can be turned off).
+
+- **On the server PC**: menu → **StellAI Avatar** (Linux) or **Avatar screen** in the Windows app.
+- **Spare phone or tablet**: install the StellAI app, connect it, then drawer → **✦ Avatar screen**. The screen stays on; talk with the big mic button or the app's wake word.
+- **Raspberry Pi / CM5 (dedicated screen)**: see [docs/cm5-display.md](docs/cm5-display.md). One script sets it up to start full screen at login.
+- **Any browser**: `http://SERVER:8092/avatar` (enter the API key once). The microphone needs a secure page: the server PC itself, Tailscale HTTPS (`sudo tailscale serve --bg 8092`), or the Chrome flag *unsafely-treat-insecure-origin-as-secure*.
+
+**Talking**: say the **wake word** (Hey Jarvis, Alexa, Hey Mycroft, or your own custom one from the server's wakewords folder), press **Space**, or tap 🎤. Wake word detection runs on the screen device itself (the same openWakeWord models as the phone); no audio leaves it until the wake word is heard. While she's talking, a clearer "wake word" is needed (so she doesn't wake herself), and saying it interrupts her.
+
+**The 3D character** is a female `.vrm` character: make one free in [VRoid Studio](https://vroid.com/en/studio) or download one whose license allows personal use from [VRoid Hub](https://hub.vroid.com/en), then ⚙ → **Upload character**. She's scaled to the height you choose (default **5′8″**, adjustable 4′7″–6′7″). She blinks, breathes, sways, glances around, looks up while thinking, leans in while listening, lip-syncs to her voice, and smiles or looks sorry depending on what she says.
+
+**Animations**: built-in gestures (a wave when the screen opens, looking around, head tilt, weight shift, shoulder roll, a stretch after 10 quiet minutes, a happy bounce (eyes closed in a big smile, hands behind her back, bouncing on the beat with her head rocking side to side)) play every 20–60 seconds while idle, blending smoothly in and out and stopping the moment you talk. Add your own: ⚙ → **Add animation** with **.vrma** files (VRoid Hub, BOOTH) or **Mixamo .fbx** files (download "Without Skin"), and choose when each plays: while idle, when the screen opens, after a long quiet, when she's happy, or for love and goodnight messages. She **blows you a kiss** (hand to her lips, then sweeping it out to you with a wink) after replies like "love you" or "goodnight", or from ⚙ → Try. Ask her to **dance** and she does a hip-sway dance: hands behind her head, hips swaying side to side with a little bounce and her hair swinging (it also turns up now and then while she's idle). Uploaded animations are preferred over the built-in ones.
+
+**Shared folder ("bin")**: every character and animation lives in one folder on the server: `~/StellAI Avatar Files` on Linux (a shortcut to `~/llm/avatar/bin`), or **Avatar files** in the Windows app. Put `.vrm` characters in `characters` and `.vrma`/`.fbx` animations in `animations` (name a file `wave@greeting.fbx`, `stretch@quiet.fbx` or `hop@happy.fbx` to choose when it plays; otherwise it plays while idle). Every avatar screen checks the folder about once a second: new and changed files load without restarting, deleted ones disappear, and each screen's stored copy is replaced rather than piling up. Uploading through ⚙ on any screen puts the file in the same folder. With several characters, pick the active one in ⚙. Settings changed on one screen apply to all of them right away.
+
+**Light mode** (automatic on a Raspberry Pi or when a device draws slowly; or on/off in ⚙): fewer pixels and 30 frames a second, so a CM5/Pi 5 stays smooth and phones use less battery. The avatar is drawn on the screen device; the server only sends the files and the voice.
+
+**The voice** is [Piper](https://github.com/rhasspy/piper), a fast neural voice that runs on the server's CPU, private and offline. Six female voices (⚙ → Voice, with a ▶ preview) and adjustable speed. The first time the avatar screen opens, the server downloads the voice engine, a voice, the 3D and wake word files (~110 MB together); the health check shows the progress. Backups include your character, animations and avatar settings.
 
 ## Search past chats
 

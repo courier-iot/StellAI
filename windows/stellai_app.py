@@ -197,6 +197,15 @@ class App:
             f"Graphics:   {gpu}\n"
             f"Will run on: {how}"))
 
+        # What setup will install, matched to this PC (GPU, driver, runtimes)
+        pk = self.panel(self.page, "Will install")
+        items, tips = ws.packages(hw)
+        for name, detail in items:
+            self.label(pk, f"{name}:  {detail}", size=9, wraplength=680).pack(anchor="w")
+        for t in tips:
+            self.label(pk, "Tip: " + t if not t.startswith("Tip") else t, fg=AMBER, size=9, wraplength=680).pack(anchor="w", pady=(4, 0))
+        pk.master.pack_configure(before=self.model_panel.master)
+
         # Slow PC: suggest using a stronger StellAI server instead (same chats, faster answers)
         cp = self.panel(self.page, "Or use another StellAI server")
         if ws.is_weak(hw):
@@ -376,6 +385,8 @@ class App:
         self.start_btn.pack(side="left")
         ttk.Button(btns, text="Open chat in browser",
                    command=lambda: webbrowser.open(ws.web_chat_url(self.cfg))).pack(side="left", padx=8)
+        ttk.Button(btns, text="Avatar screen", command=lambda: ws.open_avatar(self.cfg)).pack(side="left")
+        ttk.Button(btns, text="Avatar files", command=self.open_avatar_bin).pack(side="left", padx=(8, 0))
         backend = {"cuda": "NVIDIA CUDA", "vulkan": "Vulkan GPU", "cpu": "CPU"}.get(pl["backend"], pl["backend"])
         self.label(btns, f"running on {backend}", fg=MUTED, size=9).pack(side="left", padx=6)
 
@@ -541,6 +552,13 @@ class App:
             elif s != "crashed":
                 setattr(self, f"_reported_{name}", False)
         self._tick_id = self.root.after(2000, self._tick)
+
+    def open_avatar_bin(self):
+        """The shared folder for avatar characters (.vrm) and animations (.vrma/.fbx)."""
+        folder = self.cfg.p("avatar", "bin")
+        for kind in ("characters", "animations"):
+            os.makedirs(os.path.join(folder, kind), exist_ok=True)
+        os.startfile(folder) if hasattr(os, "startfile") else webbrowser.open("file://" + folder)
 
     def _recover_cuda(self):
         """The CUDA build doesn't work with this NVIDIA driver: install an older build (or Vulkan) and retry."""
