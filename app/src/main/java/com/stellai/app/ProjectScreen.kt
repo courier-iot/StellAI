@@ -122,7 +122,7 @@ fun ProjectScreen(
             TopAppBar(
                 title = {
                     Text(
-                        if (isNew) "New project" else if (isLibrary) "📚 Library" else (project?.name ?: "Project"),
+                        if (isNew) "New project" else if (isLibrary) "Library" else (project?.name ?: "Project"),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -301,15 +301,8 @@ fun ProjectScreen(
             }
             items(project.files, key = { "f-" + it.id }) { f ->
                 Card(Modifier.clickable { viewing = f }) {
-                    Text(
-                        when (f.kind) {
-                            "pdf" -> "📄"
-                            "image" -> "🖼"
-                            "code" -> "⌨"
-                            else -> "📝"
-                        },
-                        modifier = Modifier.padding(end = 10.dp),
-                    )
+                    Icon(LineIcons.forFile(f.kind), contentDescription = null, tint = Space.Accent,
+                        modifier = Modifier.padding(end = 10.dp).size(22.dp))
                     Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
                         Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
@@ -443,8 +436,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.libraryFiles(
     if (project.files.isEmpty()) item { Hint("No documents yet.") }
     items(project.files, key = { "lf-" + it.id }) { f ->
         Card(Modifier.clickable { onView(f) }) {
-            Text(if (f.kind == "pdf") "📄" else if (f.kind == "image") "🖼" else if (f.kind == "code") "⌨" else "📝",
-                modifier = Modifier.padding(end = 10.dp))
+            Icon(LineIcons.forFile(f.kind), contentDescription = null, tint = Space.Accent,
+                modifier = Modifier.padding(end = 10.dp).size(22.dp))
             Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
                 Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${fileSize(f.size)} · ~${f.tokens} tokens" + if (f.note.isNotBlank()) " · ${f.note}" else "",

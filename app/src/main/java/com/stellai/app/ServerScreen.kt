@@ -1,5 +1,8 @@
 package com.stellai.app
 
+import androidx.compose.material.icons.outlined.Cancel
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -220,7 +223,7 @@ fun ServerScreen(onDone: () -> Unit) {
                     val last = b?.optLong("last") ?: 0
                     Text(if (last > 0) "Last backup: ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(last))}"
                         else "No backup yet")
-                    b?.optString("error")?.takeIf { it.isNotBlank() }?.let { Text("⚠ $it", color = Space.Red) }
+                    b?.optString("error")?.takeIf { it.isNotBlank() }?.let { IconText(Icons.Outlined.WarningAmber, it, color = Space.Red) }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Button(enabled = !busyBackup, onClick = {
                             busyBackup = true
@@ -337,12 +340,12 @@ private fun ModelRow(m: JSONObject, onSwitch: () -> Unit, onDownload: () -> Unit
 private fun CheckRow(c: JSONObject) {
     val state = c.optString("state")
     val (icon, color) = when (state) {
-        "ok" -> "✓" to Space.Accent
-        "warn" -> "!" to Space.Gold
-        else -> "✗" to Space.Red
+        "ok" -> Icons.Outlined.CheckCircle to Space.Accent
+        "warn" -> Icons.Outlined.WarningAmber to Space.Gold
+        else -> Icons.Outlined.Cancel to Space.Red
     }
     Row(Modifier.fillMaxWidth()) {
-        Text(icon, color = color, modifier = Modifier.size(width = 22.dp, height = 22.dp))
+        Icon(icon, contentDescription = state, tint = color, modifier = Modifier.padding(end = 8.dp, top = 1.dp).size(18.dp))
         Column(Modifier.weight(1f)) {
             Text("${c.optString("name")}: ${c.optString("detail")}", color = if (state == "ok") Space.Text else color)
             val fix = c.optString("fix")

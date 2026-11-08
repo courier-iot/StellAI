@@ -333,7 +333,7 @@ class ReminderReceiver : BroadcastReceiver() {
         )
         val n = NotificationCompat.Builder(context, ReminderManager.CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_listen)
-            .setContentTitle("⏰ Reminder")
+            .setContentTitle("Reminder")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setPriority(NotificationCompat.PRIORITY_HIGH)

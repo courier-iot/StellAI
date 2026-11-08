@@ -1,5 +1,6 @@
 package com.stellai.app
 
+import androidx.compose.material.icons.outlined.Mic
 import android.Manifest
 import android.annotation.SuppressLint
 import android.view.WindowManager
@@ -113,7 +114,7 @@ fun AvatarScreen(onDone: () -> Unit) {
                 ),
             ) {
                 if (capturing) Icon(Icons.Filled.Close, contentDescription = "Stop", tint = Color(0xFF04060D), modifier = Modifier.size(30.dp))
-                else Text("🎙", style = MaterialTheme.typography.headlineSmall)
+                else Icon(Icons.Outlined.Mic, contentDescription = "Talk", tint = Color(0xFF04060D), modifier = Modifier.size(30.dp))
             }
             voice.lastError?.let { Text(it, color = Space.Red, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
         }

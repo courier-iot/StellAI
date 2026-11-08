@@ -52,6 +52,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.LocalLibrary
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -208,8 +218,8 @@ fun ChatScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = Space.Panel) {
-                Text(
-                    "✦ MISSION LOG",
+                IconText(
+                    LineIcons.Sparkle, "MISSION LOG",
                     style = HudLabel.copy(fontSize = 14.sp, letterSpacing = 3.sp),
                     color = Space.Accent,
                     modifier = Modifier.padding(20.dp, 22.dp, 20.dp, 12.dp),
@@ -313,7 +323,7 @@ fun ChatScreen(
                         val color = accentFor(p.color).main
                         NavigationDrawerItem(
                             label = { Text(p.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            icon = { Text("◆", color = color) },
+                            icon = { Icon(Icons.Outlined.Folder, contentDescription = null, tint = color, modifier = Modifier.size(18.dp)) },
                             selected = false,
                             onClick = { onOpenProject(p.id); closeDrawer() },
                             badge = {
@@ -333,12 +343,17 @@ fun ChatScreen(
                         NavigationDrawerItem(
                             label = {
                                 Column {
-                                    val icon = if (c.mode.isNotEmpty()) app.modes.get(c.mode).icon + "  " else ""
-                                    Text(icon + c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (c.mode.isNotEmpty()) {
+                                            Icon(LineIcons.forMode(app.modes.get(c.mode).icon), contentDescription = null,
+                                                tint = Space.Muted, modifier = Modifier.size(14.dp))
+                                            Spacer(Modifier.size(6.dp))
+                                        }
+                                        Text(c.title.ifBlank { "Untitled" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
                                     if (cp != null) {
-                                        Text("◆ ${cp.name}", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
-                                            color = accentFor(cp.color).main.copy(alpha = 0.85f), maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis)
+                                        IconText(Icons.Outlined.Folder, cp.name, style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
+                                            color = accentFor(cp.color).main.copy(alpha = 0.85f), size = 11.dp, maxLines = 1)
                                     }
                                 }
                             },
@@ -356,12 +371,12 @@ fun ChatScreen(
                 }
                 HorizontalDivider(color = Space.Line)
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-                    TextButton(onClick = { onOpenProject(ProjectManager.LIBRARY); closeDrawer() }) { Text("📚 Library") }
-                    TextButton(onClick = { onOpenTasks(); closeDrawer() }) { Text("⏰ Reminders") }
+                    TextButton(onClick = { onOpenProject(ProjectManager.LIBRARY); closeDrawer() }) { IconText(Icons.Outlined.LocalLibrary, "Library", color = Space.Accent) }
+                    TextButton(onClick = { onOpenTasks(); closeDrawer() }) { IconText(LineIcons.Reminder, "Reminders", color = Space.Accent) }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-                    TextButton(onClick = { onOpenServer(); closeDrawer() }) { Text("🖥 Server") }
-                    TextButton(onClick = { onOpenAvatar(); closeDrawer() }) { Text("✦ Avatar screen") }
+                    TextButton(onClick = { onOpenServer(); closeDrawer() }) { IconText(Icons.Outlined.Dns, "Server", color = Space.Accent) }
+                    TextButton(onClick = { onOpenAvatar(); closeDrawer() }) { IconText(LineIcons.Sparkle, "Avatar screen", color = Space.Accent) }
                 }
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     val sync = app.sync
@@ -469,8 +484,8 @@ fun ChatScreen(
                     ) {
                         HorizontalDivider(color = Space.Accent.copy(alpha = 0.18f))
                         app.memory.lastLearned?.let { note ->
-                            Text(
-                                "✦ $note",
+                            IconText(
+                                LineIcons.Sparkle, note, size = 13.dp,
                                 style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 0.5.sp),
                                 color = Space.Accent,
                                 modifier = Modifier
@@ -480,8 +495,8 @@ fun ChatScreen(
                             )
                         }
                         engine.contextNotice?.let { n ->
-                            Text(
-                                "✦ $n  (tap to dismiss)",
+                            IconText(
+                                LineIcons.Sparkle, "$n  (tap to dismiss)", size = 14.dp,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Space.Gold,
                                 modifier = Modifier
@@ -491,8 +506,8 @@ fun ChatScreen(
                             )
                         }
                         notice?.let { n ->
-                            Text(
-                                "⚠ $n  (tap to dismiss)",
+                            IconText(
+                                Icons.Outlined.WarningAmber, "$n  (tap to dismiss)", size = 14.dp,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Space.Red,
                                 modifier = Modifier
@@ -506,8 +521,8 @@ fun ChatScreen(
                                 Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(
-                                    "✎ Editing a message — sending replaces it and the replies after it",
+                                IconText(
+                                    Icons.Outlined.Edit, "Editing a message — sending replaces it and the replies after it", size = 14.dp,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Space.Gold,
                                     modifier = Modifier.weight(1f),
@@ -534,15 +549,15 @@ fun ChatScreen(
                                                 .background(Space.Void.copy(alpha = 0.8f), CircleShape)
                                                 .clickable { engine.removePhoto(id) },
                                             contentAlignment = Alignment.Center,
-                                        ) { Text("✕", fontSize = 11.sp, color = Space.Text) }
+                                        ) { Icon(Icons.Filled.Close, contentDescription = "Remove photo", tint = Space.Text, modifier = Modifier.size(13.dp)) }
                                     }
                                 }
                                 if (preparingPhoto) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = Space.Accent)
                             }
                         }
                         voice.lastError?.let { err ->
-                            Text(
-                                "⚠ $err  (tap to dismiss)",
+                            IconText(
+                                Icons.Outlined.WarningAmber, "$err  (tap to dismiss)", size = 14.dp,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Space.Red,
                                 modifier = Modifier
@@ -557,7 +572,7 @@ fun ChatScreen(
                         ) {
                             Box {
                                 IconButton(onClick = { attachMenu = true }) {
-                                    Text("📷", style = MaterialTheme.typography.titleMedium)
+                                    Icon(Icons.Outlined.PhotoCamera, contentDescription = "Add a photo", tint = Space.Accent)
                                 }
                                 DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
                                     DropdownMenuItem(text = { Text("Take photo") }, onClick = {
@@ -613,7 +628,7 @@ fun ChatScreen(
                                         if (voice.hasMicPermission()) voice.listenNow()
                                         else micPermission.launch(Manifest.permission.RECORD_AUDIO)
                                     }, colors = glow) {
-                                        Text("🎙", style = MaterialTheme.typography.titleMedium)
+                                        Icon(Icons.Outlined.Mic, contentDescription = "Talk")
                                     }
                                     else -> FilledIconButton(onClick = { submit() }, colors = glow) {
                                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
@@ -696,12 +711,13 @@ fun ChatScreen(
                                 .padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(m.icon, fontSize = 20.sp, modifier = Modifier.widthIn(min = 34.dp))
+                            Icon(LineIcons.forMode(m.icon), contentDescription = null, tint = Space.Accent,
+                                modifier = Modifier.padding(end = 12.dp).size(22.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(m.name, color = if (m.id == mode.id) Space.Accent else Space.Text)
                                 Text(m.description, style = MaterialTheme.typography.bodySmall, color = Space.Muted, maxLines = 2)
                             }
-                            if (m.id == mode.id) Text("✓", color = Space.Accent)
+                            if (m.id == mode.id) Icon(Icons.Outlined.Check, contentDescription = "Current", tint = Space.Accent)
                         }
                     }
                 }
@@ -793,14 +809,14 @@ private fun EmptyState(modifier: Modifier, app: App, name: String, project: Proj
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             if (mode.id != GENERAL_MODE.id) {
-                Text("${mode.icon} ${mode.name.uppercase()} MODE", style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
-                    color = Space.Glow)
+                IconText(LineIcons.forMode(mode.icon), "${mode.name.uppercase()} MODE",
+                    style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp), color = Space.Glow)
                 Spacer(Modifier.size(6.dp))
                 Text(mode.description, textAlign = TextAlign.Center, color = Space.Muted, style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.size(24.dp))
             }
             if (project != null) {
-                Text("◆ ${project.name.uppercase()}", style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
+                IconText(Icons.Outlined.Folder, project.name.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 3.sp),
                     color = accentFor(project.color).main)
                 Spacer(Modifier.size(6.dp))
                 Text(
@@ -813,7 +829,7 @@ private fun EmptyState(modifier: Modifier, app: App, name: String, project: Proj
                 )
                 Spacer(Modifier.size(28.dp))
             }
-            Text("✦", fontSize = 44.sp, color = Space.Accent)
+            Icon(LineIcons.Sparkle, contentDescription = null, tint = Space.Accent, modifier = Modifier.size(52.dp))
             Spacer(Modifier.size(8.dp))
             Text(
                 "${name.uppercase()} ONLINE",
@@ -821,7 +837,7 @@ private fun EmptyState(modifier: Modifier, app: App, name: String, project: Proj
                 color = Space.Text,
             )
             Spacer(Modifier.size(16.dp))
-            val wake = if (app.assistantRunning) "Say “${app.settings.wakeWordLabel}, set an alarm for 6:45”\nor tap 🎙\n\n" else "Tap 🎙 and speak, or type:\n"
+            val wake = if (app.assistantRunning) "Say “${app.settings.wakeWordLabel}, set an alarm for 6:45”\nor tap the microphone\n\n" else "Tap the microphone and speak, or type:\n"
             Text(
                 wake + "“Start a 10 minute timer”\n“Open Spotify”\n“Turn on the flashlight”",
                 textAlign = TextAlign.Center,
@@ -874,11 +890,11 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
             val diagram = lines.firstNotNullOfOrNull { DIAGRAM_LINE.find(it.trim()) }
             Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
                 Box {
-                    Text(
-                        "› ${lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }.joinToString(" ").trim()}",
-                        style = HudLabel.copy(letterSpacing = 0.5.sp),
-                        color = Space.Gold,
+                    StatusLine(
+                        lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }.joinToString(" ").trim(),
                         modifier = longPress,
+                        color = Space.Gold, style = HudLabel.copy(letterSpacing = 0.5.sp),
+                        okColor = Space.Gold, badColor = Space.Red,
                     )
                     Actions()
                 }
@@ -889,8 +905,8 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
             }
         }
         Role.SUMMARY -> SummaryCard(msg, name, onLongPress = { menu = true }) { Actions() }
-        Role.ERROR -> Text(
-            "⚠ ${msg.text}",
+        Role.ERROR -> IconText(
+            Icons.Outlined.WarningAmber, msg.text,
             color = MaterialTheme.colorScheme.onErrorContainer,
             modifier = Modifier
                 .fillMaxWidth()
@@ -935,8 +951,8 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                             .then(longPress)
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
-                        Text(
-                            "✦ ${name.uppercase()}",
+                        IconText(
+                            LineIcons.Sparkle, name.uppercase(), size = 12.dp,
                             style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 2.sp),
                             color = Space.Accent.copy(alpha = 0.8f),
                         )
@@ -958,15 +974,10 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
 @Composable
 private fun ReasoningBlock(reasoning: String) {
     var expanded by remember { mutableStateOf(false) }
-    Text(
-        text = if (expanded) reasoning.trim() else "◌ Thought process (tap to show)",
-        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        fontStyle = FontStyle.Italic,
-        color = Space.Glow.copy(alpha = 0.85f),
-        modifier = Modifier
-            .clickable { expanded = !expanded }
-            .padding(bottom = 6.dp),
-    )
+    val mod = Modifier.clickable { expanded = !expanded }.padding(bottom = 6.dp)
+    val style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontStyle = FontStyle.Italic)
+    if (expanded) Text(reasoning.trim(), style = style, color = Space.Glow.copy(alpha = 0.85f), modifier = mod)
+    else IconText(Icons.Outlined.Psychology, "Thought process (tap to show)", mod, Space.Glow.copy(alpha = 0.85f), style, 14.dp)
 }
 
 private val DIAGRAM_LINE = Regex("^!\\[([^\\]]*)\\]\\(diagram:([0-9a-f]{16})\\)$")
@@ -987,7 +998,8 @@ private fun SummaryCard(msg: UiMessage, name: String, onLongPress: () -> Unit, a
                 .combinedClickable(onClick = { expanded = !expanded }, onLongClick = onLongPress)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Text("✦ CONTEXT REFRESHED", style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 2.sp), color = Space.Glow)
+            IconText(LineIcons.Sparkle, "CONTEXT REFRESHED", style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 2.sp),
+                color = Space.Glow, size = 13.dp)
             Spacer(Modifier.size(4.dp))
             if (expanded) {
                 MarkdownContent(msg.text, Space.Text)
@@ -1028,17 +1040,17 @@ private fun ContextStrip(
                 .padding(horizontal = 10.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("${mode.icon} ${mode.name.uppercase()} ▾", style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 1.sp),
-                color = Space.Accent, maxLines = 1)
+            Icon(LineIcons.forMode(mode.icon), contentDescription = null, tint = Space.Accent, modifier = Modifier.size(13.dp))
+            Spacer(Modifier.size(5.dp))
+            Text(mode.name.uppercase(), style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 1.sp), color = Space.Accent, maxLines = 1)
+            Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = Space.Accent, modifier = Modifier.size(16.dp))
         }
         Spacer(Modifier.size(10.dp))
         if (project != null) {
-            Text(
-                "◆ ${project.name}",
+            IconText(
+                Icons.Outlined.Folder, project.name,
                 style = HudLabel.copy(fontSize = 11.sp, letterSpacing = 0.5.sp),
-                color = accentFor(project.color).main,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                color = accentFor(project.color).main, size = 12.dp, maxLines = 1,
                 modifier = Modifier.weight(1f, fill = false).clickable(onClick = onProject).padding(vertical = 4.dp),
             )
             Spacer(Modifier.size(12.dp))
@@ -1076,10 +1088,10 @@ private fun ProjectChoice(label: String, color: Color, selected: Boolean, onClic
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("◆", color = color)
+        Box(Modifier.size(12.dp).border(2.dp, color, CircleShape))
         Spacer(Modifier.size(10.dp))
         Text(label, color = if (selected) Space.Accent else Space.Text, modifier = Modifier.weight(1f))
-        if (selected) Text("✓", color = Space.Accent)
+        if (selected) Icon(Icons.Outlined.Check, contentDescription = "Selected", tint = Space.Accent)
     }
 }
 

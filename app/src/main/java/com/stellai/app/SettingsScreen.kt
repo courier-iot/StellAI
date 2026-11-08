@@ -1,5 +1,6 @@
 package com.stellai.app
 
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
@@ -148,7 +149,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
         ) {
             // ---- Connection --------------------------------------------------------------
             SectionTitle("Server connection")
-            Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) { Text("📷  Scan to connect") }
+            Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) { IconText(Icons.Outlined.QrCodeScanner, "Scan to connect") }
             Hint("Scan the QR code shown by StellAI Server on your computer (Windows: the server window; Linux: the StellAI Server terminal). Or type the server address and API key it shows. Use the Tailscale address to reach it from anywhere.")
             OutlinedTextField(
                 value = url,
@@ -189,7 +190,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                     testResult = "$ai\n$hub"
                 }
             }) { Text("Test connection") }
-            testResult?.let { Text(it) }
+            testResult?.let { r -> Column { r.lines().forEach { StatusLine(it, okColor = Space.Accent, badColor = Space.Red) } } }
 
             HorizontalDivider()
             SectionTitle("Assistant")
@@ -253,10 +254,11 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                     }
                     customWakeWords.forEach { (id, label) ->
                         val key = AppSettings.CUSTOM_PREFIX + id
-                        FilterChip(selected = wakeWord == key, onClick = { wakeWord = key }, label = { Text("$label ✦") })
+                        FilterChip(selected = wakeWord == key, onClick = { wakeWord = key }, label = { Text(label) },
+                            trailingIcon = { Icon(LineIcons.Sparkle, contentDescription = "Your own", modifier = Modifier.size(14.dp)) })
                     }
                 }
-                Hint("Trained your own (like \"Hey Stella\")? Put the .onnx file in the server's wake word folder and it appears here with a ✦.")
+                Hint("Trained your own (like \"Hey Stella\")? Put the .onnx file in the server's wake word folder and it appears here, marked with a star.")
                 Text("Sensitivity", style = MaterialTheme.typography.labelLarge)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Low" to 0, "Normal" to 1, "High" to 2).forEach { (label, v) ->
@@ -289,7 +291,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
 
             Text("Background actions", style = MaterialTheme.typography.labelLarge)
             if (overlayAllowed) {
-                Hint("✓ Allowed: voice commands can open apps, maps and the dialer even when the app isn't on screen.")
+                Hint("Allowed: voice commands can open apps, maps and the dialer even when the app isn't on screen.")
             } else {
                 Hint("Android blocks apps from opening other apps from the background. Allow \"Display over other apps\" so voice commands can open apps, maps and the dialer.")
                 OutlinedButton(onClick = {
@@ -316,7 +318,8 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text("✦ " + text.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Accent)
+    IconText(LineIcons.Sparkle, text.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Accent,
+        size = 15.dp)
 }
 
 @Composable

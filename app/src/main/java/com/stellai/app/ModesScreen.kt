@@ -170,7 +170,8 @@ private fun ModeRow(m: Mode, actions: @Composable () -> Unit) {
             .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(m.icon, fontSize = 20.sp, modifier = Modifier.widthIn(min = 34.dp))
+        Icon(LineIcons.forMode(m.icon), contentDescription = null, tint = Space.Accent,
+            modifier = Modifier.padding(end = 12.dp).size(22.dp))
         Column(Modifier.weight(1f)) {
             Text(m.name)
             Text(summary(m), style = MaterialTheme.typography.bodySmall, color = Space.Muted, maxLines = 2)
@@ -198,7 +199,7 @@ private fun creativityLabel(t: Double?): String = when {
     else -> "very creative"
 }
 
-private val ICONS = listOf("★", "⌨", "✒", "⚡", "🎓", "💡", "📜", "🎮", "🍳", "🧪", "🎵", "📈", "🗺", "🛠", "❤", "🌙")
+private val ICONS = LineIcons.MODE_CHOICES
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -225,13 +226,14 @@ private fun ModeEditor(initial: Mode, onDismiss: () -> Unit, onSave: (Mode) -> U
                 )
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     ICONS.forEach { i ->
-                        Text(
-                            i,
-                            fontSize = 20.sp,
+                        Icon(
+                            LineIcons.forMode(i), contentDescription = null,
+                            tint = if (i == icon) Space.Accent else Space.Muted,
                             modifier = Modifier
                                 .border(if (i == icon) 2.dp else 0.dp, Space.Accent, RoundedCornerShape(8.dp))
                                 .clickable { icon = i }
-                                .padding(6.dp),
+                                .padding(6.dp)
+                                .size(24.dp),
                         )
                     }
                 }

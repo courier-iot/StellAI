@@ -1,5 +1,9 @@
 package com.stellai.app
 
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Image
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -332,7 +336,7 @@ fun MarkdownContent(text: String, textColor: Color) {
                 is MdBlock.Picture -> if (b.src.startsWith("diagram:") || b.src.startsWith("image:")) {
                     RemoteImage(b.src, b.alt)
                 } else {
-                    Text("🖼 ${b.alt}", color = Space.Muted)
+                    IconText(Icons.Outlined.Image, b.alt, color = Space.Muted)
                 }
                 MdBlock.Rule -> HorizontalDivider(color = Space.Line)
             }
@@ -371,7 +375,8 @@ fun CodeBlock(lang: String, code: String) {
                 clipboard.setText(AnnotatedString(code))
                 copied = true
             }) {
-                Text(if (copied) "✓ Copied" else "Copy", style = HudLabel.copy(fontSize = 11.sp), color = accent)
+                IconText(if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy, if (copied) "Copied" else "Copy",
+                    style = HudLabel.copy(fontSize = 11.sp), color = accent, size = 13.dp)
             }
         }
         HorizontalDivider(color = Space.Line)
@@ -422,8 +427,8 @@ fun RemoteImage(ref: String, title: String, modifier: Modifier = Modifier.fillMa
                 .border(1.dp, Space.Accent.copy(alpha = 0.35f), shape)
                 .clickable { zoom = true },
         )
-        error != null -> Text(
-            "⚠ Couldn't load the ${if (isPhoto) "photo" else "diagram"}: $error",
+        error != null -> IconText(
+            Icons.Outlined.WarningAmber, "Couldn't load the ${if (isPhoto) "photo" else "diagram"}: $error",
             color = Space.Red,
             style = MaterialTheme.typography.bodySmall,
         )
