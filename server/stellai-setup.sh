@@ -3854,8 +3854,12 @@ def run_doctor():
     if AVATAR["dir"]:
         st = AVATAR["status"].get("voice", "")
         voice = avatar_config()["voice"]
-        if piper_exe() and os.path.isfile(_avatar_path("voices", voice + ".onnx")):
-            add("Avatar voice", "ok", "ready: " + VOICES.get(voice, voice).split(":")[0])
+        kst = AVATAR["status"].get("kokoro", "")
+        if avatar_config().get("engine") == "kokoro" and kst.startswith("failed"):
+            add("Avatar voice", "warn", "Kokoro " + kst + " (using Piper)", "Check the internet connection, then pick Kokoro again.")
+        elif piper_exe() and os.path.isfile(_avatar_path("voices", voice + ".onnx")):
+            add("Avatar voice", "ok", "ready: " + (("Kokoro " + (kst or "preparing")) if avatar_config().get("engine") == "kokoro"
+                                                  else VOICES.get(voice, voice).split(":")[0]))
         elif st.startswith("failed"):
             add("Avatar voice", "warn", st, "Check the internet connection, then open the avatar screen again.")
         elif st:
@@ -4524,7 +4528,7 @@ function buildHistory(list) {
   }
   flush(); return out;
 }
-async function prepare(convId, images) {
+async function prepare(convId, images, voice = false) {
   const c = S.convs.get(convId); const mode = modeById(c.mode); const list = msgsOf(convId);
   let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
   const summary = last >= 0 ? list[last].text : "";
@@ -4535,7 +4539,7 @@ async function prepare(convId, images) {
   let plan = null;
   try {
     plan = await api("/context", { method: "POST", json: { project_id: c.project_id || "", query, fixed: base, images, mode: mode.id,
-      mode_tools: mode.tools || "all", split: true, sticky, thinking: thinkPref(mode),
+      mode_tools: mode.tools || "all", split: true, sticky, thinking: voice ? "auto" : thinkPref(mode),
       last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), messages: history.map(h => ({ role: h.role, content: h.content })) } });
   } catch { plan = null; }
   let start = 0, info = null, needsRefresh = false, names = null, projectText = "", memory = oldMemorySection(), extra = "";
@@ -4552,6 +4556,7 @@ async function prepare(convId, images) {
     needsRefresh = history.filter(h => h.role === "user").length >= 2 && (start > 0 || used > limit * 0.85);
   } else start = Math.max(0, history.length - 24);
   const tools = S.tools.filter(t => !names || names.includes(t.function.name));
+  if (voice) { extra = (extra ? extra + "\n" : "") + VOICE_STYLE; if (!plan) think = false; }
   const hist = withTurnContext(history.slice(start), extra);
   return { system: systemPrompt(projectText, summary, mode, memory), history: hist, info, needsRefresh, tools, mode, think };
 }
@@ -4605,7 +4610,8 @@ async function send() {
   for (const p of photos) { try { await api(`/images/${p.id}.jpg`, { method: "PUT", body: p.blob, headers: { "Content-Type": "image/jpeg" } }); } catch (e) { notice("Couldn't upload a photo: " + e.message); } }
   addMsg(convId, "user", (text + photos.map(p => `\n![photo](image:${p.id})`).join("")).trim());
   renderSide(); renderMsgs();
-  await run(convId, photos);
+  const voice = !!S.voiceNext; S.voiceNext = false;
+  await run(convId, photos, voice);
 }
 function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
@@ -4619,15 +4625,15 @@ function truncateFrom(id) {
   const now = nextTs(); list.slice(i).forEach(m => saveMsg({ ...m, deleted: true, text: "", reasoning: "", updated_at: now }));
 }
 
-async function run(convId, photos) {
+async function run(convId, photos, voice = false) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
-  SPEAK.cancel(); postAvatar({ state: "thinking" });
+  SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
-    let p = await prepare(convId, photos.length);
+    let p = await prepare(convId, photos.length, voice);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
-      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
+      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
     }
     if (p.info) S.context = p.info;
     const st = S.sticky.get(convId) || new Set(); p.tools.forEach(t => st.add(t.function.name)); S.sticky.set(convId, st);
@@ -4649,12 +4655,15 @@ async function run(convId, photos) {
         tools: p.tools, chat_template_kwargs: { enable_thinking: thinking },
         temperature: p.mode.temperature != null ? p.mode.temperature : (thinking ? (code ? 0.6 : 1.0) : 0.7),
         top_p: thinking ? 0.95 : 0.8, top_k: 20, min_p: 0, presence_penalty: code ? 0 : 1.5 };
+      if (voice && !thinking) body.max_tokens = 700;
       const result = await stream(body);
       const finalText = result.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
       S.streaming = null;
       if (AVATAR_MODE) { SPEAK.feed(finalText, true); avatarCaption(finalText); if (finalText && AV.avatar) AV.avatar.react(finalText); }
       if (finalText && !result.toolCalls.length) postAvatar({ state: "reply", text: finalText });
       if (finalText || !result.toolCalls.length) addMsg(convId, "assistant", finalText || "(no reply)", result.reasoning);
+      // checking something takes a moment: say so instead of going quiet
+      if (voice && AVATAR_MODE && SPEAK.enabled && result.toolCalls.length && !SPEAK.saidAny) SPEAK.say(ACKS[Math.floor(Math.random() * ACKS.length)]);
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
       turn.push(assistant); renderMsgs();
@@ -4694,6 +4703,7 @@ async function run(convId, photos) {
     if (S.stopRequested) S.error = "Stopped.";
     S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
     postAvatar({ state: "idle" });
+    if (voice && !S.stopRequested && !S.error) startFollowUp();
     touch(convId); renderSide(); renderMsgs(); renderBar();
     sync().then(updateMeter);
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
@@ -5048,75 +5058,133 @@ $("#wrap").onclick = e => {
 };
 
 // ---------------------------------------------------------------- voice input (microphone → Whisper on the server)
+// A speech detector (Silero VAD, or loudness if it isn't downloaded) decides when you've finished: it waits longer
+// when you trail off or say a short "um", and answers quickly after a clear sentence. While you're still talking,
+// finished phrases are already being transcribed, so the text is ready almost as soon as you stop.
 const MIC = { rec: null };
+const VOICE_STYLE = "Voice conversation: the user said this out loud and will hear your reply spoken. Answer the way a person talks: " +
+  "usually one to three short sentences, warm and natural, with contractions. No markdown, lists, headings, tables, code or links. " +
+  "If the answer needs detail, give the key point first and offer to go into more detail or put it on screen.";
+const END_PHRASE = /^(ok(ay)?[, ]+)?(thanks|thank you( very much| so much)?|thanks a lot|cheers|that'?s (all|it)|nothing|no( thanks| thank you)?|never ?mind|stop|good ?bye|bye( bye)?|i'?m good|all good)[.!, ]*(stella)?[.!]*$/i;
+const ACKS = ["One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.", "Let me check."];
 function micHelp() {
   alertBox("The microphone only works on a secure page. Options: open the chat on the server computer itself " +
     "(http://localhost:8092), use Tailscale HTTPS (run 'sudo tailscale serve --bg 8092' on the server and open the https://… address it shows), " +
     "or in Chrome open chrome://flags/#unsafely-treat-insecure-origin-as-secure, add this address (" + location.origin + ") and restart Chrome.");
 }
-async function micToggle() {
+async function getVad() {
+  if (MIC.vad !== undefined) return MIC.vad;
+  try { const mod = await import("/avatar/avatar.js"); MIC.vad = await mod.createVad(); } catch { MIC.vad = null; }
+  return MIC.vad;
+}
+async function transcribePcm(int16) {
+  const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
+    "Content-Type": "application/octet-stream" }, body: int16.buffer });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return (j.text || "").trim();
+}
+async function micToggle(opts = {}) {
   if (MIC.rec) { MIC.rec.stop(); return; }
-  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { micHelp(); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (!opts.followup) micHelp(); return; }
+  const followup = !!opts.followup;
   if (S.busy) stop();
   SPEAK.cancel();
   let streamIn;
-  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } }); }
-  catch (e) { alertBox("Couldn't use the microphone: " + e.message); return; }
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }); }
+  catch (e) { if (!followup) alertBox("Couldn't use the microphone: " + e.message); return; }
+  const mod = await import("/avatar/avatar.js");
+  const vadModel = await getVad(), vad = vadModel ? vadModel.stream() : null;
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = ctx.createMediaStreamSource(streamIn);
-  const proc = ctx.createScriptProcessor(4096, 1, 1);
-  const chunks = []; let heard = false, quietSince = 0, startedAt = performance.now(), done = false;
+  const src = ctx.createMediaStreamSource(streamIn), proc = ctx.createScriptProcessor(4096, 1, 1);
+  const resample = mod.makeResampler(ctx.sampleRate);
+  const SR = 16000, FRAME = 512;
+  let audio = new Float32Array(SR * 32), n = 0;              // everything heard, at 16 kHz
+  let frameAt = 0, noise = 0.004, heard = false, speech = 0, lastSpeech = 0, burstStart = -1, lastBurst = 0, speechRun = 0, done = false;
+  let segStart = 0, segCutFor = -1; const segments = [];     // phrases sent for transcription while you keep talking
+  const startedAt = performance.now();
+  const toInt16 = (a, b) => { const out = new Int16Array(Math.max(0, b - a)); for (let i = a; i < b; i++) out[i - a] = Math.max(-1, Math.min(1, audio[i])) * 32767; return out; };
+  let working = false;
+  async function analyse() {
+    if (working) return; working = true;
+    try {
+      while (!done && n - frameAt >= FRAME) {
+        const f = audio.subarray(frameAt, frameAt + FRAME);
+        let rms = 0; for (let i = 0; i < FRAME; i += 2) rms += f[i] * f[i]; rms = Math.sqrt(rms / (FRAME / 2));
+        AV.micLevel = Math.min(1, rms * 8);
+        let p;
+        if (vad) { try { p = await vad.prob(Float32Array.from(f)); } catch { p = rms > Math.max(0.02, noise * 3) ? 0.9 : 0.1; } }
+        else p = rms > Math.max(0.02, noise * 3) ? 0.9 : 0.1;
+        if (p < 0.3) noise = noise * 0.97 + rms * 0.03;
+        const t = (frameAt + FRAME) / SR;
+        if (p > 0.5) { speechRun++; if (speechRun >= 2) { if (!heard) { heard = true; } speech += FRAME / SR; lastSpeech = t; if (burstStart < 0) burstStart = t; } }
+        else { speechRun = 0; if (burstStart >= 0 && t - lastSpeech > 0.15) { lastBurst = lastSpeech - burstStart; burstStart = -1; } }
+        frameAt += FRAME;
+        if (heard) {
+          const quiet = t - lastSpeech;
+          // a phrase just ended mid-sentence: start transcribing it now
+          if (quiet >= 0.4 && segCutFor !== lastSpeech && (lastSpeech * SR) - segStart > SR * 1.2) {
+            segCutFor = lastSpeech;
+            const cut = Math.floor((lastSpeech + 0.2) * SR); segments.push(transcribePcm(toInt16(segStart, cut)).catch(() => "")); segStart = cut;
+          }
+          const need = speech < 0.8 || (burstStart < 0 && lastBurst < 0.35) ? 1.25 : 0.75;    // "um…" or a short start: wait longer
+          if (quiet >= need) { rec.stop(); break; }
+        } else if (t > (followup ? 5 : 8)) { rec.stop(); break; }
+        if (t > 30) { rec.stop(); break; }
+      }
+    } finally { working = false; }
+  }
   proc.onaudioprocess = ev => {
-    const d = ev.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d));
-    let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] * d[i];
-    const rms = Math.sqrt(sum / (d.length / 4)); AV.micLevel = Math.min(1, rms * 8);
-    const now = performance.now();
-    if (rms > 0.02) { heard = true; quietSince = now; }
-    if ((heard && now - quietSince > 1300) || now - startedAt > 30000 || (!heard && now - startedAt > 8000)) rec.stop();
+    if (done) return;
+    const out = resample(ev.inputBuffer.getChannelData(0));
+    if (n + out.length > audio.length) { const bigger = new Float32Array(audio.length * 2); bigger.set(audio.subarray(0, n)); audio = bigger; }
+    audio.set(out, n); n += out.length;
+    analyse();
   };
   src.connect(proc); proc.connect(ctx.destination);
   const rec = MIC.rec = {
     async stop() {
       if (done) return; done = true; MIC.rec = null; AV.micLevel = 0;
       try { proc.disconnect(); src.disconnect(); } catch {}
-      streamIn.getTracks().forEach(t => t.stop());
-      const rate = ctx.sampleRate; ctx.close();
+      streamIn.getTracks().forEach(t => t.stop()); ctx.close();
       $("#mic").classList.remove("on"); updateAvatarState();
-      if (!heard) return;
-      const len = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(len); let o = 0;
-      for (const c of chunks) { all.set(c, o); o += c.length; }
-      const ratio = rate / 16000, out = new Int16Array(Math.floor(len / ratio));
-      for (let i = 0; i < out.length; i++) {   // average the samples that fall into each 16 kHz sample
-        const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio)); let s = 0;
-        for (let j = a; j < b; j++) s += all[j];
-        out[i] = Math.max(-1, Math.min(1, s / Math.max(1, b - a))) * 32767;
-      }
+      if (!heard) { if (!followup) avatarCaption(""); postAvatar({ state: "idle" }); return; }
+      const end = Math.min(n, Math.floor((lastSpeech + 0.3) * SR));
+      if (end - segStart > SR * 0.2) segments.push(transcribePcm(toInt16(segStart, end)).catch(e => { notice("Couldn't transcribe: " + e.message); return ""; }));
       S.status = "Listening… transcribing"; renderBar(); avatarCaption("…", "you");
-      try {
-        const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
-          "Content-Type": "application/octet-stream" }, body: out.buffer });
-        const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
-        S.status = ""; renderBar();
-        const text = (j.text || "").trim();
-        if (!text) { avatarCaption("(didn't catch that)", "you"); return; }
-        $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
-        avatarCaption(text, "you");
-        send();
-      } catch (e) { S.status = ""; renderBar(); notice("Couldn't transcribe: " + e.message); }
+      const text = (await Promise.all(segments)).filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      S.status = ""; renderBar();
+      if (!text) { avatarCaption("(didn't catch that)", "you"); postAvatar({ state: "idle" }); return; }
+      avatarCaption(text, "you");
+      if (followup && END_PHRASE.test(text)) {      // "thanks", "that's all": the conversation is over
+        postAvatar({ state: "idle" });
+        if (/thank|cheers/i.test(text) && AV.cfg.speak) { SPEAK.enabled = true; SPEAK.say(["Anytime!", "You're welcome!", "Happy to help."][Math.floor(Math.random() * 3)]); }
+        return;
+      }
+      $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
+      S.voiceNext = AVATAR_MODE && !!AV.cfg.speak; send();    // spoken replies get the spoken style
     },
   };
   $("#mic").classList.add("on"); updateAvatarState();
   postAvatar({ state: "listening" });
+  if (followup) avatarStatus("");
+}
+// After a spoken answer, keep listening for a few seconds so you can reply without the wake word
+function startFollowUp() {
+  if (!AVATAR_MODE || !AV.cfg.followup || !window.isSecureContext) return;
+  const go = () => { if (!MIC.rec && !S.busy) micToggle({ followup: true }); };
+  const wait = () => SPEAK.speaking ? setTimeout(wait, 150) : setTimeout(go, 250);
+  wait();
 }
 
-// ---------------------------------------------------------------- Stella's voice (Piper on the server)
+// ---------------------------------------------------------------- Stella's voice (Piper or Kokoro on the server)
 const SPEAK = {
-  ctx: null, analyser: null, data: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  ctx: null, analyser: null, data: null, freq: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  firstDone: false, saidAny: false,
   audio() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       this.analyser = this.ctx.createAnalyser(); this.analyser.fftSize = 512; this.analyser.connect(this.ctx.destination);
-      this.data = new Uint8Array(this.analyser.fftSize);
+      this.data = new Uint8Array(this.analyser.fftSize); this.freq = new Uint8Array(this.analyser.frequencyBinCount);
     }
     return this.ctx;
   },
@@ -5126,9 +5194,24 @@ const SPEAK = {
     for (let i = 0; i < this.data.length; i++) { const v = (this.data[i] - 128) / 128; s += v * v; }
     return Math.min(1, Math.sqrt(s / this.data.length) * 4);
   },
+  // Rough mouth shapes from the sound: where the energy sits (low/mid/high) says open "aa", round "oh/ou" or wide "ee/ih"
+  visemes() {
+    if (!this.playing || !this.analyser) return null;
+    this.analyser.getByteFrequencyData(this.freq);
+    const hz = this.ctx.sampleRate / this.analyser.fftSize, band = (a, b) => { let s = 0; for (let i = Math.floor(a / hz); i < Math.min(this.freq.length, b / hz); i++) s += this.freq[i]; return s; };
+    const L = band(200, 800), M = band(800, 1700), H = band(1700, 4000), e = L + M + H;
+    if (e < 400) return null;
+    const l = L / e, m = M / e, h = H / e, c = (x) => Math.max(0, Math.min(1, x));
+    const v = { aa: c((m - 0.22) * 3.5), oh: c((l - 0.42) * 3) * c(1 - h * 2.5), ou: c((l - 0.6) * 4), ee: c((h - 0.28) * 3.5), ih: c((h - 0.18) * 3) * 0.6 };
+    const sum = Object.values(v).reduce((a, b) => a + b, 0) || 1;
+    for (const k in v) v[k] /= sum;
+    return v;
+  },
   get speaking() { return !!this.playing || this.queue.length > 0 || this.busyFetch > 0; },
   begin() { this.fed = 0; },
-  // Speak finished sentences of a reply that's still streaming in; finish() says the rest
+  newReply() { this.firstDone = false; this.saidAny = false; },
+  // Speak a reply while it's still streaming in. The first bit goes as soon as there's a natural phrase
+  // (up to a comma), so she starts talking sooner; after that, whole sentences.
   feed(text, finish = false) {
     if (!this.enabled) return;
     let rest = text.slice(this.fed);
@@ -5137,8 +5220,9 @@ const SPEAK = {
     let cut = -1;
     if (finish) cut = rest.length;
     else {
-      const rx = /[.!?…:;]["')\]]?\s+|\n{2,}/g; let m;
-      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= 40 || /\n/.test(m[0])) { cut = m.index + m[0].length; } }
+      const rx = this.firstDone ? /[.!?…:;]["')\]]?\s+|\n{2,}/g : /[.!?…:;,—]["')\]]?\s+|\n{2,}/g;
+      const min = this.firstDone ? 40 : 24; let m;
+      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= min || /\n/.test(m[0])) { cut = m.index + m[0].length; if (!this.firstDone) break; } }
       const fence = rest.indexOf("```"); if (fence >= 0 && (cut < 0 || fence < cut)) {
         const close = rest.indexOf("```", fence + 3);
         if (close < 0) cut = fence > 0 ? fence : -1; else cut = close + 3;
@@ -5146,12 +5230,12 @@ const SPEAK = {
     }
     if (cut <= 0) return;
     const piece = rest.slice(0, cut); this.fed += cut;
-    if (piece.trim()) this.say(piece);
+    if (piece.trim()) { this.firstDone = true; this.say(piece); }
   },
   say(text) {
-    const gen = this.gen; this.busyFetch++;
+    const gen = this.gen; this.busyFetch++; this.saidAny = true;
     const p = fetch("/tts", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed }) })
+      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed, engine: AV.cfg.engine, kokoro_voice: AV.cfg.kokoro_voice }) })
       .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ("HTTP " + r.status)); } return r.arrayBuffer(); })
       .then(buf => buf.byteLength > 44 ? this.audio().decodeAudioData(buf) : null)
       .catch(e => { if (gen === this.gen) avatarStatus("Voice: " + e.message); return null; })
@@ -5254,6 +5338,7 @@ async function startWake() {
       threshold: 1 - AV.cfg.wake_sensitivity,
       isBusy: () => !!MIC.rec, isSpeaking: () => SPEAK.speaking,
       onWake: () => { chime(); if (SPEAK.speaking) SPEAK.cancel(); if (!MIC.rec) micToggle(); },
+      bargeIn: () => !!AV.cfg.barge_in, onBargeIn: () => { SPEAK.cancel(); if (S.busy) stop(); if (!MIC.rec) micToggle({ followup: true }); },
       onError: e => { WAKE.error = e.message; },
     });
   } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
@@ -5309,11 +5394,19 @@ function openAvatarSettings() {
       <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
       <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
     <h3 class="hud" style="margin-top:16px">Voice</h3>
-    <div style="display:flex;gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select><button id="hear">▶ Hear</button></div>
+    <select id="eng" style="margin-bottom:6px"><option value="piper" ${c.engine !== "kokoro" ? "selected" : ""}>Piper: fast, works everywhere</option>
+      ${c.kokoro_available ? `<option value="kokoro" ${c.engine === "kokoro" ? "selected" : ""}>Kokoro: more natural (one-time download ~175 MB)</option>` : ""}</select>
+    ${c.engine === "kokoro" && (c.status || {}).kokoro && c.status.kokoro !== "ready" ? `<p class="sub">Kokoro: ${esc(c.status.kokoro)}… (Piper speaks until it's ready)</p>` : ""}
+    <div id="kokBox" style="display:${c.engine === "kokoro" ? "flex" : "none"};gap:8px;margin-bottom:6px"><select id="kv">${(c.kokoro_voices || []).map(v => `<option value="${v.id}" ${c.kokoro_voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
+    <div id="piperBox" style="display:${c.engine === "kokoro" ? "none" : "flex"};gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
+    <button id="hear" style="margin-top:6px">▶ Hear this voice</button>
     <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
     <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="oth" style="width:auto" ${c.speak_others ? "checked" : ""}> Also speak replies to the phone and other devices</label>
+    <h3 class="hud" style="margin-top:16px">Conversation</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fu" style="width:auto" ${c.followup ? "checked" : ""}> Keep listening after she answers, so you can reply without the wake word ("thanks" or "that's all" ends it)</label>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bi" style="width:auto" ${c.barge_in ? "checked" : ""}> Interrupt her by talking (best with a speakerphone that cancels echo)</label>
     <h3 class="hud" style="margin-top:16px">Wake word</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="wk" style="width:auto" ${c.wake ? "checked" : ""}> Listen for a wake word on this screen</label>
     <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
@@ -5360,19 +5453,21 @@ function openAvatarSettings() {
     }
     d.remove(); await loadAvatarConfig(); openAvatarSettings();
   };
+  $d("#eng").onchange = e => { const k = e.target.value === "kokoro"; $d("#kokBox").style.display = k ? "flex" : "none"; $d("#piperBox").style.display = k ? "none" : "flex"; };
   $d("#hear").onclick = () => {
     const was = SPEAK.enabled; SPEAK.enabled = true; SPEAK.cancel();
-    const prevVoice = AV.cfg.voice, prevSpeed = AV.cfg.speed;
-    AV.cfg.voice = $d("#vc").value; AV.cfg.speed = +$d("#sp").value;
-    SPEAK.say(`Hi, I'm ${NAME()}. This is how I sound.`);
-    AV.cfg.voice = prevVoice; AV.cfg.speed = prevSpeed; SPEAK.enabled = was;
+    const prev = { voice: AV.cfg.voice, speed: AV.cfg.speed, engine: AV.cfg.engine, kokoro_voice: AV.cfg.kokoro_voice };
+    Object.assign(AV.cfg, { voice: $d("#vc").value, speed: +$d("#sp").value, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : prev.kokoro_voice });
+    SPEAK.say(`Hi, I'm ${NAME()}. It's 3:30 and the board is running at 5V. This is how I sound.`);
+    Object.assign(AV.cfg, prev); SPEAK.enabled = was;
   };
   $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
   $d("#save").onclick = async () => {
     try {
       AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
         speed: +$d("#sp").value, speak: $d("#spk").checked, speak_others: $d("#oth").checked, height_cm: +$d("#ht").value,
-        gestures: $d("#ges").checked, wake: $d("#wk").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+        gestures: $d("#ges").checked, wake: $d("#wk").checked, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : undefined,
+        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
       d.remove(); loadAvatarConfig();
     } catch (e) { alertBox(e.message); }
   };
@@ -5400,7 +5495,7 @@ async function startAvatarScreen() {
   }
   setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
   (function loop() {
-    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); updateAvatarState(); }
+    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); if (!MIC.rec) { const v = SPEAK.visemes(); if (v) AV.avatar.setVisemes(v); } updateAvatarState(); }
     requestAnimationFrame(loop);
   })();
   $("#avChat").onclick = () => document.body.classList.toggle("showchat");
@@ -5469,6 +5564,10 @@ OWW_MODELS = ("melspectrogram.onnx", "embedding_model.onnx", "hey_jarvis_v0.1.on
               "hey_mycroft_v0.1.onnx")
 for _f in OWW_MODELS:
     AVATAR_LIBS["oww/" + _f] = [f"https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/{_f}"]
+# Silero VAD: tells speech from silence/noise, so Stella knows when you've finished talking
+AVATAR_LIBS["vad/silero_vad.onnx"] = [
+    "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+    "https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx"]
 LIB_TYPES = {".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
              ".wasm": "application/wasm", ".onnx": "application/octet-stream"}
 PIPER_RELEASE = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/"
@@ -5497,7 +5596,8 @@ def _avatar_path(*parts):
 def avatar_config():
     cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
            "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
-           "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": ""}
+           "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": "",
+           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": False}
     try:
         with open(_avatar_path("config.json")) as f:
             saved = json.load(f)
@@ -5518,6 +5618,8 @@ def avatar_config():
         cfg["style"] = "orb"
     cfg["voices"] = [{"id": k, "label": v} for k, v in VOICES.items()]
     cfg["animations"] = list_animations()
+    cfg["kokoro_voices"] = [{"id": k, "label": v} for k, v in KOKORO_VOICES.items()]
+    cfg["kokoro_available"] = KOKORO.available()
     cfg["wake_words"] = [{"id": "hey_jarvis", "label": "Hey Jarvis"}, {"id": "alexa", "label": "Alexa"},
                          {"id": "hey_mycroft", "label": "Hey Mycroft"}] + [
         {"id": "custom:" + n, "label": n.replace("_", " ").title()} for n in custom_wakewords()]
@@ -5527,7 +5629,8 @@ def avatar_config():
 
 def save_avatar_config(new):
     cur = {k: v for k, v in avatar_config().items()
-           if k not in ("has_model", "model_v", "voices", "status", "animations", "wake_words", "characters", "rev", "bin")}
+           if k not in ("has_model", "model_v", "voices", "status", "animations", "wake_words", "characters", "rev", "bin",
+                        "kokoro_voices", "kokoro_available")}
     if new.get("style") in ("orb", "vrm"):
         cur["style"] = new["style"]
     if new.get("voice") in VOICES:
@@ -5540,7 +5643,11 @@ def save_avatar_config(new):
         cur["wake_sensitivity"] = round(max(0.2, min(0.9, float(new["wake_sensitivity"]))), 2)
     if isinstance(new.get("wake_word"), str) and re.fullmatch(r"(custom:)?[A-Za-z0-9_.-]{1,64}", new["wake_word"]):
         cur["wake_word"] = new["wake_word"]
-    for k in ("speak", "speak_others", "name_tag", "wake", "gestures"):
+    if new.get("engine") in ("piper", "kokoro"):
+        cur["engine"] = new["engine"]
+    if new.get("kokoro_voice") in KOKORO_VOICES:
+        cur["kokoro_voice"] = new["kokoro_voice"]
+    for k in ("speak", "speak_others", "name_tag", "wake", "gestures", "followup", "barge_in"):
         if k in new:
             cur[k] = bool(new[k])
     if "speed" in new:
@@ -5564,6 +5671,8 @@ def save_avatar_config(new):
     os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
     if cur["voice"] != TTS.voice:
         threading.Thread(target=ensure_voice, args=(cur["voice"],), daemon=True).start()
+    if cur.get("engine") == "kokoro":
+        KOKORO.prepare()
     return avatar_config()
 
 
@@ -5692,7 +5801,14 @@ def prepare_avatar():
     def work():
         try:
             ensure_avatar_libs()
-            ensure_voice(avatar_config()["voice"])
+            cfg = avatar_config()
+            if ensure_voice(cfg["voice"]):
+                try:
+                    TTS.say("Hello.", cfg["voice"], cfg["speed"])     # keep the voice loaded: the first reply starts sooner
+                except (RuntimeError, OSError):
+                    pass
+            if cfg.get("engine") == "kokoro":
+                KOKORO.prepare()
         finally:
             AVATAR["preparing"] = False
     threading.Thread(target=work, daemon=True).start()
@@ -5702,7 +5818,7 @@ SPEAKABLE_DROP = [
     (re.compile(r"```[\s\S]*?(```|$)"), " (the code is on screen) "),
     (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),
     (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),
-    (re.compile(r"https?://\S+"), " a link "),
+    (re.compile(r"https?://[^\s,)]+"), " a link "),
     (re.compile(r"`([^`]*)`"), r"\1"),
     (re.compile(r"[*_#>|~]+"), " "),
     (re.compile(r"^\s*[-+]\s+", re.M), ""),
@@ -5710,11 +5826,143 @@ SPEAKABLE_DROP = [
 ]
 
 
+# ---- Speech-friendly text: say "five volts", not "five V"
+_ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen " \
+        "seventeen eighteen nineteen".split()
+_TENS = "  twenty thirty forty fifty sixty seventy eighty ninety".split(" ")
+
+
+def number_words(n):
+    """Whole numbers to words (up to the trillions), e.g. 1250 -> 'one thousand two hundred fifty'."""
+    n = int(n)
+    if n < 0:
+        return "minus " + number_words(-n)
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        return _TENS[n // 10] + ("" if n % 10 == 0 else "-" + _ONES[n % 10])
+    if n < 1000:
+        return _ONES[n // 100] + " hundred" + ("" if n % 100 == 0 else " " + number_words(n % 100))
+    for value, name in ((10 ** 12, "trillion"), (10 ** 9, "billion"), (10 ** 6, "million"), (1000, "thousand")):
+        if n >= value:
+            return number_words(n // value) + " " + name + ("" if n % value == 0 else " " + number_words(n % value))
+    return str(n)
+
+
+def say_number(s):
+    """'3.3' -> 'three point three', '1,200' -> 'one thousand two hundred', '0.5' -> 'zero point five'."""
+    s = s.replace(",", "")
+    neg = s.startswith("-")
+    s = s.lstrip("-+")
+    if "." in s:
+        whole, frac = s.split(".", 1)
+        out = number_words(int(whole or 0)) + " point " + " ".join(_ONES[int(d)] for d in frac if d.isdigit())
+    else:
+        out = number_words(int(s)) if len(s) <= 15 else s
+    return ("minus " if neg else "") + out
+
+
+# unit: (singular, plural); matched right after a number, e.g. 5V, 3.3 V, 220µF, 12 mAh, 25°C
+_UNITS = {
+    "V": ("volt", "volts"), "mV": ("millivolt", "millivolts"), "kV": ("kilovolt", "kilovolts"),
+    "A": ("amp", "amps"), "mA": ("milliamp", "milliamps"), "µA": ("microamp", "microamps"), "uA": ("microamp", "microamps"),
+    "W": ("watt", "watts"), "mW": ("milliwatt", "milliwatts"), "kW": ("kilowatt", "kilowatts"),
+    "kWh": ("kilowatt hour", "kilowatt hours"), "Wh": ("watt hour", "watt hours"), "mAh": ("milliamp hour", "milliamp hours"),
+    "Ah": ("amp hour", "amp hours"),
+    "Ω": ("ohm", "ohms"), "ohm": ("ohm", "ohms"), "kΩ": ("kilohm", "kilohms"), "MΩ": ("megohm", "megohms"),
+    "k": ("k", "k"),
+    "F": ("farad", "farads"), "µF": ("microfarad", "microfarads"), "uF": ("microfarad", "microfarads"),
+    "nF": ("nanofarad", "nanofarads"), "pF": ("picofarad", "picofarads"),
+    "H": ("henry", "henries"), "mH": ("millihenry", "millihenries"), "µH": ("microhenry", "microhenries"),
+    "uH": ("microhenry", "microhenries"),
+    "Hz": ("hertz", "hertz"), "kHz": ("kilohertz", "kilohertz"), "MHz": ("megahertz", "megahertz"),
+    "GHz": ("gigahertz", "gigahertz"),
+    "°C": ("degree Celsius", "degrees Celsius"), "°F": ("degree Fahrenheit", "degrees Fahrenheit"),
+    "°": ("degree", "degrees"), "%": ("percent", "percent"),
+    "mm": ("millimetre", "millimetres"), "cm": ("centimetre", "centimetres"), "m": ("metre", "metres"),
+    "km": ("kilometre", "kilometres"), "km/h": ("kilometre per hour", "kilometres per hour"),
+    "mph": ("mile per hour", "miles per hour"), "kg": ("kilogram", "kilograms"), "g": ("gram", "grams"),
+    "mg": ("milligram", "milligrams"), "lb": ("pound", "pounds"), "lbs": ("pounds", "pounds"),
+    "oz": ("ounce", "ounces"), "ft": ("foot", "feet"), "in": ("inch", "inches"), "mi": ("mile", "miles"),
+    "ml": ("millilitre", "millilitres"), "mL": ("millilitre", "millilitres"), "L": ("litre", "litres"),
+    "ms": ("millisecond", "milliseconds"), "s": ("second", "seconds"), "min": ("minute", "minutes"),
+    "h": ("hour", "hours"), "hr": ("hour", "hours"), "hrs": ("hours", "hours"),
+    "GB": ("gigabyte", "gigabytes"), "MB": ("megabyte", "megabytes"), "KB": ("kilobyte", "kilobytes"),
+    "kB": ("kilobyte", "kilobytes"), "TB": ("terabyte", "terabytes"), "Mbps": ("megabit per second", "megabits per second"),
+    "fps": ("frame per second", "frames per second"), "rpm": ("RPM", "RPM"), "AWG": ("gauge", "gauge"),
+}
+# units that are also ordinary words or letters only count when they're stuck to the number ("5m", "10s", "3in")
+_ATTACHED_ONLY = {"m", "s", "in", "h", "g", "A", "F", "H", "L", "k", "mi", "min"}
+_UNIT_RX = re.compile(r"(?<![\w.])(-?\d[\d,]*(?:\.\d+)?)(\s?)(" + "|".join(
+    sorted((re.escape(u) for u in _UNITS), key=len, reverse=True)) + r")(?![\w°])")
+_MONEY_RX = re.compile(r"([$€£])\s?(\d[\d,]*)(?:\.(\d\d))?(\s?(?:k|K|million|billion)\b)?(?!\d|\.\d)")
+_TIME_RX = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)(?:\s?([AaPp])\.?\s?[Mm]\.?)?(?!\d)")
+_RANGE_RX = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s?[-–]\s?(\d+(?:\.\d+)?)(?![\w.])")
+_ABBREV = [(re.compile(p, re.I), r) for p, r in [
+    (r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"), (r"\betc\.", "et cetera"), (r"\bvs\.?(?=\s)", "versus"),
+    (r"\bapprox\.", "approximately"), (r"\bw/o\b", "without"), (r"\bw/(?=\s)", "with"),
+]]
+_SYMBOLS = [(re.compile(p), r) for p, r in [
+    (r"(?<=\d)\s?[x×]\s?(?=\d)", " by "), (r"\s&\s", " and "), (r"(?<=\s)\+(?=\s)", " plus "),
+    (r"(?<=\s)=(?=\s)", " equals "), (r"~(?=\s?\d)", "about "), (r"≈", " about "), (r"±", " plus or minus "),
+    (r"(?<=\s)/(?=\s)", " or "), (r"->|→", " to "), (r"\s[-–—]\s", ", "), (r"…", "..."),
+]]
+_EMOJI_RX = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍]+")
+
+
+def _unit_say(m):
+    num, gap, unit = m.group(1), m.group(2), m.group(3)
+    if gap and unit in _ATTACHED_ONLY:
+        return m.group(0)
+    one, many = _UNITS[unit]
+    if unit == "k":                       # 10k (resistor) -> ten k
+        return say_number(num) + " k"
+    plural = num.replace(",", "") not in ("1", "1.0", "-1")
+    return say_number(num) + " " + (many if plural else one)
+
+
+def _money_say(m):
+    sym, whole, cents, scale = m.groups()
+    name = {"$": "dollars", "€": "euros", "£": "pounds"}[sym]
+    out = say_number(whole)
+    if scale:
+        sc = scale.strip().lower()
+        out += " thousand" if sc == "k" else " " + sc
+    elif whole.replace(",", "") == "1":
+        name = name[:-1]
+    out += " " + name
+    if cents and cents != "00":
+        out += " and " + number_words(int(cents)) + " cents"
+    return out
+
+
+def _time_say(m):
+    h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3)
+    words = number_words(h) + ("" if mi == 0 and ap else " o'clock" if mi == 0 else
+                               " oh " + number_words(mi) if mi < 10 else " " + number_words(mi))
+    return words + (" " + ("AM" if ap.lower() == "a" else "PM") if ap else "")
+
+
+def speech_text(text):
+    """Turn written text into what a person would say: units, money, times, ranges, abbreviations, symbols."""
+    for rx, rep in _ABBREV:
+        text = rx.sub(rep, text)
+    text = _MONEY_RX.sub(_money_say, text)
+    text = _TIME_RX.sub(_time_say, text)
+    text = _RANGE_RX.sub(lambda m: f"{m.group(1)} to {m.group(2)}", text)
+    for rx, rep in _SYMBOLS:
+        text = rx.sub(rep, text)
+    text = _UNIT_RX.sub(_unit_say, text)
+    text = _EMOJI_RX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def speakable(text):
-    """What to say out loud for a reply: no code blocks, markdown symbols or long links."""
+    """What to say out loud for a reply: no code blocks, markdown symbols or long links; units and
+    symbols as words."""
     for rx, rep in SPEAKABLE_DROP:
         text = rx.sub(rep, text)
-    return text.strip()[:1200]
+    return speech_text(text)[:1200]
 
 
 class PiperTTS:
@@ -5797,6 +6045,225 @@ class PiperTTS:
 
 
 TTS = PiperTTS()
+
+# ---- Kokoro: a more natural-sounding voice (82M-parameter model, runs on the CPU; optional)
+KOKORO_VOICES = {
+    "af_heart": "Heart: warm, natural (US)", "af_bella": "Bella: bright, expressive (US)",
+    "af_nicole": "Nicole: soft, close (US)", "af_sarah": "Sarah: clear, friendly (US)", "af_sky": "Sky: light, young (US)",
+    "bf_emma": "Emma: calm (UK)", "bf_isabella": "Isabella: polished (UK)",
+}
+KOKORO_FILES = {
+    "kokoro-v1.0.int8.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+    "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+}
+
+
+KOKORO_WORKER = r'''# StellAI Kokoro worker: keeps the voice model loaded. One JSON line in, one WAV file out (its path printed).
+import json, sys, wave
+import numpy as np
+from kokoro_onnx import Kokoro
+
+model = Kokoro(sys.argv[1], sys.argv[2])
+print("ready", flush=True)
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+        samples, rate = model.create(req["text"], voice=req["voice"], speed=float(req.get("speed", 1.0)),
+                                     lang=req.get("lang", "en-us"))
+        with wave.open(req["out"], "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(int(rate))
+            w.writeframes((np.clip(np.asarray(samples, dtype=np.float32), -1, 1) * 32767).astype("<i2").tobytes())
+        print(req["out"], flush=True)
+    except Exception as e:  # noqa: BLE001 - report and keep serving
+        print("error " + str(e).replace("\n", " "), flush=True)
+'''
+# Windows: the StellAI app is a packaged program without its own Python, so Kokoro gets a small private copy of
+# the official Python (the "embeddable" build from python.org) next to the voice files.
+WIN_PYTHON_URL = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip"
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+
+
+class KokoroTTS:
+    """Kokoro runs in its own process (a worker), with the Python that has kokoro-onnx installed:
+    the hub's own on Linux, a private embedded Python on Windows."""
+
+    def __init__(self):
+        self.proc, self.lines, self.lock, self.preparing = None, None, threading.Lock(), False
+
+    def _frozen(self):
+        return bool(getattr(sys, "frozen", False))
+
+    def available(self):
+        import platform
+        if self._frozen():
+            return os.name == "nt" and platform.machine().lower() in ("amd64", "x86_64")
+        return True
+
+    def python(self):
+        if self._frozen():
+            return _avatar_path("kokoro", "python", "python.exe")
+        return sys.executable
+
+    def _importable(self):
+        py = self.python()
+        if not os.path.isfile(py):
+            return False
+        try:
+            return subprocess.run([py, "-c", "import kokoro_onnx, numpy"], capture_output=True, timeout=120,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def ready(self):
+        if self.proc and self.proc.poll() is None:
+            return True
+        return AVATAR["status"].get("kokoro") == "ready" or (
+            all(os.path.isfile(_avatar_path("kokoro", f)) for f in KOKORO_FILES) and os.path.isfile(self.python())
+            and os.path.isfile(_avatar_path("kokoro", ".installed")))
+
+    def _setup_windows_python(self):
+        d = _avatar_path("kokoro", "python")
+        if os.path.isfile(os.path.join(d, "python.exe")):
+            return
+        AVATAR["status"]["kokoro"] = "downloading Python for the voice engine"
+        os.makedirs(d, exist_ok=True)
+        z = _avatar_path("kokoro", "python-embed.zip")
+        _download_file(WIN_PYTHON_URL, z, {})
+        target = os.path.realpath(d)
+        with zipfile.ZipFile(z) as zf:
+            for n in zf.namelist():
+                if not os.path.realpath(os.path.join(target, n)).startswith(target + os.sep):
+                    raise OSError("unsafe file in the Python download")
+            zf.extractall(target)
+        os.remove(z)
+        # The embeddable Python ignores installed packages until "import site" is switched on
+        for f in os.listdir(d):
+            if f.endswith("._pth"):
+                p = os.path.join(d, f)
+                with open(p) as fh:
+                    txt = fh.read()
+                txt = txt.replace("#import site", "import site")
+                if "Lib\\site-packages" not in txt:
+                    txt += "\nLib\\site-packages\n"
+                with open(p, "w") as fh:
+                    fh.write(txt)
+        AVATAR["status"]["kokoro"] = "installing pip"
+        gp = os.path.join(d, "get-pip.py")
+        _download_file(GET_PIP_URL, gp, {})
+        r = subprocess.run([os.path.join(d, "python.exe"), gp, "--no-warn-script-location", "--quiet"],
+                           capture_output=True, text=True, timeout=900, cwd=d,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if r.returncode != 0:
+            raise OSError("installing pip failed: " + (r.stderr or r.stdout).strip()[-300:])
+
+    def prepare(self):
+        """Sets up Kokoro once, in the background: (Windows: a private Python), the kokoro-onnx package
+        (~60 MB with onnxruntime) and the model (~115 MB)."""
+        if self.preparing or not self.available() or (self.ready() and self._importable()):
+            if self.ready() and not self.preparing:
+                AVATAR["status"]["kokoro"] = "ready"
+            return
+        self.preparing = True
+
+        def work():
+            try:
+                os.makedirs(_avatar_path("kokoro"), exist_ok=True)
+                if self._frozen():
+                    self._setup_windows_python()
+                if not self._importable():
+                    AVATAR["status"]["kokoro"] = "installing the voice engine"
+                    r = subprocess.run([self.python(), "-m", "pip", "install", "--quiet", "--no-warn-script-location",
+                                        "kokoro-onnx>=0.4"], capture_output=True, text=True, timeout=1800,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    if r.returncode != 0 or not self._importable():
+                        raise OSError("installing kokoro-onnx failed: " + (r.stderr or r.stdout).strip()[-300:])
+                for name, url in KOKORO_FILES.items():
+                    if not os.path.isfile(_avatar_path("kokoro", name)):
+                        AVATAR["status"]["kokoro"] = f"downloading {name}"
+                        _download_file(url, _avatar_path("kokoro", name), {})
+                with open(_avatar_path("kokoro", "worker.py"), "w") as f:
+                    f.write(KOKORO_WORKER)
+                open(_avatar_path("kokoro", ".installed"), "w").close()
+                AVATAR["status"]["kokoro"] = "ready"
+                try:
+                    self.say("Hello.", "af_heart")          # load it now so the first reply is quick
+                except Exception:   # noqa: BLE001 - warming up is optional
+                    pass
+            except (OSError, subprocess.SubprocessError, urllib.error.URLError, zipfile.BadZipFile) as e:
+                AVATAR["status"]["kokoro"] = f"failed: {e}"
+                log(f"kokoro: {e}")
+            finally:
+                self.preparing = False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start(self):
+        import queue
+        self.stop()
+        with open(_avatar_path("kokoro", "worker.py"), "w") as f:     # always the version that matches this hub
+            f.write(KOKORO_WORKER)
+        self.proc = subprocess.Popen(
+            [self.python(), _avatar_path("kokoro", "worker.py"), _avatar_path("kokoro", "kokoro-v1.0.int8.onnx"),
+             _avatar_path("kokoro", "voices-v1.0.bin")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=_avatar_path("kokoro"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        lines = self.lines = queue.Queue()
+        out = self.proc.stdout
+
+        def reader():
+            for raw in iter(out.readline, b""):
+                lines.put(raw.decode("utf-8", "replace").strip())
+            lines.put(None)
+        threading.Thread(target=reader, daemon=True).start()
+        first = lines.get(timeout=180)          # loading the model takes a few seconds
+        if first != "ready":
+            self.stop()
+            raise RuntimeError("the Kokoro voice didn't start")
+
+    def stop(self):
+        if self.proc:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+        self.proc = None
+
+    def say(self, text, voice, speed=1.0):
+        import queue
+        text = speakable(text)
+        if not text:
+            return b""
+        out = _avatar_path("tts", uuid.uuid4().hex + ".wav")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with self.lock:
+            if not self.proc or self.proc.poll() is not None:
+                self._start()
+            req = {"text": text, "voice": voice if voice in KOKORO_VOICES else "af_heart",
+                   "speed": max(0.6, min(1.6, speed)), "lang": "en-gb" if voice.startswith("b") else "en-us", "out": out}
+            self.proc.stdin.write((json.dumps(req) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+            try:
+                line = self.lines.get(timeout=60)
+            except queue.Empty:
+                self.stop()
+                raise RuntimeError("the Kokoro voice took too long")
+            if line is None or line.startswith("error"):
+                if line is None:
+                    self.stop()
+                raise RuntimeError("Kokoro: " + (line or "stopped"))
+        try:
+            with open(out, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+
+
+KOKORO = KokoroTTS()
+
 
 
 def _tts_speakable_ok():
@@ -6068,6 +6535,7 @@ export function createAvatar(host, opts = {}) {
     get style() { return style; },
     setState(s) { state = s; call("setState", s); },
     setLevel(x) { level = x; call("setLevel", x); },
+    setVisemes(v) { call("setVisemes", v); },
     setCamera(c) { o.camera = c; call("setCamera", c); },
     setHeight(cm) { o.height = cm; call("setHeight", cm); },
     setLight(on) { o.light = !!on; call("setLight", o.light); },
@@ -6462,6 +6930,7 @@ async function createVRM(host, url, o) {
 
   // ---- what plays when
   let state = "idle", level = 0, mouth = 0, t = 0, raf = 0, last = performance.now(), fps = 60;
+  let visemes = null, visemesAt = 0; const vshape = {};
   let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
   let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
   const sm = { lean: 0, tilt: 0, nod: 0 };
@@ -6592,8 +7061,13 @@ async function createVRM(host, url, o) {
 
     // mouth follows the voice; the vowel shape changes a few times a second
     mouth = lerp(mouth, clamp(level * 1.6), level > mouth ? 0.55 : 0.25);
-    if (t > vowelAt) { vowel = ["aa", "aa", "oh", "ih", "ou", "ee"][Math.floor(Math.random() * 6)]; vowelAt = t + 0.09 + Math.random() * 0.12; }
-    for (const v of ["aa", "ih", "ou", "ee", "oh"]) setEx(v, Math.max(v === vowel ? mouth : (v === "aa" ? mouth * 0.3 : 0), extra[v] || 0));
+    const vis = visemes && performance.now() - visemesAt < 250 ? visemes : null;    // mouth shapes from the actual sound
+    if (!vis && t > vowelAt) { vowel = ["aa", "aa", "oh", "ih", "ou", "ee"][Math.floor(Math.random() * 6)]; vowelAt = t + 0.09 + Math.random() * 0.12; }
+    for (const v of ["aa", "ih", "ou", "ee", "oh"]) {
+      const shape = vis ? clamp(mouth * (vis[v] || 0) * 1.4) : (v === vowel ? mouth : (v === "aa" ? mouth * 0.3 : 0));
+      vshape[v] = lerp(vshape[v] || 0, shape, 0.45);
+      setEx(v, Math.max(vshape[v], extra[v] || 0));
+    }
 
     // feelings fade in and out
     if (t > emotionUntil) emotion = null;
@@ -6612,6 +7086,7 @@ async function createVRM(host, url, o) {
   return {
     setState(s) { state = s; },
     setLevel(x) { level = clamp(x); },
+    setVisemes(v) { visemes = v; visemesAt = performance.now(); },
     setCamera: m => setCamera(m),
     setHeight,
     setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); },
@@ -6627,13 +7102,64 @@ async function createVRM(host, url, o) {
 
 // ------------------------------------------------------------------ wake word (openWakeWord in the browser)
 // Same pipeline as the phone app: 80 ms chunks of 16 kHz audio -> mel spectrogram -> embeddings -> wake word score.
-export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, threshold = 0.5, isBusy = () => false, isSpeaking = () => false }) {
-  if (!window.ort) await new Promise((res, rej) => {
-    const s = document.createElement("script"); s.src = "/avatar/lib/ort/ort.wasm.min.js"; s.onload = res;
-    s.onerror = () => rej(new Error("the wake word engine isn't downloaded yet")); document.head.appendChild(s);
+let ortLoading = null;
+export function loadOrt() {     // ONNX Runtime Web, served by the StellAI server
+  if (window.ort) return Promise.resolve(window.ort);
+  if (!ortLoading) ortLoading = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = "/avatar/lib/ort/ort.wasm.min.js";
+    s.onload = () => { window.ort.env.wasm.wasmPaths = "/avatar/lib/ort/"; window.ort.env.wasm.numThreads = 1; res(window.ort); };
+    s.onerror = () => { ortLoading = null; rej(new Error("the speech engine files aren't downloaded yet")); }; document.head.appendChild(s);
   });
-  const ort = window.ort;
-  ort.env.wasm.wasmPaths = "/avatar/lib/ort/"; ort.env.wasm.numThreads = 1;
+  return ortLoading;
+}
+
+// ------------------------------------------------------------------ voice activity detection (Silero VAD)
+// prob(frame) -> 0..1 chance that a 512-sample (32 ms, 16 kHz) frame is speech. One model, many streams.
+let vadSession = null;
+export async function createVad() {
+  const ort = await loadOrt();
+  if (!vadSession) {
+    const r = await fetch("/avatar/lib/vad/silero_vad.onnx");
+    if (!r.ok) throw new Error("the speech detector isn't downloaded yet");
+    vadSession = await ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ["wasm"] });
+  }
+  const sess = vadSession;
+  return {
+    stream() {
+      let state = new Float32Array(2 * 128), ctx = new Float32Array(64), busy = Promise.resolve();
+      const sr = new ort.Tensor("int64", BigInt64Array.from([16000n]), []);
+      return {
+        reset() { state = new Float32Array(2 * 128); ctx = new Float32Array(64); },
+        prob(frame) {          // frame: Float32Array(512), -1..1
+          const run = async () => {
+            const x = new Float32Array(576); x.set(ctx, 0); x.set(frame, 64); ctx = frame.slice(448);
+            const out = await sess.run({ input: new ort.Tensor("float32", x, [1, 576]), state: new ort.Tensor("float32", state, [2, 1, 128]), sr });
+            state = Float32Array.from(out.stateN.data);
+            return out.output.data[0];
+          };
+          const p = busy.then(run, run); busy = p.catch(() => 0); return p;
+        },
+      };
+    },
+  };
+}
+
+/** Turns microphone audio at any sample rate into 16 kHz samples. */
+export function makeResampler(rate) {
+  const ratio = rate / 16000; let pos = 0, carry = new Float32Array(0);
+  return input => {
+    const all = new Float32Array(carry.length + input.length); all.set(carry, 0); all.set(input, carry.length);
+    const out = [];
+    while (pos + ratio <= all.length) { let s = 0; const a = Math.floor(pos), b = Math.floor(pos + ratio);
+      for (let j = a; j < b; j++) s += all[j]; out.push(s / Math.max(1, b - a)); pos += ratio; }
+    const used = Math.floor(pos); carry = all.slice(used); pos -= used;
+    return Float32Array.from(out);
+  };
+}
+
+export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, threshold = 0.5, isBusy = () => false, isSpeaking = () => false,
+                                        bargeIn = () => false, onBargeIn = null }) {
+  const ort = await loadOrt();
   const fetchModel = async (u, h) => { const r = await fetch(u, { headers: h }); if (!r.ok) throw new Error("couldn't load " + u.split("/").pop()); return new Uint8Array(await r.arrayBuffer()); };
   const opts = { executionProviders: ["wasm"] };
   const mel = await ort.InferenceSession.create(await fetchModel("/avatar/lib/oww/melspectrogram.onnx"), opts);
@@ -6667,15 +7193,27 @@ export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, 
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1);
-  const ratio = ctx.sampleRate / 16000; let pos = 0, carry = new Float32Array(0), pending = [], working = false, stopped = false;
+  const resample = makeResampler(ctx.sampleRate); let pending = [], working = false, stopped = false;
+  // Interrupting by talking: while Stella speaks, a speech detector listens for you (needs echo cancellation)
+  let vad = null, vbuf = [], speechRun = 0, vadBusy = false;
+  if (onBargeIn) createVad().then(v => { vad = v.stream(); }).catch(() => {});
+  async function bargeCheck(samples) {
+    if (!vad || !isSpeaking() || !bargeIn() || isBusy()) { vbuf = []; speechRun = 0; return; }
+    for (const x of samples) vbuf.push(x);
+    if (vadBusy) return; vadBusy = true;
+    try {
+      while (vbuf.length >= 512) {
+        const p = await vad.prob(Float32Array.from(vbuf.splice(0, 512)));
+        speechRun = p > 0.8 ? speechRun + 1 : Math.max(0, speechRun - 2);
+        if (speechRun >= 12) { speechRun = 0; vbuf = []; vad.reset(); onBargeIn(); break; }   // ~0.4 s of clear speech
+      }
+    } catch {} finally { vadBusy = false; }
+  }
   proc.onaudioprocess = ev => {
     if (stopped) return;
-    const inp = ev.inputBuffer.getChannelData(0), all = new Float32Array(carry.length + inp.length);
-    all.set(carry, 0); all.set(inp, carry.length);
-    const out = []; while (pos + ratio <= all.length) { let s = 0; const a = Math.floor(pos), b = Math.floor(pos + ratio);
-      for (let j = a; j < b; j++) s += all[j]; out.push((s / Math.max(1, b - a)) * 32767); pos += ratio; }
-    const used = Math.floor(pos); carry = all.slice(used); pos -= used;
-    for (const x of out) pending.push(x);
+    const out = resample(ev.inputBuffer.getChannelData(0));
+    bargeCheck(out);
+    for (const x of out) pending.push(x * 32767);
     if (pending.length > CHUNK * 6) pending.splice(0, pending.length - CHUNK * 6);   // falling behind: drop old audio
     pump();
   };
@@ -6741,7 +7279,18 @@ def make_http_handler(cfg, chats):
                         prepare_avatar() if voice == ac["voice"] else threading.Thread(
                             target=ensure_voice, args=(voice,), daemon=True).start()
                         return self.send_json(503, {"error": "The voice is still downloading", "status": AVATAR["status"]})
-                    wav = TTS.say(str(req.get("text", "")), voice, float(req.get("speed") or ac["speed"]))
+                    speed = float(req.get("speed") or ac["speed"])
+                    wav = None
+                    if (req.get("engine") or ac["engine"]) == "kokoro":
+                        if KOKORO.ready():
+                            try:
+                                wav = KOKORO.say(str(req.get("text", "")), req.get("kokoro_voice") or ac["kokoro_voice"], speed)
+                            except Exception as e:   # noqa: BLE001 - fall back to Piper rather than going silent
+                                log(f"kokoro failed, using Piper: {e}")
+                        else:
+                            KOKORO.prepare()
+                    if wav is None:
+                        wav = TTS.say(str(req.get("text", "")), voice, speed)
                 except (ValueError, TypeError) as e:
                     return self.send_json(400, {"error": str(e)})
                 except (RuntimeError, OSError) as e:

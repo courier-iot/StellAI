@@ -49,6 +49,7 @@ Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardw
 - **Tailscale**: install it on the PC and phone (same account) and pick the Tailscale address to use Stella away from home.
 - Closing the window keeps the server running in the tray. Right-click the tray icon → **Quit** to stop everything.
 - **Change model** to switch models or re-detect hardware (for example after adding a GPU).
+- **Kokoro voice**: pick it on the avatar screen (⚙ → Voice). The first time, StellAI downloads a private copy of Python (from python.org) and the Kokoro voice into `%LOCALAPPDATA%\StellAI\avatar\kokoro` (~200 MB); Piper speaks until it's ready.
 - **Avatar screen** opens Stella full screen with a face and voice (orb or your 3D character); see the main README.
 - **Check everything** runs the health check and shows what needs fixing.
 - **Back up now** / **Restore a backup…**: backups are also made every night into `%LOCALAPPDATA%\StellAI\backups` (last 14 kept).

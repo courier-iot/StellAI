@@ -92,6 +92,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
     }
     var sensitivity by rememberSaveable { mutableStateOf(s.wakeSensitivity) }
     var speak by rememberSaveable { mutableStateOf(s.speakReplies) }
+    var followUp by rememberSaveable { mutableStateOf(s.followUp) }
     var testResult by remember { mutableStateOf<String?>(null) }
 
     // Re-check permissions when returning from Android's settings pages.
@@ -118,6 +119,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
         s.wakeWord = wakeWord
         s.wakeSensitivity = sensitivity
         s.speakReplies = speak
+        s.followUp = followUp
         (context as? Activity)?.let { app.applySettings(it) }
         onDone()
     }
@@ -264,6 +266,9 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                 Hint("Raise sensitivity if it misses you; lower it if it wakes up by itself.")
             }
             SettingSwitch("Speak replies", "Read answers aloud when you asked by voice.", speak) { speak = it }
+            SettingSwitch("Keep listening after she answers",
+                "Reply without the wake word for a few seconds after she speaks. Saying \"thanks\" or \"that's all\" ends it.",
+                followUp) { followUp = it }
 
             Text("Default assistant", style = MaterialTheme.typography.labelLarge)
             Hint("Make StellAI your phone's assistant, so long-pressing the power or home button starts listening. Choose \"StellAI\" under Digital assistant app.")

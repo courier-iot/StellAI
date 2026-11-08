@@ -45,6 +45,7 @@ export function createAvatar(host, opts = {}) {
     get style() { return style; },
     setState(s) { state = s; call("setState", s); },
     setLevel(x) { level = x; call("setLevel", x); },
+    setVisemes(v) { call("setVisemes", v); },
     setCamera(c) { o.camera = c; call("setCamera", c); },
     setHeight(cm) { o.height = cm; call("setHeight", cm); },
     setLight(on) { o.light = !!on; call("setLight", o.light); },
@@ -439,6 +440,7 @@ async function createVRM(host, url, o) {
 
   // ---- what plays when
   let state = "idle", level = 0, mouth = 0, t = 0, raf = 0, last = performance.now(), fps = 60;
+  let visemes = null, visemesAt = 0; const vshape = {};
   let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
   let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
   const sm = { lean: 0, tilt: 0, nod: 0 };
@@ -569,8 +571,13 @@ async function createVRM(host, url, o) {
 
     // mouth follows the voice; the vowel shape changes a few times a second
     mouth = lerp(mouth, clamp(level * 1.6), level > mouth ? 0.55 : 0.25);
-    if (t > vowelAt) { vowel = ["aa", "aa", "oh", "ih", "ou", "ee"][Math.floor(Math.random() * 6)]; vowelAt = t + 0.09 + Math.random() * 0.12; }
-    for (const v of ["aa", "ih", "ou", "ee", "oh"]) setEx(v, Math.max(v === vowel ? mouth : (v === "aa" ? mouth * 0.3 : 0), extra[v] || 0));
+    const vis = visemes && performance.now() - visemesAt < 250 ? visemes : null;    // mouth shapes from the actual sound
+    if (!vis && t > vowelAt) { vowel = ["aa", "aa", "oh", "ih", "ou", "ee"][Math.floor(Math.random() * 6)]; vowelAt = t + 0.09 + Math.random() * 0.12; }
+    for (const v of ["aa", "ih", "ou", "ee", "oh"]) {
+      const shape = vis ? clamp(mouth * (vis[v] || 0) * 1.4) : (v === vowel ? mouth : (v === "aa" ? mouth * 0.3 : 0));
+      vshape[v] = lerp(vshape[v] || 0, shape, 0.45);
+      setEx(v, Math.max(vshape[v], extra[v] || 0));
+    }
 
     // feelings fade in and out
     if (t > emotionUntil) emotion = null;
@@ -589,6 +596,7 @@ async function createVRM(host, url, o) {
   return {
     setState(s) { state = s; },
     setLevel(x) { level = clamp(x); },
+    setVisemes(v) { visemes = v; visemesAt = performance.now(); },
     setCamera: m => setCamera(m),
     setHeight,
     setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); },
@@ -604,13 +612,64 @@ async function createVRM(host, url, o) {
 
 // ------------------------------------------------------------------ wake word (openWakeWord in the browser)
 // Same pipeline as the phone app: 80 ms chunks of 16 kHz audio -> mel spectrogram -> embeddings -> wake word score.
-export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, threshold = 0.5, isBusy = () => false, isSpeaking = () => false }) {
-  if (!window.ort) await new Promise((res, rej) => {
-    const s = document.createElement("script"); s.src = "/avatar/lib/ort/ort.wasm.min.js"; s.onload = res;
-    s.onerror = () => rej(new Error("the wake word engine isn't downloaded yet")); document.head.appendChild(s);
+let ortLoading = null;
+export function loadOrt() {     // ONNX Runtime Web, served by the StellAI server
+  if (window.ort) return Promise.resolve(window.ort);
+  if (!ortLoading) ortLoading = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = "/avatar/lib/ort/ort.wasm.min.js";
+    s.onload = () => { window.ort.env.wasm.wasmPaths = "/avatar/lib/ort/"; window.ort.env.wasm.numThreads = 1; res(window.ort); };
+    s.onerror = () => { ortLoading = null; rej(new Error("the speech engine files aren't downloaded yet")); }; document.head.appendChild(s);
   });
-  const ort = window.ort;
-  ort.env.wasm.wasmPaths = "/avatar/lib/ort/"; ort.env.wasm.numThreads = 1;
+  return ortLoading;
+}
+
+// ------------------------------------------------------------------ voice activity detection (Silero VAD)
+// prob(frame) -> 0..1 chance that a 512-sample (32 ms, 16 kHz) frame is speech. One model, many streams.
+let vadSession = null;
+export async function createVad() {
+  const ort = await loadOrt();
+  if (!vadSession) {
+    const r = await fetch("/avatar/lib/vad/silero_vad.onnx");
+    if (!r.ok) throw new Error("the speech detector isn't downloaded yet");
+    vadSession = await ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ["wasm"] });
+  }
+  const sess = vadSession;
+  return {
+    stream() {
+      let state = new Float32Array(2 * 128), ctx = new Float32Array(64), busy = Promise.resolve();
+      const sr = new ort.Tensor("int64", BigInt64Array.from([16000n]), []);
+      return {
+        reset() { state = new Float32Array(2 * 128); ctx = new Float32Array(64); },
+        prob(frame) {          // frame: Float32Array(512), -1..1
+          const run = async () => {
+            const x = new Float32Array(576); x.set(ctx, 0); x.set(frame, 64); ctx = frame.slice(448);
+            const out = await sess.run({ input: new ort.Tensor("float32", x, [1, 576]), state: new ort.Tensor("float32", state, [2, 1, 128]), sr });
+            state = Float32Array.from(out.stateN.data);
+            return out.output.data[0];
+          };
+          const p = busy.then(run, run); busy = p.catch(() => 0); return p;
+        },
+      };
+    },
+  };
+}
+
+/** Turns microphone audio at any sample rate into 16 kHz samples. */
+export function makeResampler(rate) {
+  const ratio = rate / 16000; let pos = 0, carry = new Float32Array(0);
+  return input => {
+    const all = new Float32Array(carry.length + input.length); all.set(carry, 0); all.set(input, carry.length);
+    const out = [];
+    while (pos + ratio <= all.length) { let s = 0; const a = Math.floor(pos), b = Math.floor(pos + ratio);
+      for (let j = a; j < b; j++) s += all[j]; out.push(s / Math.max(1, b - a)); pos += ratio; }
+    const used = Math.floor(pos); carry = all.slice(used); pos -= used;
+    return Float32Array.from(out);
+  };
+}
+
+export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, threshold = 0.5, isBusy = () => false, isSpeaking = () => false,
+                                        bargeIn = () => false, onBargeIn = null }) {
+  const ort = await loadOrt();
   const fetchModel = async (u, h) => { const r = await fetch(u, { headers: h }); if (!r.ok) throw new Error("couldn't load " + u.split("/").pop()); return new Uint8Array(await r.arrayBuffer()); };
   const opts = { executionProviders: ["wasm"] };
   const mel = await ort.InferenceSession.create(await fetchModel("/avatar/lib/oww/melspectrogram.onnx"), opts);
@@ -644,15 +703,27 @@ export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, 
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1);
-  const ratio = ctx.sampleRate / 16000; let pos = 0, carry = new Float32Array(0), pending = [], working = false, stopped = false;
+  const resample = makeResampler(ctx.sampleRate); let pending = [], working = false, stopped = false;
+  // Interrupting by talking: while Stella speaks, a speech detector listens for you (needs echo cancellation)
+  let vad = null, vbuf = [], speechRun = 0, vadBusy = false;
+  if (onBargeIn) createVad().then(v => { vad = v.stream(); }).catch(() => {});
+  async function bargeCheck(samples) {
+    if (!vad || !isSpeaking() || !bargeIn() || isBusy()) { vbuf = []; speechRun = 0; return; }
+    for (const x of samples) vbuf.push(x);
+    if (vadBusy) return; vadBusy = true;
+    try {
+      while (vbuf.length >= 512) {
+        const p = await vad.prob(Float32Array.from(vbuf.splice(0, 512)));
+        speechRun = p > 0.8 ? speechRun + 1 : Math.max(0, speechRun - 2);
+        if (speechRun >= 12) { speechRun = 0; vbuf = []; vad.reset(); onBargeIn(); break; }   // ~0.4 s of clear speech
+      }
+    } catch {} finally { vadBusy = false; }
+  }
   proc.onaudioprocess = ev => {
     if (stopped) return;
-    const inp = ev.inputBuffer.getChannelData(0), all = new Float32Array(carry.length + inp.length);
-    all.set(carry, 0); all.set(inp, carry.length);
-    const out = []; while (pos + ratio <= all.length) { let s = 0; const a = Math.floor(pos), b = Math.floor(pos + ratio);
-      for (let j = a; j < b; j++) s += all[j]; out.push((s / Math.max(1, b - a)) * 32767); pos += ratio; }
-    const used = Math.floor(pos); carry = all.slice(used); pos -= used;
-    for (const x of out) pending.push(x);
+    const out = resample(ev.inputBuffer.getChannelData(0));
+    bargeCheck(out);
+    for (const x of out) pending.push(x * 32767);
     if (pending.length > CHUNK * 6) pending.splice(0, pending.length - CHUNK * 6);   // falling behind: drop old audio
     pump();
   };

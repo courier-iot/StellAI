@@ -107,6 +107,21 @@ Stella gets a face and a voice: a full-screen page with an animated **space orb*
 
 **The voice** is [Piper](https://github.com/rhasspy/piper), a fast neural voice that runs on the server's CPU, private and offline. Six female voices (⚙ → Voice, with a ▶ preview) and adjustable speed. The first time the avatar screen opens, the server downloads the voice engine, a voice, the 3D and wake word files (~110 MB together); the health check shows the progress. Backups include your character, animations and avatar settings.
 
+## Talking with Stella
+
+Voice conversations are tuned to feel like talking, not dictating:
+
+- **Spoken style**: when you talk to her, she answers like a person speaking: one to three short sentences, no lists or markdown, and no slow "thinking" unless the question is genuinely hard. Ask for detail and she'll go deeper.
+- **Knows when you've finished**: a speech detector (Silero VAD on the avatar screen; loudness on the phone) waits longer when you trail off or say "um…", and answers quickly after a clear sentence.
+- **Transcribes while you talk**: on the avatar screen, finished phrases are transcribed while you keep talking, so the text is ready almost as soon as you stop.
+- **Starts speaking sooner**: she starts with the first natural phrase of her reply instead of waiting for a full sentence (phone and avatar screen), and the server keeps her voice loaded.
+- **"One sec, let me check"**: if she needs a tool (web search, reminders, files), she says so instead of going quiet.
+- **Follow-ups without the wake word**: after she answers, she keeps listening for about 5 seconds so you can just reply. "Thanks" or "that's all" ends it (she'll say "Anytime!"). Turn off in Settings (phone) or ⚙ → Conversation (avatar).
+- **Interrupt her by talking** (avatar screen, optional): just start speaking while she's talking. Best with a speakerphone that cancels echo, so she doesn't hear herself; off by default.
+- **Says things the way people do**: "5V" is "five volts", "3:30" is "three thirty", "$3k" is "three thousand dollars", "e.g." is "for example"; emoji, symbols and links are left out.
+- **Mouth shapes from the sound**: the 3D character's lips follow the actual sounds of her voice (open, round or wide), not just the volume.
+- **Kokoro voice** (optional, Linux and Windows servers): ⚙ → Voice → Kokoro for a noticeably more natural voice (7 female voices). The server sets it up once in the background (Linux: ~175 MB into its own Python; Windows: ~200 MB including a small private copy of Python, since the Windows app has none of its own) and Piper keeps speaking until it's ready; if Kokoro ever fails, Piper takes over. Kokoro runs as its own process, so it can't slow down or crash the rest of the server.
+
 ## Search past chats
 
 Type in the search box at the top of the drawer (phone) or sidebar (desktop). Titles match instantly; the server also searches what was said in every chat, by keywords and by meaning, and shows the matching passage. Stella can search too: ask "what did we decide about the power supply last week?" and she looks through earlier chats (the `search_chats` tool). New messages are indexed within a minute.

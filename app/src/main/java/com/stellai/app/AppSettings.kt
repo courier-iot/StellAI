@@ -23,6 +23,8 @@ class AppSettings(context: Context) {
     var wakeWord by stringPref("wake_word", "hey_jarvis")
     var wakeSensitivity by intPref("wake_sensitivity", 1)
     var speakReplies by boolPref("speak_replies", true)
+    /** After a spoken answer, keep listening for a reply without the wake word. */
+    var followUp by boolPref("follow_up", true)
 
     var lastConversation by stringPref("last_conversation", "")
 

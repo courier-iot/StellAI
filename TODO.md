@@ -26,6 +26,9 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 ## Done
 
+- [x] **Natural voice conversations**: spoken reply style, smarter end-of-speech, transcribing while you talk, speaking sooner, "let me check" acknowledgements, follow-ups without the wake word, interrupt by talking, speech-friendly text, sound-based mouth shapes, optional Kokoro voice.
+
+- [ ] **Voice, later (needs more GPU)**: full-duplex speech models (listening and talking at once, natural "mm-hm"s), e.g. Moshi, once the Tesla T4 is in.
 - [ ] **Your animation ideas**: hand-made versions of the list you're putting together (send it over).
 - [x] **Avatar animations, wake word, light mode, height**: built-in gestures plus uploaded .vrma/Mixamo .fbx with when-to-play; wake word in the browser (openWakeWord via ONNX Runtime Web); automatic light mode on a Pi; height (default 5′8″); CM5/Raspberry Pi display setup script.
 - [x] **Avatar screen**: full-screen orb or 3D VRM character with Piper voice and lip sync; on the server PC, a spare phone/tablet (app), any browser or a Raspberry Pi kiosk; speaks replies from every device.

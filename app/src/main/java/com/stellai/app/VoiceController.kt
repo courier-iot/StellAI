@@ -51,12 +51,20 @@ class VoiceController(private val app: App) {
         if (on) ensureRunning()
     }
 
-    /** Record one command now (mic button, power-button assist). */
-    fun listenNow() {
+    @Volatile
+    private var followUpListen = false
+
+    /**
+     * Record one command now (mic button, power-button assist). [followUp]: right after Stella answered,
+     * listening for a reply without the wake word; it ends quietly if you don't say anything.
+     */
+    fun listenNow(followUp: Boolean = false) {
         if (!hasMicPermission()) {
-            lastError = "Microphone permission is needed"
+            if (!followUp) lastError = "Microphone permission is needed"
             return
         }
+        if (followUp && (phase == VoicePhase.LISTENING || phase == VoicePhase.TRANSCRIBING)) return
+        followUpListen = followUp
         cancelCapture = false
         listenRequested.set(true)
         ensureRunning()
@@ -194,13 +202,16 @@ class VoiceController(private val app: App) {
     /** Records until the user stops talking, transcribes on the laptop, sends to the chat. */
     private fun handleCommand(recorder: AudioRecord, preRoll: ShortArray) {
         cancelCapture = false
+        val followUp = followUpListen
+        followUpListen = false
         main.post { app.speaker.stop() }
-        beep(ToneGenerator.TONE_PROP_BEEP)
+        if (!followUp) beep(ToneGenerator.TONE_PROP_BEEP)
         updatePhase(VoicePhase.LISTENING)
 
-        val pcm = recordUtterance(recorder, preRoll)
+        val pcm = recordUtterance(recorder, preRoll, if (followUp) 5_000 else 6_000)
         if (pcm == null) {
-            if (!cancelCapture) beep(ToneGenerator.TONE_PROP_NACK)
+            if (!cancelCapture && !followUp) beep(ToneGenerator.TONE_PROP_NACK)
+            app.avatarEvent("idle")
             return
         }
         beep(ToneGenerator.TONE_PROP_ACK)
@@ -216,17 +227,27 @@ class VoiceController(private val app: App) {
         }
         val command = stripWakeWord(text)
         if (command.isBlank()) {
-            beep(ToneGenerator.TONE_PROP_NACK)
+            if (!followUp) beep(ToneGenerator.TONE_PROP_NACK)
+            app.avatarEvent("idle")
+            return
+        }
+        // "thanks", "that's all": the conversation is over
+        if (followUp && END_PHRASE.matches(command.trim())) {
+            app.avatarEvent("idle")
+            if (Regex("(?i)thank|cheers").containsMatchIn(command) && app.settings.speakReplies && !app.avatarScreenOpen) {
+                main.post { app.speaker.speak(listOf("Anytime!", "You're welcome!", "Happy to help.").random()) }
+            }
             return
         }
         main.post { app.engine.send(command, fromVoice = true) }
     }
 
     /**
-     * Simple voice activity detection: wait up to 6 s for speech, then stop
-     * after 0.9 s of quiet (or 15 s total).
+     * Voice activity detection: wait up to [waitMs] for speech, then stop once you've finished. It waits longer
+     * (1.25 s) when you've only said a little or trailed off with a short sound ("um…"), and answers quicker
+     * (0.75 s) after a clear phrase. 30 s at most.
      */
-    private fun recordUtterance(recorder: AudioRecord, preRoll: ShortArray): ShortArray? {
+    private fun recordUtterance(recorder: AudioRecord, preRoll: ShortArray, waitMs: Int = 6_000): ShortArray? {
         val out = ShortBuilder(RATE * 4)
         out.add(preRoll, preRoll.size)
         val frame = ShortArray(RATE / 50) // 20 ms
@@ -235,20 +256,28 @@ class VoiceController(private val app: App) {
         var silenceMs = 0
         var elapsed = 0
         var started = false
-        while (elapsed < 15_000) {
+        var burstMs = 0
+        var lastBurstMs = 0
+        while (elapsed < 30_000) {
             if (cancelCapture) return null
             if (!readFully(recorder, frame)) return null
             out.add(frame, frame.size)
             elapsed += 20
             if (rms(frame, frame.size) > threshold) {
                 speechMs += 20
+                burstMs += 20
                 silenceMs = 0
                 if (speechMs >= 120) started = true
             } else {
+                if (burstMs > 0) {
+                    lastBurstMs = burstMs
+                    burstMs = 0
+                }
                 silenceMs += 20
             }
-            if (!started && elapsed >= 6_000) return null
-            if (started && silenceMs >= 900) break
+            if (!started && elapsed >= waitMs) return null
+            val needMs = if (speechMs < 800 || lastBurstMs < 350) 1_250 else 750
+            if (started && silenceMs >= needMs) break
         }
         return if (started) out.toArray() else null
     }
@@ -321,6 +350,9 @@ class VoiceController(private val app: App) {
         )
 
         /** The recording starts slightly before the wake word ends; drop it from the text. */
+        /** What ends a follow-up conversation instead of being sent to Stella. */
+        val END_PHRASE = Regex("(?i)^(ok(ay)?[, ]+)?(thanks|thank you( very much| so much)?|thanks a lot|cheers|that'?s (all|it)|nothing|" +
+            "no( thanks| thank you)?|never ?mind|stop|good ?bye|bye( bye)?|i'?m good|all good)[.!, ]*(stella)?[.!]*$")
         fun stripWakeWord(text: String): String = text.replace(WAKE_PREFIX, "").trim()
 
         fun rms(data: ShortArray, n: Int): Double {

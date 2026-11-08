@@ -424,7 +424,7 @@ function buildHistory(list) {
   }
   flush(); return out;
 }
-async function prepare(convId, images) {
+async function prepare(convId, images, voice = false) {
   const c = S.convs.get(convId); const mode = modeById(c.mode); const list = msgsOf(convId);
   let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
   const summary = last >= 0 ? list[last].text : "";
@@ -435,7 +435,7 @@ async function prepare(convId, images) {
   let plan = null;
   try {
     plan = await api("/context", { method: "POST", json: { project_id: c.project_id || "", query, fixed: base, images, mode: mode.id,
-      mode_tools: mode.tools || "all", split: true, sticky, thinking: thinkPref(mode),
+      mode_tools: mode.tools || "all", split: true, sticky, thinking: voice ? "auto" : thinkPref(mode),
       last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), messages: history.map(h => ({ role: h.role, content: h.content })) } });
   } catch { plan = null; }
   let start = 0, info = null, needsRefresh = false, names = null, projectText = "", memory = oldMemorySection(), extra = "";
@@ -452,6 +452,7 @@ async function prepare(convId, images) {
     needsRefresh = history.filter(h => h.role === "user").length >= 2 && (start > 0 || used > limit * 0.85);
   } else start = Math.max(0, history.length - 24);
   const tools = S.tools.filter(t => !names || names.includes(t.function.name));
+  if (voice) { extra = (extra ? extra + "\n" : "") + VOICE_STYLE; if (!plan) think = false; }
   const hist = withTurnContext(history.slice(start), extra);
   return { system: systemPrompt(projectText, summary, mode, memory), history: hist, info, needsRefresh, tools, mode, think };
 }
@@ -505,7 +506,8 @@ async function send() {
   for (const p of photos) { try { await api(`/images/${p.id}.jpg`, { method: "PUT", body: p.blob, headers: { "Content-Type": "image/jpeg" } }); } catch (e) { notice("Couldn't upload a photo: " + e.message); } }
   addMsg(convId, "user", (text + photos.map(p => `\n![photo](image:${p.id})`).join("")).trim());
   renderSide(); renderMsgs();
-  await run(convId, photos);
+  const voice = !!S.voiceNext; S.voiceNext = false;
+  await run(convId, photos, voice);
 }
 function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
@@ -519,15 +521,15 @@ function truncateFrom(id) {
   const now = nextTs(); list.slice(i).forEach(m => saveMsg({ ...m, deleted: true, text: "", reasoning: "", updated_at: now }));
 }
 
-async function run(convId, photos) {
+async function run(convId, photos, voice = false) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
-  SPEAK.cancel(); postAvatar({ state: "thinking" });
+  SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
-    let p = await prepare(convId, photos.length);
+    let p = await prepare(convId, photos.length, voice);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
-      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
+      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
     }
     if (p.info) S.context = p.info;
     const st = S.sticky.get(convId) || new Set(); p.tools.forEach(t => st.add(t.function.name)); S.sticky.set(convId, st);
@@ -549,12 +551,15 @@ async function run(convId, photos) {
         tools: p.tools, chat_template_kwargs: { enable_thinking: thinking },
         temperature: p.mode.temperature != null ? p.mode.temperature : (thinking ? (code ? 0.6 : 1.0) : 0.7),
         top_p: thinking ? 0.95 : 0.8, top_k: 20, min_p: 0, presence_penalty: code ? 0 : 1.5 };
+      if (voice && !thinking) body.max_tokens = 700;
       const result = await stream(body);
       const finalText = result.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
       S.streaming = null;
       if (AVATAR_MODE) { SPEAK.feed(finalText, true); avatarCaption(finalText); if (finalText && AV.avatar) AV.avatar.react(finalText); }
       if (finalText && !result.toolCalls.length) postAvatar({ state: "reply", text: finalText });
       if (finalText || !result.toolCalls.length) addMsg(convId, "assistant", finalText || "(no reply)", result.reasoning);
+      // checking something takes a moment: say so instead of going quiet
+      if (voice && AVATAR_MODE && SPEAK.enabled && result.toolCalls.length && !SPEAK.saidAny) SPEAK.say(ACKS[Math.floor(Math.random() * ACKS.length)]);
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
       turn.push(assistant); renderMsgs();
@@ -594,6 +599,7 @@ async function run(convId, photos) {
     if (S.stopRequested) S.error = "Stopped.";
     S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
     postAvatar({ state: "idle" });
+    if (voice && !S.stopRequested && !S.error) startFollowUp();
     touch(convId); renderSide(); renderMsgs(); renderBar();
     sync().then(updateMeter);
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
@@ -948,75 +954,133 @@ $("#wrap").onclick = e => {
 };
 
 // ---------------------------------------------------------------- voice input (microphone → Whisper on the server)
+// A speech detector (Silero VAD, or loudness if it isn't downloaded) decides when you've finished: it waits longer
+// when you trail off or say a short "um", and answers quickly after a clear sentence. While you're still talking,
+// finished phrases are already being transcribed, so the text is ready almost as soon as you stop.
 const MIC = { rec: null };
+const VOICE_STYLE = "Voice conversation: the user said this out loud and will hear your reply spoken. Answer the way a person talks: " +
+  "usually one to three short sentences, warm and natural, with contractions. No markdown, lists, headings, tables, code or links. " +
+  "If the answer needs detail, give the key point first and offer to go into more detail or put it on screen.";
+const END_PHRASE = /^(ok(ay)?[, ]+)?(thanks|thank you( very much| so much)?|thanks a lot|cheers|that'?s (all|it)|nothing|no( thanks| thank you)?|never ?mind|stop|good ?bye|bye( bye)?|i'?m good|all good)[.!, ]*(stella)?[.!]*$/i;
+const ACKS = ["One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.", "Let me check."];
 function micHelp() {
   alertBox("The microphone only works on a secure page. Options: open the chat on the server computer itself " +
     "(http://localhost:8092), use Tailscale HTTPS (run 'sudo tailscale serve --bg 8092' on the server and open the https://… address it shows), " +
     "or in Chrome open chrome://flags/#unsafely-treat-insecure-origin-as-secure, add this address (" + location.origin + ") and restart Chrome.");
 }
-async function micToggle() {
+async function getVad() {
+  if (MIC.vad !== undefined) return MIC.vad;
+  try { const mod = await import("/avatar/avatar.js"); MIC.vad = await mod.createVad(); } catch { MIC.vad = null; }
+  return MIC.vad;
+}
+async function transcribePcm(int16) {
+  const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
+    "Content-Type": "application/octet-stream" }, body: int16.buffer });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return (j.text || "").trim();
+}
+async function micToggle(opts = {}) {
   if (MIC.rec) { MIC.rec.stop(); return; }
-  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { micHelp(); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (!opts.followup) micHelp(); return; }
+  const followup = !!opts.followup;
   if (S.busy) stop();
   SPEAK.cancel();
   let streamIn;
-  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } }); }
-  catch (e) { alertBox("Couldn't use the microphone: " + e.message); return; }
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }); }
+  catch (e) { if (!followup) alertBox("Couldn't use the microphone: " + e.message); return; }
+  const mod = await import("/avatar/avatar.js");
+  const vadModel = await getVad(), vad = vadModel ? vadModel.stream() : null;
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = ctx.createMediaStreamSource(streamIn);
-  const proc = ctx.createScriptProcessor(4096, 1, 1);
-  const chunks = []; let heard = false, quietSince = 0, startedAt = performance.now(), done = false;
+  const src = ctx.createMediaStreamSource(streamIn), proc = ctx.createScriptProcessor(4096, 1, 1);
+  const resample = mod.makeResampler(ctx.sampleRate);
+  const SR = 16000, FRAME = 512;
+  let audio = new Float32Array(SR * 32), n = 0;              // everything heard, at 16 kHz
+  let frameAt = 0, noise = 0.004, heard = false, speech = 0, lastSpeech = 0, burstStart = -1, lastBurst = 0, speechRun = 0, done = false;
+  let segStart = 0, segCutFor = -1; const segments = [];     // phrases sent for transcription while you keep talking
+  const startedAt = performance.now();
+  const toInt16 = (a, b) => { const out = new Int16Array(Math.max(0, b - a)); for (let i = a; i < b; i++) out[i - a] = Math.max(-1, Math.min(1, audio[i])) * 32767; return out; };
+  let working = false;
+  async function analyse() {
+    if (working) return; working = true;
+    try {
+      while (!done && n - frameAt >= FRAME) {
+        const f = audio.subarray(frameAt, frameAt + FRAME);
+        let rms = 0; for (let i = 0; i < FRAME; i += 2) rms += f[i] * f[i]; rms = Math.sqrt(rms / (FRAME / 2));
+        AV.micLevel = Math.min(1, rms * 8);
+        let p;
+        if (vad) { try { p = await vad.prob(Float32Array.from(f)); } catch { p = rms > Math.max(0.02, noise * 3) ? 0.9 : 0.1; } }
+        else p = rms > Math.max(0.02, noise * 3) ? 0.9 : 0.1;
+        if (p < 0.3) noise = noise * 0.97 + rms * 0.03;
+        const t = (frameAt + FRAME) / SR;
+        if (p > 0.5) { speechRun++; if (speechRun >= 2) { if (!heard) { heard = true; } speech += FRAME / SR; lastSpeech = t; if (burstStart < 0) burstStart = t; } }
+        else { speechRun = 0; if (burstStart >= 0 && t - lastSpeech > 0.15) { lastBurst = lastSpeech - burstStart; burstStart = -1; } }
+        frameAt += FRAME;
+        if (heard) {
+          const quiet = t - lastSpeech;
+          // a phrase just ended mid-sentence: start transcribing it now
+          if (quiet >= 0.4 && segCutFor !== lastSpeech && (lastSpeech * SR) - segStart > SR * 1.2) {
+            segCutFor = lastSpeech;
+            const cut = Math.floor((lastSpeech + 0.2) * SR); segments.push(transcribePcm(toInt16(segStart, cut)).catch(() => "")); segStart = cut;
+          }
+          const need = speech < 0.8 || (burstStart < 0 && lastBurst < 0.35) ? 1.25 : 0.75;    // "um…" or a short start: wait longer
+          if (quiet >= need) { rec.stop(); break; }
+        } else if (t > (followup ? 5 : 8)) { rec.stop(); break; }
+        if (t > 30) { rec.stop(); break; }
+      }
+    } finally { working = false; }
+  }
   proc.onaudioprocess = ev => {
-    const d = ev.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d));
-    let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] * d[i];
-    const rms = Math.sqrt(sum / (d.length / 4)); AV.micLevel = Math.min(1, rms * 8);
-    const now = performance.now();
-    if (rms > 0.02) { heard = true; quietSince = now; }
-    if ((heard && now - quietSince > 1300) || now - startedAt > 30000 || (!heard && now - startedAt > 8000)) rec.stop();
+    if (done) return;
+    const out = resample(ev.inputBuffer.getChannelData(0));
+    if (n + out.length > audio.length) { const bigger = new Float32Array(audio.length * 2); bigger.set(audio.subarray(0, n)); audio = bigger; }
+    audio.set(out, n); n += out.length;
+    analyse();
   };
   src.connect(proc); proc.connect(ctx.destination);
   const rec = MIC.rec = {
     async stop() {
       if (done) return; done = true; MIC.rec = null; AV.micLevel = 0;
       try { proc.disconnect(); src.disconnect(); } catch {}
-      streamIn.getTracks().forEach(t => t.stop());
-      const rate = ctx.sampleRate; ctx.close();
+      streamIn.getTracks().forEach(t => t.stop()); ctx.close();
       $("#mic").classList.remove("on"); updateAvatarState();
-      if (!heard) return;
-      const len = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(len); let o = 0;
-      for (const c of chunks) { all.set(c, o); o += c.length; }
-      const ratio = rate / 16000, out = new Int16Array(Math.floor(len / ratio));
-      for (let i = 0; i < out.length; i++) {   // average the samples that fall into each 16 kHz sample
-        const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio)); let s = 0;
-        for (let j = a; j < b; j++) s += all[j];
-        out[i] = Math.max(-1, Math.min(1, s / Math.max(1, b - a))) * 32767;
-      }
+      if (!heard) { if (!followup) avatarCaption(""); postAvatar({ state: "idle" }); return; }
+      const end = Math.min(n, Math.floor((lastSpeech + 0.3) * SR));
+      if (end - segStart > SR * 0.2) segments.push(transcribePcm(toInt16(segStart, end)).catch(e => { notice("Couldn't transcribe: " + e.message); return ""; }));
       S.status = "Listening… transcribing"; renderBar(); avatarCaption("…", "you");
-      try {
-        const r = await fetch("/transcribe", { method: "POST", headers: { Authorization: "Bearer " + KEY, "X-Sample-Rate": "16000",
-          "Content-Type": "application/octet-stream" }, body: out.buffer });
-        const j = await r.json(); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
-        S.status = ""; renderBar();
-        const text = (j.text || "").trim();
-        if (!text) { avatarCaption("(didn't catch that)", "you"); return; }
-        $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
-        avatarCaption(text, "you");
-        send();
-      } catch (e) { S.status = ""; renderBar(); notice("Couldn't transcribe: " + e.message); }
+      const text = (await Promise.all(segments)).filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      S.status = ""; renderBar();
+      if (!text) { avatarCaption("(didn't catch that)", "you"); postAvatar({ state: "idle" }); return; }
+      avatarCaption(text, "you");
+      if (followup && END_PHRASE.test(text)) {      // "thanks", "that's all": the conversation is over
+        postAvatar({ state: "idle" });
+        if (/thank|cheers/i.test(text) && AV.cfg.speak) { SPEAK.enabled = true; SPEAK.say(["Anytime!", "You're welcome!", "Happy to help."][Math.floor(Math.random() * 3)]); }
+        return;
+      }
+      $("#input").value = ($("#input").value ? $("#input").value + " " : "") + text; autosize();
+      S.voiceNext = AVATAR_MODE && !!AV.cfg.speak; send();    // spoken replies get the spoken style
     },
   };
   $("#mic").classList.add("on"); updateAvatarState();
   postAvatar({ state: "listening" });
+  if (followup) avatarStatus("");
+}
+// After a spoken answer, keep listening for a few seconds so you can reply without the wake word
+function startFollowUp() {
+  if (!AVATAR_MODE || !AV.cfg.followup || !window.isSecureContext) return;
+  const go = () => { if (!MIC.rec && !S.busy) micToggle({ followup: true }); };
+  const wait = () => SPEAK.speaking ? setTimeout(wait, 150) : setTimeout(go, 250);
+  wait();
 }
 
-// ---------------------------------------------------------------- Stella's voice (Piper on the server)
+// ---------------------------------------------------------------- Stella's voice (Piper or Kokoro on the server)
 const SPEAK = {
-  ctx: null, analyser: null, data: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  ctx: null, analyser: null, data: null, freq: null, queue: [], playing: null, fed: 0, gen: 0, busyFetch: 0, enabled: false, onIdle: null,
+  firstDone: false, saidAny: false,
   audio() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       this.analyser = this.ctx.createAnalyser(); this.analyser.fftSize = 512; this.analyser.connect(this.ctx.destination);
-      this.data = new Uint8Array(this.analyser.fftSize);
+      this.data = new Uint8Array(this.analyser.fftSize); this.freq = new Uint8Array(this.analyser.frequencyBinCount);
     }
     return this.ctx;
   },
@@ -1026,9 +1090,24 @@ const SPEAK = {
     for (let i = 0; i < this.data.length; i++) { const v = (this.data[i] - 128) / 128; s += v * v; }
     return Math.min(1, Math.sqrt(s / this.data.length) * 4);
   },
+  // Rough mouth shapes from the sound: where the energy sits (low/mid/high) says open "aa", round "oh/ou" or wide "ee/ih"
+  visemes() {
+    if (!this.playing || !this.analyser) return null;
+    this.analyser.getByteFrequencyData(this.freq);
+    const hz = this.ctx.sampleRate / this.analyser.fftSize, band = (a, b) => { let s = 0; for (let i = Math.floor(a / hz); i < Math.min(this.freq.length, b / hz); i++) s += this.freq[i]; return s; };
+    const L = band(200, 800), M = band(800, 1700), H = band(1700, 4000), e = L + M + H;
+    if (e < 400) return null;
+    const l = L / e, m = M / e, h = H / e, c = (x) => Math.max(0, Math.min(1, x));
+    const v = { aa: c((m - 0.22) * 3.5), oh: c((l - 0.42) * 3) * c(1 - h * 2.5), ou: c((l - 0.6) * 4), ee: c((h - 0.28) * 3.5), ih: c((h - 0.18) * 3) * 0.6 };
+    const sum = Object.values(v).reduce((a, b) => a + b, 0) || 1;
+    for (const k in v) v[k] /= sum;
+    return v;
+  },
   get speaking() { return !!this.playing || this.queue.length > 0 || this.busyFetch > 0; },
   begin() { this.fed = 0; },
-  // Speak finished sentences of a reply that's still streaming in; finish() says the rest
+  newReply() { this.firstDone = false; this.saidAny = false; },
+  // Speak a reply while it's still streaming in. The first bit goes as soon as there's a natural phrase
+  // (up to a comma), so she starts talking sooner; after that, whole sentences.
   feed(text, finish = false) {
     if (!this.enabled) return;
     let rest = text.slice(this.fed);
@@ -1037,8 +1116,9 @@ const SPEAK = {
     let cut = -1;
     if (finish) cut = rest.length;
     else {
-      const rx = /[.!?…:;]["')\]]?\s+|\n{2,}/g; let m;
-      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= 40 || /\n/.test(m[0])) { cut = m.index + m[0].length; } }
+      const rx = this.firstDone ? /[.!?…:;]["')\]]?\s+|\n{2,}/g : /[.!?…:;,—]["')\]]?\s+|\n{2,}/g;
+      const min = this.firstDone ? 40 : 24; let m;
+      while ((m = rx.exec(rest))) { if (m.index + m[0].length >= min || /\n/.test(m[0])) { cut = m.index + m[0].length; if (!this.firstDone) break; } }
       const fence = rest.indexOf("```"); if (fence >= 0 && (cut < 0 || fence < cut)) {
         const close = rest.indexOf("```", fence + 3);
         if (close < 0) cut = fence > 0 ? fence : -1; else cut = close + 3;
@@ -1046,12 +1126,12 @@ const SPEAK = {
     }
     if (cut <= 0) return;
     const piece = rest.slice(0, cut); this.fed += cut;
-    if (piece.trim()) this.say(piece);
+    if (piece.trim()) { this.firstDone = true; this.say(piece); }
   },
   say(text) {
-    const gen = this.gen; this.busyFetch++;
+    const gen = this.gen; this.busyFetch++; this.saidAny = true;
     const p = fetch("/tts", { method: "POST", headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed }) })
+      body: JSON.stringify({ text, voice: AV.cfg.voice, speed: AV.cfg.speed, engine: AV.cfg.engine, kokoro_voice: AV.cfg.kokoro_voice }) })
       .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ("HTTP " + r.status)); } return r.arrayBuffer(); })
       .then(buf => buf.byteLength > 44 ? this.audio().decodeAudioData(buf) : null)
       .catch(e => { if (gen === this.gen) avatarStatus("Voice: " + e.message); return null; })
@@ -1154,6 +1234,7 @@ async function startWake() {
       threshold: 1 - AV.cfg.wake_sensitivity,
       isBusy: () => !!MIC.rec, isSpeaking: () => SPEAK.speaking,
       onWake: () => { chime(); if (SPEAK.speaking) SPEAK.cancel(); if (!MIC.rec) micToggle(); },
+      bargeIn: () => !!AV.cfg.barge_in, onBargeIn: () => { SPEAK.cancel(); if (S.busy) stop(); if (!MIC.rec) micToggle({ followup: true }); },
       onError: e => { WAKE.error = e.message; },
     });
   } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
@@ -1209,11 +1290,19 @@ function openAvatarSettings() {
       <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
       <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
     <h3 class="hud" style="margin-top:16px">Voice</h3>
-    <div style="display:flex;gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select><button id="hear">▶ Hear</button></div>
+    <select id="eng" style="margin-bottom:6px"><option value="piper" ${c.engine !== "kokoro" ? "selected" : ""}>Piper: fast, works everywhere</option>
+      ${c.kokoro_available ? `<option value="kokoro" ${c.engine === "kokoro" ? "selected" : ""}>Kokoro: more natural (one-time download ~175 MB)</option>` : ""}</select>
+    ${c.engine === "kokoro" && (c.status || {}).kokoro && c.status.kokoro !== "ready" ? `<p class="sub">Kokoro: ${esc(c.status.kokoro)}… (Piper speaks until it's ready)</p>` : ""}
+    <div id="kokBox" style="display:${c.engine === "kokoro" ? "flex" : "none"};gap:8px;margin-bottom:6px"><select id="kv">${(c.kokoro_voices || []).map(v => `<option value="${v.id}" ${c.kokoro_voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
+    <div id="piperBox" style="display:${c.engine === "kokoro" ? "none" : "flex"};gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
+    <button id="hear" style="margin-top:6px">▶ Hear this voice</button>
     <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
     <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="oth" style="width:auto" ${c.speak_others ? "checked" : ""}> Also speak replies to the phone and other devices</label>
+    <h3 class="hud" style="margin-top:16px">Conversation</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fu" style="width:auto" ${c.followup ? "checked" : ""}> Keep listening after she answers, so you can reply without the wake word ("thanks" or "that's all" ends it)</label>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bi" style="width:auto" ${c.barge_in ? "checked" : ""}> Interrupt her by talking (best with a speakerphone that cancels echo)</label>
     <h3 class="hud" style="margin-top:16px">Wake word</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="wk" style="width:auto" ${c.wake ? "checked" : ""}> Listen for a wake word on this screen</label>
     <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
@@ -1260,19 +1349,21 @@ function openAvatarSettings() {
     }
     d.remove(); await loadAvatarConfig(); openAvatarSettings();
   };
+  $d("#eng").onchange = e => { const k = e.target.value === "kokoro"; $d("#kokBox").style.display = k ? "flex" : "none"; $d("#piperBox").style.display = k ? "none" : "flex"; };
   $d("#hear").onclick = () => {
     const was = SPEAK.enabled; SPEAK.enabled = true; SPEAK.cancel();
-    const prevVoice = AV.cfg.voice, prevSpeed = AV.cfg.speed;
-    AV.cfg.voice = $d("#vc").value; AV.cfg.speed = +$d("#sp").value;
-    SPEAK.say(`Hi, I'm ${NAME()}. This is how I sound.`);
-    AV.cfg.voice = prevVoice; AV.cfg.speed = prevSpeed; SPEAK.enabled = was;
+    const prev = { voice: AV.cfg.voice, speed: AV.cfg.speed, engine: AV.cfg.engine, kokoro_voice: AV.cfg.kokoro_voice };
+    Object.assign(AV.cfg, { voice: $d("#vc").value, speed: +$d("#sp").value, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : prev.kokoro_voice });
+    SPEAK.say(`Hi, I'm ${NAME()}. It's 3:30 and the board is running at 5V. This is how I sound.`);
+    Object.assign(AV.cfg, prev); SPEAK.enabled = was;
   };
   $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
   $d("#save").onclick = async () => {
     try {
       AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
         speed: +$d("#sp").value, speak: $d("#spk").checked, speak_others: $d("#oth").checked, height_cm: +$d("#ht").value,
-        gestures: $d("#ges").checked, wake: $d("#wk").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+        gestures: $d("#ges").checked, wake: $d("#wk").checked, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : undefined,
+        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
       d.remove(); loadAvatarConfig();
     } catch (e) { alertBox(e.message); }
   };
@@ -1300,7 +1391,7 @@ async function startAvatarScreen() {
   }
   setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
   (function loop() {
-    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); updateAvatarState(); }
+    if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); if (!MIC.rec) { const v = SPEAK.visemes(); if (v) AV.avatar.setVisemes(v); } updateAvatarState(); }
     requestAnimationFrame(loop);
   })();
   $("#avChat").onclick = () => document.body.classList.toggle("showchat");

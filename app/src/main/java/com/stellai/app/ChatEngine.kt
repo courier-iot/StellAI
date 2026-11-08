@@ -319,6 +319,10 @@ class ChatEngine(private val app: App) {
         val turn = mutableListOf<JSONObject>() // this turn's tool calls and results, in API format
         var finalReply = ""
         app.avatarEvent("thinking", voice = fromVoice)
+        // Spoken replies start as soon as the first phrase arrives (not after the whole answer)
+        val speakOut = fromVoice && app.settings.speakReplies && !app.avatarScreenOpen
+        val feeder = SentenceFeeder { piece -> main.post { app.speaker.enqueue(piece) } }
+        if (speakOut) main.post { app.speaker.stop() }
         try {
             withContext(Dispatchers.IO) {
                 // Share new photos with your other devices (the model gets them directly below).
@@ -346,12 +350,14 @@ class ChatEngine(private val app: App) {
                 status = "Contacting server…"
                 val streamId = STREAMING_PREFIX + UUID.randomUUID()
                 messages.add(UiMessage(streamId, Role.ASSISTANT, ""))
+                feeder.begin()
 
                 val result = withContext(Dispatchers.IO) {
                     client.streamChat(app.settings.serverUrl, app.settings.apiKey, buildRequest(system, tools, base, turn, mode, prepared.think)) { content, reasoning ->
                         main.post {
                             if (!busy || gen != generation) return@post
                             val visible = stripThink(content)
+                            if (speakOut) feeder.feed(visible)
                             status = if (visible.isBlank() && reasoning.isNotBlank()) "Thinking…" else "Writing…"
                             updateMessage(streamId) { it.copy(text = visible, reasoning = reasoning) }
                         }
@@ -360,6 +366,12 @@ class ChatEngine(private val app: App) {
                 messages.removeAll { it.id == streamId }
 
                 val finalText = stripThink(result.content).trim()
+                if (speakOut) main.post { feeder.feed(finalText, finish = true) }
+                // Checking something takes a moment: say so instead of going quiet
+                if (speakOut && result.toolCalls.isNotEmpty() && !feeder.saidAny) {
+                    feeder.saidAny = true
+                    main.post { app.speaker.enqueue(ACKS.random()) }
+                }
                 if (finalText.isNotEmpty() || result.toolCalls.isEmpty()) {
                     val shown = finalText.ifEmpty { "(no reply)" }
                     addStored(convId, Role.ASSISTANT, shown, result.reasoning)
@@ -445,9 +457,17 @@ class ChatEngine(private val app: App) {
             app.memory.scheduleLearning(convId)
             if (finalReply.isNotEmpty() && !stopRequested) app.avatarEvent("reply", finalReply, fromVoice)
             app.avatarEvent("idle")
-            // With the avatar screen open on this phone, the avatar says it (server voice, lip sync)
-            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.speakReplies && !app.avatarScreenOpen) {
-                app.speaker.speak(finalReply)
+            // Keep listening after a spoken answer, so you can reply without the wake word
+            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.followUp) {
+                when {
+                    // (posted, so it runs after the last phrase has been queued)
+                    speakOut -> main.post { app.speaker.whenDone { app.voice.listenNow(followUp = true) } }
+                    // the avatar screen speaks it with the server's voice: wait roughly as long as that takes
+                    app.avatarScreenOpen && app.settings.speakReplies ->
+                        main.postDelayed({ app.voice.listenNow(followUp = true) },
+                            2500L + finalReply.split(Regex("\\s+")).size * 380L)
+                    else -> app.voice.listenNow(followUp = true)
+                }
             }
         }
     }
@@ -565,7 +585,7 @@ class ChatEngine(private val app: App) {
                 .put("mode_tools", mode.tools)
                 .put("split", true)
                 .put("sticky", JSONArray(sticky.toList()))
-                .put("thinking", thinkingPref(mode))
+                .put("thinking", if (fromVoice) "auto" else thinkingPref(mode))
                 .put("last", lastText)
                 .put("messages", JSONArray().apply {
                     history.forEach { put(JSONObject().put("role", it.optString("role")).put("content", textOf(it))) }
@@ -575,9 +595,9 @@ class ChatEngine(private val app: App) {
         }
         if (plan == null) {
             return@withContext Prepared(systemPrompt("", summary, mode, app.memory.promptSection()),
-                withTurnContext(trimByCount(history), ""), false, null,
+                withTurnContext(trimByCount(history), if (fromVoice) VOICE_STYLE else ""), false, null,
                 toolDefinitions(projectId.isNotEmpty(), mode, selected = null, phone = phoneNames),
-                think = thinkingPref(mode) == "on")
+                think = !fromVoice && thinkingPref(mode) == "on")
         }
         // The server picks which of its tools fit this message (each tool costs context space)
         val chosen = plan.optJSONArray("tools")?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }
@@ -595,7 +615,8 @@ class ChatEngine(private val app: App) {
         val memory = if (plan.has("memory_context")) plan.optString("memory_context") else app.memory.promptSection()
         Prepared(
             system = systemPrompt(plan.optString("project_context"), summary, mode, memory),
-            history = withTurnContext(history.subList(start, history.size), plan.optString("turn_context")),
+            history = withTurnContext(history.subList(start, history.size),
+                plan.optString("turn_context") + if (fromVoice) "\n" + VOICE_STYLE else ""),
             needsRefresh = userTurns >= 2 && (start > 0 || used > limit * REFRESH_AT),
             info = ContextInfo(used, limit, nCtx, projectTokens),
             tools = toolDefinitions(projectId.isNotEmpty(), mode, selected = chosen, phone = phoneNames),
@@ -858,6 +879,12 @@ class ChatEngine(private val app: App) {
     }
 
     companion object {
+        /** How to answer when the user spoke (it's added to the newest message, not the instructions). */
+        const val VOICE_STYLE = "Voice conversation: the user said this out loud and will hear your reply spoken. " +
+            "Answer the way a person talks: usually one to three short sentences, warm and natural, with contractions. " +
+            "No markdown, lists, headings, tables, code or links. If the answer needs detail, give the key point first " +
+            "and offer to go into more detail or put it on screen."
+        private val ACKS = listOf("One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.")
         val PHOTO_REF = Regex("!\\[[^\\]]*\\]\\(image:([0-9a-f]{16})\\)")
         val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
         private const val MAX_TOOL_ROUNDS = 6
