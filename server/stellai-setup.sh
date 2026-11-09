@@ -556,6 +556,45 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+
+def trust_more_certificates():
+    """HTTPS downloads trust the system's certificates plus Mozilla's list (certifi, when installed).
+
+    Windows only fetches some root certificates when its own programs need them, so Python on a fresh
+    Windows PC can fail with CERTIFICATE_VERIFY_FAILED for sites like python.org. Certificates are still
+    checked: this only adds trusted roots."""
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx.load_verify_locations(certifi.where())
+        except Exception:   # noqa: BLE001 - certifi is optional; the system's certificates still apply
+            pass
+        urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx)))
+    except Exception:       # noqa: BLE001 - keep Python's default if anything goes wrong
+        pass
+
+
+trust_more_certificates()
+
+
+def _is_cert_error(e):
+    return "CERTIFICATE_VERIFY_FAILED" in str(e) or "certificate verify failed" in str(e)
+
+
+def _windows_download(url, dest):
+    """Downloads with Windows' own HTTPS stack, which fetches missing root certificates by itself."""
+    env = {**os.environ, "STELLAI_URL": url, "STELLAI_OUT": dest}
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                        "$ProgressPreference='SilentlyContinue'; "
+                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                        "Invoke-WebRequest -UseBasicParsing -Uri $env:STELLAI_URL -OutFile $env:STELLAI_OUT"],
+                       capture_output=True, text=True, timeout=3600, env=env,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0 or not os.path.isfile(dest):
+        raise OSError("download failed: " + (r.stderr or r.stdout).strip()[-300:])
+
 MAX_SECONDS = 60
 
 # Things Whisper tends to "hear" in silence or noise.
@@ -3718,7 +3757,19 @@ def _download_file(url, dest, state):
     part = dest + ".part"
     have = os.path.getsize(part) if os.path.exists(part) else 0
     req = urllib.request.Request(url, headers={"User-Agent": "StellAI", **({"Range": f"bytes={have}-"} if have else {})})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    try:
+        r = urllib.request.urlopen(req, timeout=60)
+    except urllib.error.URLError as e:
+        # A Windows PC that hasn't fetched this site's root certificate yet: let Windows download it instead
+        if os.name == "nt" and _is_cert_error(e):
+            log(f"download: certificate check failed for {urlparse(url).netloc}, using Windows to download it")
+            if os.path.exists(part):
+                os.remove(part)
+            _windows_download(url, part)
+            os.replace(part, dest)
+            return
+        raise
+    with r:
         if have and r.status != 206:
             have = 0
         state["total"] = have + int(r.headers.get("Content-Length") or 0)

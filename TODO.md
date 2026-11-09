@@ -22,10 +22,14 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 - [ ] **"Hey Stella" wake word**: the app support is done; train the model in the Colab notebook (see the app README) and drop `hey_stella.onnx` into `~/llm/wakewords/` on the server.
 - [ ] **Windows installer, full release**: code signing (no SmartScreen warning), a fixed APK signing key, and testing on real Windows PCs.
+- [ ] **Check on real hardware**: the 0.12.5 background service (does the connection survive switching apps on the owner's phone?), the subtitle window and the in-app avatar on the phone, Kokoro on the Windows backup.
 - [ ] **Security hardening**: firewall rules limited to Tailscale and your home network, Android backup turned off for the app, and a command to replace the API key.
 
 ## Done
 
+- [x] **Avatar screens on phones** (0.12.4–0.12.5): each screen speaks only its own conversations, with a per-screen choice (this screen / + phone app / every device); subtitles in a small window below or beside her (or film-style, or off); no flicker on touch; the in-app avatar starts at once instead of waiting for the chat history; the phone app stays connected in the background (quiet notification, battery-limits button).
+- [x] **Line icons instead of emoji** in the Android app.
+- [x] **Kokoro voice on Windows**: installs its own embedded Python; falls back to Piper if anything fails.
 - [x] **Natural voice conversations**: spoken reply style, smarter end-of-speech, transcribing while you talk, speaking sooner, "let me check" acknowledgements, follow-ups without the wake word, interrupt by talking, speech-friendly text, sound-based mouth shapes, optional Kokoro voice.
 
 - [ ] **Voice, later (needs more GPU)**: full-duplex speech models (listening and talking at once, natural "mm-hm"s), e.g. Moshi, once the Tesla T4 is in.

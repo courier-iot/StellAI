@@ -16,6 +16,22 @@ import urllib.error
 import urllib.request
 import zipfile
 
+
+def _trust_more_certificates():
+    """Trust Mozilla's certificate list (certifi) as well as Windows' own: Windows only fetches some root
+    certificates when its own programs need them, so Python downloads can otherwise fail on a fresh PC."""
+    try:
+        import ssl
+        import certifi
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(certifi.where())
+        urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx)))
+    except Exception:   # noqa: BLE001 - fall back to Python's default
+        pass
+
+
+_trust_more_certificates()
+
 try:
     from _version import VERSION as APP_VERSION   # written by the GitHub build
 except ImportError:
