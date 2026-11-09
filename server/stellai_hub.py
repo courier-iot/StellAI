@@ -3776,6 +3776,7 @@ const store = { get(k, d) { try { const v = localStorage.getItem("stellai." + k)
   if (m) { store.set("key", decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname + location.search); }
 })();
 const AVATAR_MODE = location.pathname === "/avatar";
+if (AVATAR_MODE) { document.body.classList.add("avatar"); if (new URLSearchParams(location.search).get("app") === "1") document.body.classList.add("inapp"); }
 // In the phone app's avatar screen, tell the app about errors that stop the page (it shows them)
 if (window.StellaiApp) {
   window.addEventListener("error", e => { try { StellaiApp.error(String(e.message || e)); } catch {} });
@@ -5043,15 +5044,17 @@ async function start() {
   if (!KEY) { askKey(); return; }
   S.current = store.get("current", "") || null;
   renderBar(); renderMsgs();
-  await sync();
-  if (S.current && !S.convs.has(S.current)) S.current = null;
-  await loadMeta();
-  renderSide(); renderMsgs(); updateMeter();
+  // The avatar starts straight away: the chat history below can take a while on a new device or a slow connection
   if (AVATAR_MODE && !AV.avatar) {
     $("#avName").textContent = NAME().toUpperCase();
     startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} })
       .catch(e => { avatarStatus("Avatar: " + e.message); try { window.StellaiApp && window.StellaiApp.error(String(e.message || e)); } catch {} });
   }
+  try { await sync(); } catch (e) { console.warn("sync", e); }
+  if (S.current && !S.convs.has(S.current)) S.current = null;
+  try { await loadMeta(); } catch (e) { console.warn("meta", e); }
+  renderSide(); renderMsgs(); updateMeter();
+  if (AVATAR_MODE) $("#avName").textContent = NAME().toUpperCase();
 }
 setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);
