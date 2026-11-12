@@ -448,6 +448,16 @@ class App:
         ttk.Button(crow, text="Back up now", command=self.backup_now).pack(side="left", padx=6)
         ttk.Button(crow, text="Restore a backup…", command=self.restore_backup).pack(side="left")
 
+        ttk.Button(crow, text="Speed test", command=self.speed_test).pack(side="left", padx=6)
+
+        srow = tk.Frame(opts, bg=PANEL)
+        srow.pack(fill="x", pady=(10, 0))
+        ttk.Button(srow, text="New API key…", command=self.new_key).pack(side="left")
+        self.fw_btn = ttk.Button(srow, text="Limit firewall", command=self.limit_firewall)
+        self.fw_label = self.label(srow, "", fg=MUTED, size=9)
+        self.fw_label.pack(side="left", padx=8)
+        self._show_firewall_state()
+
         wrow = tk.Frame(opts, bg=PANEL)
         wrow.pack(fill="x", pady=(10, 0))
         self.searx_label = self.label(wrow, "", fg=MUTED, size=9)
@@ -591,6 +601,63 @@ class App:
             self.q.put(("log", text))
             self.q.put(("call", lambda: messagebox.showinfo("StellAI health check", text)))
         threading.Thread(target=work, daemon=True).start()
+
+    def speed_test(self):
+        if not self.servers.web:
+            messagebox.showinfo("StellAI", "Start the server first; the test measures the running parts.")
+            return
+        self.log("Running the speed test (up to a minute)…")
+
+        def work():
+            pl = self.cfg.get("plan") or {}
+            whisper = f"http://127.0.0.1:{ws.WHISPER_PORT}" if ws.whisper_args(self.cfg, pl) else ""
+            text = stellai_hub.speed_text(stellai_hub.run_speed_test(whisper, "en"))
+            self.q.put(("log", text))
+            self.q.put(("call", lambda: messagebox.showinfo("StellAI speed test", text)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def new_key(self):
+        if not messagebox.askyesno("StellAI", "Replace the API key?\n\nEvery phone, tablet and browser will have to be "
+                                   "paired again (scan the new QR code). Use this if a device was lost or someone "
+                                   "may have seen the key."):
+            return
+
+        def work():
+            was_running = self.servers.wanted
+            self.servers.stop()
+            ws.new_api_key(self.cfg)
+
+            def done():
+                self.show_dashboard()
+                if was_running:
+                    self.start_servers()
+                self.log("New API key set: pair your devices again with the QR code.")
+            self.q.put(("call", done))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_firewall_state(self):
+        def work():
+            state = ws.firewall_state()
+            text = {"limited": "Firewall: home network and Tailscale only ✓",
+                    "open": "Firewall: any address on a private network may connect",
+                    "none": "Firewall: no StellAI rule (phones may not connect)"}.get(state, "")
+
+            def show():
+                if not (hasattr(self, "fw_label") and self.fw_label.winfo_exists()):
+                    return
+                self.fw_label.config(text=text)
+                if state in ("open", "none"):
+                    self.fw_btn.pack(side="left", padx=(8, 0), before=self.fw_label)
+                else:
+                    self.fw_btn.pack_forget()
+            self.q.put(("call", show))
+        threading.Thread(target=work, daemon=True).start()
+
+    def limit_firewall(self):
+        if not ws.limit_firewall():
+            messagebox.showinfo("StellAI", "The firewall rule wasn't changed (the administrator prompt was declined).")
+            return
+        self.root.after(3000, self._show_firewall_state)
 
     def backup_now(self):
         if not self.servers.web:

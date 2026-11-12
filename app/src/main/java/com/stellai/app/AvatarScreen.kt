@@ -70,6 +70,7 @@ fun AvatarScreen(onDone: () -> Unit) {
     var loadError by remember { mutableStateOf<String?>(null) }
     var ready by remember { mutableStateOf(false) }
     var pageError by remember { mutableStateOf("") }
+    var timedOut by remember { mutableStateOf(false) }
     var serverOk by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     // In the background the page sleeps (the phone speaks replies itself); it catches up when you come back
@@ -105,8 +106,9 @@ fun AvatarScreen(onDone: () -> Unit) {
     // If the page hasn't said it's running after a while, show why
     LaunchedEffect(serverOk) {
         if (!serverOk) return@LaunchedEffect
-        delay(15_000)
+        delay(20_000)
         if (!ready && loadError == null) {
+            timedOut = true
             loadError = "The avatar page didn't start" + (if (pageError.isNotBlank()) ": $pageError" else ".") +
                 " If this keeps happening, update \"Android System WebView\" and \"Chrome\" in the Play Store."
         }
@@ -144,7 +146,11 @@ fun AvatarScreen(onDone: () -> Unit) {
                         // The page reports when it's running, and any error that stops it
                         addJavascriptInterface(object {
                             @JavascriptInterface
-                            fun ready() = main.post { ready = true }
+                            fun ready() = main.post {
+                                ready = true
+                                // the page was just slow (mobile data): take the "didn't start" message away again
+                                if (timedOut) { timedOut = false; loadError = null }
+                            }
 
                             @JavascriptInterface
                             fun error(message: String) = main.post { if (!ready) pageError = message.take(300) }

@@ -299,7 +299,7 @@ class ChatEngine(private val app: App) {
         addStored(convId, Role.USER, content)
         stopRequested = false
         busy = true
-        job = app.scope.launch { app.awake { runConversation(convId, fromVoice, photos) } }
+        job = app.scope.launch { app.awake { runConversation(convId, fromVoice, photos, fresh = true) } }
     }
 
     fun stop() {
@@ -308,7 +308,8 @@ class ChatEngine(private val app: App) {
         job?.cancel()
     }
 
-    private suspend fun runConversation(convId: String, fromVoice: Boolean, newPhotos: List<String>) {
+    /** fresh: the user just sent this message (not Retry), so the server may answer simple requests at once. */
+    private suspend fun runConversation(convId: String, fromVoice: Boolean, newPhotos: List<String>, fresh: Boolean = false) {
         val gen = generation
         var memoryChanged = false
         var projectChanged = false
@@ -324,6 +325,25 @@ class ChatEngine(private val app: App) {
         val feeder = SentenceFeeder { piece -> main.post { app.speaker.enqueue(piece) } }
         if (speakOut) main.post { app.speaker.stop() }
         try {
+            // Simple requests (the time, sums, lists, reminders) are answered by the server at once, without the model.
+            // (Not in Writer, Tutor, Brainstorm or your own modes, where "what time is it?" may be part of the story.)
+            val quick = if (fresh && newPhotos.isEmpty() && mode.id in QUICK_MODES) quickAnswer(convId) else null
+            if (quick != null) {
+                var reply = quick.optString("reply")
+                if (quick.optString("changed").isNotEmpty()) remindersChanged = true
+                // Timers and alarms: the server recognised the request, this phone's clock app does the work
+                val tool = quick.optJSONObject("phone_tool")
+                if (tool != null) {
+                    val outcome = PhoneTools.execute(app, tool.optString("name"), (tool.optJSONObject("args") ?: JSONObject()).toString())
+                    addStored(convId, Role.TOOL, outcome.summary)
+                    if (outcome.summary.startsWith("✗")) reply = "Sorry, that didn't work: " + outcome.summary.removePrefix("✗").trim()
+                }
+                addStored(convId, Role.ASSISTANT, reply)
+                finalReply = reply
+                feeder.begin()
+                if (speakOut) main.post { feeder.feed(reply, finish = true) }
+                return
+            }
             withContext(Dispatchers.IO) {
                 // Share new photos with your other devices (the model gets them directly below).
                 for (id in newPhotos) {
@@ -551,6 +571,18 @@ class ChatEngine(private val app: App) {
             }.trim()
         }
         return c?.toString().orEmpty()
+    }
+
+    /** The server's instant answer to the newest message, or null when the model should answer (or on any problem). */
+    private suspend fun quickAnswer(convId: String): JSONObject? = withContext(Dispatchers.IO) {
+        val text = app.store.messages(convId).lastOrNull { it.role == Role.USER }?.text?.trim().orEmpty()
+        if (text.isEmpty() || text.length > 140 || text.contains('\n') || PHOTO_REF.containsMatchIn(text)) return@withContext null
+        try {
+            val now = ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            HubApi.quick(app.settings.serverUrl, app.settings.apiKey, text, now)
+        } catch (_: Exception) {
+            null   // older server, or no connection: the normal path reports any real problem
+        }
     }
 
     /**
@@ -889,6 +921,9 @@ class ChatEngine(private val app: App) {
         val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
         private const val MAX_TOOL_ROUNDS = 6
         private const val MAX_HISTORY = 24
+        /** Modes where the server may answer simple requests itself. */
+        private val QUICK_MODES = setOf("general", "programmer", "electronics")
+
         /** Refresh the context automatically once it is this full. */
         private const val REFRESH_AT = 0.85f
         val PROJECT_TOOLS = setOf("project_note", "project_search")

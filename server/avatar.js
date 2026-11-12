@@ -18,51 +18,72 @@ export function createAvatar(host, opts = {}) {
   let impl = null, style = "", state = "idle", level = 0, destroyed = false;
   const o = { camera: "upper", height: 172.7, light: false, gestures: true, animations: [], key: "", ...opts };
   const onError = o.onError || (() => {});
+  const stage = createStage(o.stageHost || host, o);      // the neon stage sits behind either look
+  const keep = ":scope > :not([data-loading]):not([data-stage])";
+  const sync = () => { impl.setState(state); impl.setLevel(level); impl.setNeon && impl.setNeon(o.neon); };
 
-  let ver = "";
-  async function setStyle(next, modelUrl, version = "") {
-    if (next === style && impl && (next !== "vrm" || version === ver)) return;
-    ver = version;
+  let ver = "", seq = 0, loading = null;     // loading = {key, promise} while a 3D character downloads
+  function showOrb() {
+    if (impl && style === "orb") return;
     if (impl) impl.destroy();
-    impl = null; style = next; host.innerHTML = "";
-    if (next === "vrm") {
+    host.querySelectorAll(keep).forEach(el => el.remove());
+    impl = createOrb(host, o); style = "orb";
+  }
+  // The current look (usually the orb) stays on screen while a 3D character downloads and is set up
+  // in a hidden layer; it's swapped in only when it's ready. A big character over mobile data can take a while.
+  async function setStyle(next, modelUrl, version = "") {
+    const key = next + "|" + (next === "vrm" ? modelUrl + "|" + version : "");
+    if (next === style && impl && (next !== "vrm" || version === ver)) { seq++; loading = null; return; }
+    if (loading && loading.key === key) return loading.promise;
+    const my = ++seq;
+    if (next !== "vrm") { loading = null; showOrb(); ver = version; sync(); return; }
+    const layer = document.createElement("div");
+    layer.dataset.loading = "1"; layer.style.cssText = "position:absolute;inset:0;visibility:hidden";
+    host.appendChild(layer);
+    if (!impl) showOrb();
+    const promise = (async () => {
       try {
-        impl = await createVRM(host, modelUrl, o);
-        if (destroyed || style !== "vrm") { impl.destroy(); return; }
+        const v = await createVRM(layer, modelUrl, o);
+        if (destroyed || my !== seq) { v.destroy(); layer.remove(); return; }
+        if (impl) impl.destroy();
+        host.querySelectorAll(keep).forEach(el => el.remove());
+        delete layer.dataset.loading; layer.style.visibility = "";
+        impl = v; style = "vrm"; ver = version; sync();
       } catch (e) {
-        onError(e);
-        style = "orb"; host.innerHTML = "";
-        impl = createOrb(host, o);
-      }
-    } else {
-      impl = createOrb(host, o);
-    }
-    impl.setState(state); impl.setLevel(level);
+        layer.remove();
+        if (destroyed || my !== seq) return;
+        onError(e); showOrb(); sync();
+      } finally { if (my === seq) loading = null; }
+    })();
+    loading = { key, promise };
+    return promise;
   }
   const call = (fn, ...a) => impl && impl[fn] && impl[fn](...a);
   return {
     setStyle,
     get style() { return style; },
-    setState(s) { state = s; call("setState", s); },
-    setLevel(x) { level = x; call("setLevel", x); },
+    setState(s) { state = s; stage.setState(s); call("setState", s); },
+    setLevel(x) { level = x; stage.setLevel(x); call("setLevel", x); },
+    /** Neon look: {on, glow: "#rrggbb", haze: "#rrggbb", crowd: true/false} */
+    setNeon(n) { o.neon = n; stage.setNeon(n); call("setNeon", n); },
     setVisemes(v) { call("setVisemes", v); },
     setCamera(c) { o.camera = c; call("setCamera", c); },
     setHeight(cm) { o.height = cm; call("setHeight", cm); },
-    setLight(on) { o.light = !!on; call("setLight", o.light); },
+    setLight(on) { o.light = !!on; stage.setLight(o.light); call("setLight", o.light); },
     setGestures(on) { o.gestures = !!on; },
     setAnimations(list) { o.animations = list || []; call("setAnimations", o.animations); },
     play(what) { return call("play", what); },
     trigger(tag) { call("trigger", tag); },
     react(text) { call("react", text); },
     fps() { return impl && impl.fps ? impl.fps() : 0; },
-    destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; host.innerHTML = ""; },
+    destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; stage.destroy(); host.innerHTML = ""; },
   };
 }
 
 // ------------------------------------------------------------------ the orb
 function createOrb(host, o) {
   const canvas = document.createElement("canvas");
-  canvas.style.cssText = "width:100%;height:100%;display:block";
+  canvas.style.cssText = "position:relative;width:100%;height:100%;display:block";
   host.appendChild(canvas);
   const ctx = canvas.getContext("2d");
   let state = "idle", level = 0, smooth = 0, raf = 0, w = 0, h = 0, dpr = 1, last = performance.now(), t = 0, fps = 60, acc = 0;
@@ -155,6 +176,88 @@ function createOrb(host, o) {
     setLight() { resize(); },
     fps: () => fps,
     destroy() { cancelAnimationFrame(raf); ro.disconnect(); canvas.remove(); },
+  };
+}
+
+// ------------------------------------------------------------------ the neon stage
+// A dark stage behind Stella: coloured haze that breathes with her voice, a glowing floor, and (optional)
+// soft, blurred dancer silhouettes swaying on both sides with the middle left clear. Drawn only while the
+// neon look is on, at 30 frames a second (20 in light mode); the silhouettes are drawn once and reused.
+const hexRgb = (h, d) => { const m = /^#?([0-9a-f]{6})$/i.exec(h || ""); const n = parseInt(m ? m[1] : d, 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+function stageFigure(color, pose) {
+  const c = document.createElement("canvas"); c.width = 220; c.height = 440;
+  const g = c.getContext("2d");
+  g.filter = "blur(10px)"; g.fillStyle = g.strokeStyle = color; g.lineCap = g.lineJoin = "round";
+  g.beginPath(); g.arc(110, 62, 28, 0, 7); g.fill();                                   // head
+  g.beginPath(); g.moveTo(100, 84); g.lineTo(120, 84); g.lineTo(152, 108); g.lineTo(136, 186);
+  g.lineTo(160, 248); g.lineTo(60, 248); g.lineTo(84, 186); g.lineTo(68, 108); g.closePath(); g.fill();   // body
+  g.lineWidth = 19; g.beginPath();
+  g.moveTo(148, 110); if (pose) { g.lineTo(176, 60); g.lineTo(168, 14); } else { g.lineTo(184, 172); g.lineTo(148, 212); }   // her left arm: raised or on the hip
+  g.moveTo(72, 110); g.lineTo(36, 172); g.lineTo(72, 212); g.stroke();                 // other hand on the hip
+  g.lineWidth = 30; g.beginPath(); g.moveTo(128, 244); g.lineTo(140, 422); g.moveTo(92, 244); g.lineTo(84, 422); g.stroke();   // legs
+  return c;
+}
+function createStage(host, o) {
+  const canvas = document.createElement("canvas");
+  canvas.dataset.stage = "1";
+  canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:none;pointer-events:none";
+  host.insertBefore(canvas, host.firstChild);
+  const ctx = canvas.getContext("2d");
+  let neon = null, level = 0, smooth = 0, state = "idle", raf = 0, last = 0, t = 0, w = 0, h = 0, figs = null, figKey = "";
+  // [x across the screen (0..0.5, mirrored on the right), size (1 = nearest), pose]: far ones first
+  const spots = [[0.06, 0.62, 1], [0.17, 0.66, 0], [0.28, 0.7, 1], [0.11, 0.8, 0], [0.23, 0.86, 1], [0.33, 0.95, 0]];
+  const crowd = [];
+  for (const side of [-1, 1]) for (const [x, k, pose] of spots) crowd.push({ x: side < 0 ? x : 1 - x, k, pose, flip: side, ph: Math.random() * 6.3, sp: 0.85 + Math.random() * 0.3 });
+  crowd.sort((a, b) => a.k - b.k);
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    if (!neon || !neon.on) return;
+    const step = (now - last) / 1000;
+    if (step < (o.light ? 1 / 20 : 1 / 31)) return;
+    const dt = Math.min(0.1, step); last = now; t += dt;
+    const nw = host.clientWidth, nh = host.clientHeight;
+    if (nw !== w || nh !== h) { w = nw; h = nh; canvas.width = Math.max(1, w); canvas.height = Math.max(1, h); }   // soft by design: 1 pixel per CSS pixel is plenty
+    smooth = lerp(smooth, level, 1 - Math.exp(-dt * 10));
+    const hz = hexRgb(neon.haze, "ff3fb4"), gl = hexRgb(neon.glow, "3dff9e");
+    const H = `${hz[0]},${hz[1]},${hz[2]}`, G = `${gl[0]},${gl[1]},${gl[2]}`;
+    let g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, "#05030a"); g.addColorStop(0.6, `rgba(${H},0.08)`); g.addColorStop(1, `rgba(${H},0.28)`);
+    ctx.globalAlpha = 1; ctx.fillStyle = "#05030a"; ctx.fillRect(0, 0, w, h); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    g = ctx.createRadialGradient(w / 2, h * 0.55, 0, w / 2, h * 0.55, Math.max(w, h) * 0.6);
+    g.addColorStop(0, `rgba(${H},${0.16 + 0.22 * smooth})`); g.addColorStop(1, `rgba(${H},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    if (neon.crowd !== false) {
+      const key = neon.haze;
+      if (key !== figKey) { figKey = key; figs = [stageFigure(`rgb(${H})`, 0), stageFigure(`rgb(${H})`, 1)]; }
+      const fast = state === "talking" ? 1.8 : 1;
+      // sized by the narrower side, and squeezed outwards on tall (portrait) screens so the middle stays hers
+      const spread = w >= h ? 1 : 0.62;
+      for (const f of crowd) {
+        const fh = Math.min(h * 0.72, w * 0.62) * f.k, fw = fh / 2, feet = h * (0.99 - (1 - f.k) * 0.35);
+        const x = f.x < 0.5 ? f.x * spread : 1 - (1 - f.x) * spread;
+        const a = t * 1.5 * f.sp * fast + f.ph;
+        ctx.save();
+        ctx.globalAlpha = 0.16 + 0.3 * f.k;
+        ctx.translate(x * w + Math.sin(a) * fw * 0.08, feet + Math.abs(Math.cos(a)) * fh * 0.012);
+        ctx.rotate(Math.sin(a) * 0.07); ctx.scale(f.flip, 1);
+        ctx.drawImage(figs[f.pose], -fw / 2, -fh, fw, fh);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.save(); ctx.translate(w / 2, h * 0.97); ctx.scale(1, 0.22);          // a flat pool of light on the floor
+    g = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.45);
+    g.addColorStop(0, `rgba(${G},${0.2 + 0.25 * smooth})`); g.addColorStop(1, `rgba(${G},0)`);
+    ctx.fillStyle = g; ctx.fillRect(-w / 2, -h * 4.6, w, h * 4.6 + w);
+    ctx.restore();
+  }
+  raf = requestAnimationFrame(frame);
+  return {
+    setNeon(n) { neon = n || null; canvas.style.display = neon && neon.on ? "block" : "none"; last = 0; },
+    setLevel(x) { level = clamp(x); },
+    setState(s) { state = s; },
+    setLight() {},
+    destroy() { cancelAnimationFrame(raf); canvas.remove(); },
   };
 }
 
@@ -268,13 +371,14 @@ async function createVRM(host, url, o) {
   host.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   const cam = new THREE.PerspectiveCamera(28, 1, 0.05, 60);
-  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x1a1030, 1.6));
+  const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x1a1030, 1.6); scene.add(hemi);
   const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1, 2, 3); scene.add(key);
   const rim = new THREE.DirectionalLight(0x5ce1e6, 1.4); rim.position.set(-2, 1.5, -2); scene.add(rim);
+  const rim2 = new THREE.DirectionalLight(0xff3fb4, 0); rim2.position.set(2, 1.2, -1.5); scene.add(rim2);   // neon: second back light
 
   const loader = new GLTFLoader();
   loader.register(parser => new VRMLoaderPlugin(parser));
-  const gltf = await new Promise((res, rej) => loader.load(url, res, undefined, e => rej(new Error("couldn't load the character: " + (e && e.message || e)))));
+  const gltf = await new Promise((res, rej) => loader.load(url, res, x => o.onProgress && o.onProgress(x.loaded || 0, x.total || 0), e => rej(new Error("couldn't load the character: " + (e && e.message || e)))));
   const vrm = gltf.userData.vrm;
   if (!vrm) throw new Error("that file isn't a VRM character");
   VRMUtils.removeUnnecessaryVertices && VRMUtils.removeUnnecessaryVertices(gltf.scene);
@@ -378,6 +482,48 @@ async function createVRM(host, url, o) {
     if (jump) { cam.position.copy(camGoal); aimNow.copy(camAim); }
   }
   setHeight(o.height);
+
+  // ---- neon look: glowing edges (the toon shader's rim light, and its outline when the model has one, in the
+  // glow colour, unaffected by lighting), dimmer front light with two coloured back lights, and a soft outer
+  // glow around her silhouette (a CSS drop-shadow on the see-through canvas; off in light mode). Talking
+  // makes the edges glow brighter.
+  const neon = { on: false, glow: new THREE.Color("#3dff9e"), haze: new THREE.Color("#ff3fb4"), pulse: 0 };
+  const toon = [], tmpC = new THREE.Color();
+  vrm.scene.traverse(m => {
+    if (!m.isMesh) return;
+    for (const mt of [].concat(m.material)) {
+      if (!mt || !("parametricRimColorFactor" in mt) || !mt.parametricRimColorFactor || toon.some(x => x.m === mt)) continue;
+      toon.push({ m: mt, rim: mt.parametricRimColorFactor.clone(), pow: mt.parametricRimFresnelPowerFactor, lift: mt.parametricRimLiftFactor,
+        mix: mt.rimLightingMixFactor, oc: mt.outlineColorFactor ? mt.outlineColorFactor.clone() : null, omix: mt.outlineLightingMixFactor });
+    }
+  });
+  function cssGlow() {
+    const c = "#" + neon.glow.getHexString();
+    renderer.domElement.style.filter = neon.on && !light ? `drop-shadow(0 0 3px ${c}) drop-shadow(0 0 14px ${c}99)` : "";
+  }
+  function setNeon(n) {
+    neon.on = !!(n && n.on);
+    try { neon.glow.set((n && n.glow) || "#3dff9e"); neon.haze.set((n && n.haze) || "#ff3fb4"); } catch {}
+    hemi.intensity = neon.on ? 0.55 : 1.6; key.intensity = neon.on ? 1.0 : 2.2;
+    if (neon.on) rim.color.copy(neon.glow); else rim.color.set(0x5ce1e6);
+    rim.intensity = neon.on ? 3 : 1.4;
+    rim2.color.copy(neon.haze); rim2.intensity = neon.on ? 2.2 : 0;
+    for (const x of toon) {
+      const mt = x.m;
+      try {
+        if (neon.on) {
+          mt.parametricRimFresnelPowerFactor = 2.6; mt.parametricRimLiftFactor = 0.05;
+          if (x.mix !== undefined) mt.rimLightingMixFactor = 0;
+          if (x.oc) { mt.outlineColorFactor.copy(neon.glow); if (x.omix !== undefined) mt.outlineLightingMixFactor = 0; }
+        } else {
+          mt.parametricRimColorFactor.copy(x.rim); mt.parametricRimFresnelPowerFactor = x.pow; mt.parametricRimLiftFactor = x.lift;
+          if (x.mix !== undefined) mt.rimLightingMixFactor = x.mix;
+          if (x.oc) { mt.outlineColorFactor.copy(x.oc); if (x.omix !== undefined) mt.outlineLightingMixFactor = x.omix; }
+        }
+      } catch {}
+    }
+    cssGlow();
+  }
 
   let lastW = 0, lastH = 0;
   function resize() {
@@ -594,6 +740,11 @@ async function createVRM(host, url, o) {
       relaxed: Math.max(state === "listening" ? 0.25 : 0, extra.relaxed || 0) };
     for (const k in emo) { emo[k] = lerp(emo[k], goal[k], 0.08); setEx(k, emo[k] * (1 - mouth * 0.5)); }
 
+    if (neon.on) {             // edges glow brighter with her voice
+      neon.pulse = lerp(neon.pulse, level, 1 - Math.exp(-dt * 12));
+      tmpC.copy(neon.glow).multiplyScalar(0.9 + neon.pulse * 0.9);
+      for (const x of toon) x.m.parametricRimColorFactor.copy(tmpC);
+    }
     cam.position.lerp(camGoal, 0.05); aimNow.lerp(camAim, 0.05); cam.lookAt(aimNow);
     vrm.update(dt);
     renderer.render(scene, cam);
@@ -601,14 +752,15 @@ async function createVRM(host, url, o) {
   raf = requestAnimationFrame(frame);
   setTimeout(() => trigger("greeting"), 1200);    // a little wave when the screen opens
   setAnimations(o.animations);
+  setNeon(o.neon);
   return {
     setState(s) { state = s; },
     setLevel(x) { level = clamp(x); },
     setVisemes(v) { visemes = v; visemesAt = performance.now(); },
     setCamera: m => setCamera(m),
     setHeight,
-    setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); },
-    setAnimations, play, trigger, react,
+    setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); cssGlow(); },
+    setNeon, setAnimations, play, trigger, react,
     fps: () => fps,
     destroy() {
       cancelAnimationFrame(raf); ro.disconnect(); mixer.stopAllAction();

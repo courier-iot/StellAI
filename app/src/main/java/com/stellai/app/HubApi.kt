@@ -245,6 +245,23 @@ object HubApi {
         execute(authed(serverUrl, apiKey, "/modes/$id").delete().build())
     }
 
+    private val quickHttp = http.newBuilder().connectTimeout(3, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
+
+    /**
+     * An instant answer for a simple request (the time, a sum, a list, a reminder, a timer or alarm) worked out by
+     * the server without the AI model: "reply", "changed" ("", "reminders" or "lists") and, for timers and alarms,
+     * "phone_tool" {name, args} for this phone to run. Null means: ask the model as usual.
+     */
+    fun quick(serverUrl: String, apiKey: String, text: String, now: String): JSONObject? {
+        val body = JSONObject().put("text", text).put("now", now).put("phone", true).toString().toRequestBody(JSON)
+        val o = JSONObject(execute(authed(serverUrl, apiKey, "/quick").post(body).build(), quickHttp))
+        return if (o.isNull("reply") || o.optString("reply").isBlank()) null else o
+    }
+
+    /** Runs the server's speed test (10-60 s) and returns the results as plain text. */
+    fun speedTest(serverUrl: String, apiKey: String): String =
+        execute(authed(serverUrl, apiKey, "/speedtest?format=text").post("{}".toRequestBody(JSON)).build(), slow)
+
     /** Token budget for the next request: project context, counts and how much history fits. */
     fun context(serverUrl: String, apiKey: String, body: JSONObject): JSONObject =
         JSONObject(execute(authed(serverUrl, apiKey, "/context").post(body.toString().toRequestBody(JSON)).build()))

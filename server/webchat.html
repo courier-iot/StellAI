@@ -537,7 +537,7 @@ async function send() {
   addMsg(convId, "user", (text + photos.map(p => `\n![photo](image:${p.id})`).join("")).trim());
   renderSide(); renderMsgs();
   const voice = !!S.voiceNext; S.voiceNext = false;
-  await run(convId, photos, voice);
+  await run(convId, photos, voice, true);
 }
 function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
@@ -551,11 +551,31 @@ function truncateFrom(id) {
   const now = nextTs(); list.slice(i).forEach(m => saveMsg({ ...m, deleted: true, text: "", reasoning: "", updated_at: now }));
 }
 
-async function run(convId, photos, voice = false) {
+// Simple requests (the time, sums, lists, reminders) are answered by the server at once, without the model.
+// Only for a message just sent (not Retry: a reminder mustn't be set twice).
+async function quickAnswer(convId) {
+  const last = msgsOf(convId).filter(m => m.role === "user").pop();
+  const text = last ? last.text.trim() : "";
+  if (!text || text.length > 140 || text.includes("\n")) return null;
+  const now = new Date(), off = -now.getTimezoneOffset(), pad = n => String(Math.abs(n)).padStart(2, "0");
+  const iso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `${off >= 0 ? "+" : "-"}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+  try { const r = await api("/quick", { method: "POST", json: { text, now: iso } }); return r && r.reply ? r.reply : null; } catch { return null; }
+}
+
+async function run(convId, photos, voice = false, fresh = false) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
   SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
+    // (not in Writer, Tutor, Brainstorm or custom modes, where "what time is it?" may be part of the story)
+    const quick = fresh && !photos.length && ["general", "programmer", "electronics"].includes(curMode().id) ? await quickAnswer(convId) : null;
+    if (quick) {
+      if (AVATAR_MODE) { SPEAK.begin(); SPEAK.feed(quick, true); avatarCaption(quick); if (AV.avatar) AV.avatar.react(quick); }
+      postAvatar({ state: "reply", text: quick });
+      addMsg(convId, "assistant", quick);
+      return;
+    }
     let p = await prepare(convId, photos.length, voice);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
@@ -855,7 +875,7 @@ function onSearch() {
 // ---------------------------------------------------------------- server: status, models, health check, backups
 async function openServer() {
   const d = dialog(`<h2>🖥 Server</h2><div id="sv">Loading…</div>
-    <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button><div id="docOut"></div>
+    <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button> <button id="spd">Speed test</button><div id="docOut"></div>
     <h3 class="hud" style="margin-top:18px">Backups</h3><div id="bk">Loading…</div>
     <div class="btns"><button id="close">Close</button></div>`);
   let timer = 0, closed = false;
@@ -906,6 +926,19 @@ async function openServer() {
     try { const r = await api("/doctor"); const ic = { ok: ["✓", "var(--accent)"], warn: ["!", "var(--gold)"], fail: ["✗", "var(--red)"] };
       d.querySelector("#docOut").innerHTML = (r.checks || []).map(c => { const [i, col] = ic[c.state] || ic.fail;
         return `<div class="check"><span class="ic" style="color:${col}">${i}</span><div><b>${esc(c.name)}</b>: ${esc(c.detail)}${c.fix && c.state !== "ok" ? `<div class="sub">→ ${esc(c.fix)}</div>` : ""}</div></div>`; }).join(""); }
+    catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  // Real numbers for this server: reading, writing, waking, hearing and speaking, compared with the last run
+  d.querySelector("#spd").onclick = async e => {
+    e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Measuring… (up to a minute; ${esc(NAME())} can't chat meanwhile)</p>`;
+    try { const r = await api("/speedtest", { method: "POST", json: {} });
+      d.querySelector("#docOut").innerHTML = (r.results || []).map(x => {
+        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">✗</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
+        const up = x.unit.endsWith("/s"), ch = x.change_pct;
+        const diff = ch ? ` <span style="color:${(ch > 0) === up ? "var(--accent)" : "var(--gold)"}">(${ch > 0 ? "+" : ""}${ch}% vs last time)</span>` : "";
+        return `<div class="check"><span class="ic" style="color:var(--accent)">◆</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
+        + `<p class="sub">${esc(r.model || "")} · took ${r.took_s} s</p>`; }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
     e.target.disabled = false;
   };
@@ -1221,7 +1254,10 @@ function updateAvatarState() {
   const s = $("#avState"); if (s) s.textContent = dotTxt || "";
 }
 function animUrl(a) { return "/avatar/bin/animations/" + encodeURIComponent(a.file) + "?key=" + encodeURIComponent(KEY); }
+const neonOf = c => ({ on: !!c.neon, glow: c.neon_glow || "#3dff9e", haze: c.neon_haze || "#ff3fb4", crowd: c.neon_crowd !== false });
 function lightOn() { return AV.cfg.light === "on" || (AV.cfg.light === "auto" && (AV.slow || AV.autoLight)); }
+// Phones, tablets and light-mode screens load a copy of the character with smaller textures (the server makes it once)
+function liteChar() { return lightOn() || matchMedia("(pointer: coarse)").matches || new URLSearchParams(location.search).get("app") === "1"; }
 async function loadAvatarConfig() {
   try { AV.cfg = await api("/avatar/config"); } catch (e) { avatarStatus("Couldn't load avatar settings: " + e.message); return; }
   AV.rev = AV.cfg.rev;
@@ -1233,9 +1269,14 @@ async function loadAvatarConfig() {
   if (!AV.avatar) return;
   AV.avatar.setCamera(AV.cfg.camera); AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setLight(lightOn());
   AV.avatar.setGestures(AV.cfg.gestures);
+  AV.avatar.setNeon(neonOf(AV.cfg));
   AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
-  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY),
-    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || ""));
+  if (AV.lite === undefined) AV.lite = liteChar();   // decided once per page, so she isn't reloaded mid-session
+  const lite = AV.lite;
+  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY) + (lite ? "&lite=1" : ""),
+    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || "") + (lite ? "@lite" : ""));
+  if (AV.loadingMsg && $("#avStatus").textContent === AV.loadingMsg) avatarStatus("");
+  AV.loadingMsg = "";
   AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
   if (libs !== "downloading") startWake();
 }
@@ -1326,6 +1367,13 @@ function openAvatarSettings() {
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
     <label class="sub" style="display:block;margin-top:10px">Camera</label>
     <select id="cam">${[["face", "Face close-up"], ["upper", "Head and shoulders"], ["full", "Whole body"]].map(([v, l]) => `<option value="${v}" ${c.camera === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <h3 class="hud" style="margin-top:16px">Neon glow</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="neon" style="width:auto" ${c.neon ? "checked" : ""}> Neon look: glowing edges, coloured back lights and a dark stage</label>
+    <div style="display:flex;gap:16px;align-items:center;margin:6px 0">
+      <label class="sub" style="display:flex;gap:6px;align-items:center">Glow <input type="color" id="ng" value="${esc(neonOf(c).glow)}" style="width:52px;height:32px;padding:2px"></label>
+      <label class="sub" style="display:flex;gap:6px;align-items:center">Haze <input type="color" id="nh" value="${esc(neonOf(c).haze)}" style="width:52px;height:32px;padding:2px"></label></div>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ncr" style="width:auto" ${neonOf(c).crowd ? "checked" : ""}> Dancing silhouettes behind her</label>
+    <p class="sub">Glowing edges and the outline work best on toon-shaded characters (VRoid ones are). Changes show straight away; Save keeps them.</p>
     <h3 class="hud" style="margin-top:16px">Animations</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
@@ -1366,6 +1414,8 @@ function openAvatarSettings() {
     <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save</button></div>`);
   let style = c.style;
   const $d = q => d.querySelector(q);
+  const neonNow = () => ({ on: $d("#neon").checked, glow: $d("#ng").value, haze: $d("#nh").value, crowd: $d("#ncr").checked });
+  for (const id of ["#neon", "#ng", "#nh", "#ncr"]) $d(id).addEventListener("input", () => AV.avatar && AV.avatar.setNeon(neonNow()));
   const mark = () => { $d("#stOrb").className = style === "orb" ? "primary" : ""; $d("#stVrm").className = style === "vrm" ? "primary" : ""; };
   $d("#stOrb").onclick = () => { style = "orb"; mark(); };
   $d("#stVrm").onclick = () => { style = "vrm"; mark(); if (!c.has_model) $d("#vrmFile").click(); };
@@ -1407,13 +1457,14 @@ function openAvatarSettings() {
     SPEAK.say(`Hi, I'm ${NAME()}. It's 3:30 and the board is running at 5V. This is how I sound.`);
     Object.assign(AV.cfg, prev); SPEAK.enabled = was;
   };
-  $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
+  $d("#close").onclick = () => { d.remove(); if (AV.avatar) { AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setNeon(neonOf(AV.cfg)); } };
   $d("#save").onclick = async () => {
     try {
       AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
         speed: +$d("#sp").value, speak: $d("#spk").checked, height_cm: +$d("#ht").value,
         gestures: $d("#ges").checked, wake: $d("#wk").checked, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : undefined,
-        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value,
+        neon: $d("#neon").checked, neon_glow: $d("#ng").value, neon_haze: $d("#nh").value, neon_crowd: $d("#ncr").checked } });
       store.set("avatarSpeakFrom", $d("#oth").value);
       store.set("avatarCaption", $d("#capAt").value); applyCaptionAt();
       d.remove(); loadAvatarConfig();
@@ -1430,9 +1481,15 @@ async function startAvatarScreen() {
   AV.slow = mod.looksLikeSlowDevice();
   try { AV.cfg = await api("/avatar/config"); } catch {}
   AV.avatar = mod.createAvatar($("#avatarHost"), { camera: AV.cfg.camera, height: AV.cfg.height_cm, light: lightOn(), gestures: AV.cfg.gestures,
-    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m) });
+    neon: neonOf(AV.cfg), stageHost: $("#stage"),
+    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m),
+    onProgress: (got, total) => { AV.loadingMsg = total ? `Loading ${NAME()}'s 3D character… ${Math.round(got / 1e6)} of ${Math.round(total / 1e6)} MB`
+      : `Loading ${NAME()}'s 3D character… ${Math.round(got / 1e6)} MB`; avatarStatus(AV.loadingMsg); } });
   await AV.avatar.setStyle("orb");
-  await loadAvatarConfig();
+  // The page is running: tell the phone app now. The 3D character can take a while longer on mobile data;
+  // the orb shows (with download progress) until she's ready.
+  try { window.StellaiApp && window.StellaiApp.ready(); } catch {}
+  loadAvatarConfig().catch(e => avatarStatus("Avatar: " + e.message));
   // Automatic light mode: switch on if this device draws too slowly
   setTimeout(() => { if (AV.avatar && AV.cfg.light === "auto" && !AV.slow && AV.avatar.fps() < 32) { AV.autoLight = true; AV.avatar.setLight(true); } }, 8000);
   // Browsers only allow sound after a tap: ask once if needed

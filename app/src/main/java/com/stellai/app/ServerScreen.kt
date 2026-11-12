@@ -69,6 +69,8 @@ fun ServerScreen(onDone: () -> Unit) {
     var backups by remember { mutableStateOf<JSONObject?>(null) }
     var doctor by remember { mutableStateOf<JSONObject?>(null) }
     var checking by remember { mutableStateOf(false) }
+    var speed by remember { mutableStateOf<String?>(null) }
+    var timing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var confirmSwitch by remember { mutableStateOf<JSONObject?>(null) }
@@ -207,6 +209,33 @@ fun ServerScreen(onDone: () -> Unit) {
             doctor?.optJSONArray("checks")?.let { checks ->
                 items((0 until checks.length()).mapNotNull { checks.optJSONObject(it) }, key = { "d-" + it.optString("name") }) { c ->
                     CheckRow(c)
+                }
+            }
+
+            // ---- Speed test: real numbers for this server
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(enabled = !timing, onClick = {
+                            timing = true
+                            scope.launch {
+                                speed = try {
+                                    withContext(Dispatchers.IO) { HubApi.speedTest(s.serverUrl, s.apiKey) }
+                                } catch (e: Exception) {
+                                    error = app.engine.friendlyError(e)
+                                    null
+                                }
+                                timing = false
+                            }
+                        }) { Text("Speed test") }
+                        if (timing) {
+                            Spacer(Modifier.size(12.dp))
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Accent)
+                        }
+                    }
+                    Text("Measures how fast Stella reads, writes, hears and speaks on this server (up to a minute; she can't chat meanwhile).",
+                        style = MaterialTheme.typography.bodySmall, color = Space.Muted)
+                    speed?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
             }
 

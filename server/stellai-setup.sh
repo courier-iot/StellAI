@@ -225,38 +225,68 @@ if [[ -z "$CHOICE" ]]; then
 fi
 [[ "$CHOICE" =~ ^[123]$ ]] || CHOICE=$RECOMMENDED
 
+# context_for KEY MODEL_MB: the biggest context window (tokens) that keeps the model where it runs fastest.
+# Qwen3.5 keeps a per-token cache in only one layer out of four, so long contexts are cheap (the 9B measures about
+# 17 MB per 1,000 tokens with the 8-bit cache; 20-30 MB is planned here to cover working buffers).
+#   no usable GPU: memory isn't the limit, re-reading is (a CPU reads a few dozen tokens a second), so short stays
+#   4B / 9B on a GPU: model + context must fit on the card, or layers fall back to the CPU and replies slow down
+#   35B: its always-used core (about 2.5 GB) and the context sit on the card, the experts in RAM
+context_for() {
+  local key=$1 model_mb=$2 ctx per floor gpu_mb kv
+  if [[ $VRAM_GB -lt 4 ]]; then
+    if [[ $key == 35b ]]; then echo 16384
+    elif [[ $PHYS_CORES -ge 6 && $RAM_GB -ge 12 ]]; then echo 16384
+    else echo 8192; fi
+    return
+  fi
+  case $key in
+    4b) ctx=32768; per=20; floor=8192 ;;
+    9b) ctx=65536; per=20; floor=8192 ;;
+    *)  ctx=65536; per=30; floor=16384; [[ $VRAM_GB -ge 5 ]] && floor=32768 ;;
+  esac
+  if [[ $VRAM_GB -lt 8 ]]; then gpu_mb=$(( VRAM_GB * 1000 - 1000 )); else gpu_mb=$(( VRAM_GB * 1000 - 2000 )); fi
+  while (( ctx > floor )); do
+    kv=$(( ctx * per / 1000 ))
+    if [[ $key == 35b ]]; then
+      (( kv + 2500 <= gpu_mb && model_mb + kv + 4000 <= (RAM_GB + VRAM_GB) * 1000 )) && break
+    else
+      (( model_mb + kv <= gpu_mb )) && break
+    fi
+    ctx=$(( ctx / 2 ))
+  done
+  echo "$ctx"
+}
+
 GPU_ARGS=""
 case "$CHOICE" in
   1)
     MODEL_LABEL="Qwen3.5 4B"
     MODEL_REPO="unsloth/Qwen3.5-4B-GGUF"; MODEL_NAME="Qwen3.5-4B-Q4_K_M.gguf"
-    CONTEXT=4096; NET_CONTEXT=8192
+    CONTEXT=4096; NET_CONTEXT=$(context_for 4b 2700)
     if [[ $VRAM_GB -ge 4 ]]; then GPU_ARGS="-ngl 99"; fi
     ;;
   2)
     MODEL_LABEL="Qwen3.5 9B"
     MODEL_REPO="unsloth/Qwen3.5-9B-GGUF"
     if [[ $VRAM_GB -ge 5 && $VRAM_GB -lt 8 ]]; then
-      MODEL_NAME="Qwen3.5-9B-Q3_K_M.gguf"   # 3-bit so it fits entirely on a 6 GB card
+      MODEL_NAME="Qwen3.5-9B-Q3_K_M.gguf"; MODEL_MB=4600   # 3-bit so it fits entirely on a 6 GB card
     else
-      MODEL_NAME="Qwen3.5-9B-Q4_K_M.gguf"
+      MODEL_NAME="Qwen3.5-9B-Q4_K_M.gguf"; MODEL_MB=5700
     fi
-    CONTEXT=8192; NET_CONTEXT=8192
+    CONTEXT=8192; NET_CONTEXT=$(context_for 9b $MODEL_MB)
     if [[ $VRAM_GB -ge 5 ]]; then GPU_ARGS="-ngl 99"; fi
     ;;
   3)
     MODEL_LABEL="Qwen3.5 35B-A3B"
     MODEL_REPO="unsloth/Qwen3.5-35B-A3B-GGUF"
     # Best quality that fits RAM + GPU memory (more bits = more accurate, especially for code)
-    if (( RAM_GB + VRAM_GB >= 40 )); then MODEL_NAME="Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"     # 22.2 GB
-    elif (( RAM_GB + VRAM_GB >= 30 )); then MODEL_NAME="Qwen3.5-35B-A3B-UD-IQ4_XS.gguf"   # 17.5 GB
-    else MODEL_NAME="Qwen3.5-35B-A3B-UD-IQ3_S.gguf"                                        # 13.6 GB
+    if (( RAM_GB + VRAM_GB >= 40 )); then MODEL_NAME="Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"; MODEL_MB=22200
+    elif (( RAM_GB + VRAM_GB >= 30 )); then MODEL_NAME="Qwen3.5-35B-A3B-UD-IQ4_XS.gguf"; MODEL_MB=17500
+    else MODEL_NAME="Qwen3.5-35B-A3B-UD-IQ3_S.gguf"; MODEL_MB=13600
     fi
-    CONTEXT=16384; NET_CONTEXT=16384
+    CONTEXT=16384; NET_CONTEXT=$(context_for 35b $MODEL_MB)
     # Experts stay in RAM; everything else goes on the GPU (if there is one).
     if [[ $VRAM_GB -ge 4 ]]; then GPU_ARGS="-ngl 99 --cpu-moe"; fi
-    # The experts live in RAM, which leaves GPU room for a long context (32K tokens: longer chats before a refresh)
-    if [[ $VRAM_GB -ge 5 ]]; then NET_CONTEXT=32768; fi
     if [[ $RAM_GB -lt 18 ]]; then
       warn "Only ${RAM_GB} GB RAM: the 35B model will partly run from disk and be slow."
     fi
@@ -1310,12 +1340,51 @@ def transcribe(whisper_url: str, wav: bytes, language: str) -> str:
     return str(data.get("text", "")).strip()
 
 
+def has_speech(pcm: bytes, rate: int) -> bool:
+    """False only when a recording is plainly silence, so Whisper (the slow part of voice) isn't run on it.
+    Cautious on purpose: only loudness counts, with a low bar, so a quiet voice, or a clip that is speech from
+    start to end, always goes to Whisper. Room noise above the bar goes too, as it always did."""
+    import array
+    samples = array.array("h")
+    samples.frombytes(pcm[:len(pcm) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    frame = max(1, rate // 50)                      # 20 ms
+    if len(samples) < frame * 6:
+        return len(samples) > 0
+    loud = 0
+    for i in range(0, len(samples) - frame + 1, frame):
+        part = samples[i:i + frame:2]               # every other sample is plenty for a loudness estimate
+        if sum(x * x for x in part) > 120 * 120 * len(part):   # 120 of 32768 is about -49 dB: below a whisper
+            loud += 1
+            if loud >= 6:                           # 0.12 s in total, anywhere in the clip
+                return True
+    return False
+
+
 def clean_transcript(text: str) -> str:
     text = re.sub(r"\[[^\]]*\]", " ", text)  # [BLANK_AUDIO], [MUSIC] ...
     text = re.sub(r"\s+", " ", text).strip()
     if NOISE_PATTERNS.match(text):
         return ""
     return text
+
+
+_WRONG_KEYS = {}   # address -> [count since last log line, time of last log line]
+
+
+def note_wrong_key(addr):
+    """Someone used a wrong API key: say so in the activity log (at most once a minute per address), so a
+    stranger knocking, or a phone still holding an old key, doesn't go unnoticed."""
+    now = time.time()
+    entry = _WRONG_KEYS.setdefault(addr, [0, 0.0])
+    entry[0] += 1
+    if now - entry[1] >= 60:
+        log(f"wrong API key from {addr}" + (f" ({entry[0]} tries)" if entry[0] > 1 else "")
+            + ": if that's one of your devices, pair it again (Settings → Scan to connect)")
+        entry[0], entry[1] = 0, now
+    if len(_WRONG_KEYS) > 500:
+        _WRONG_KEYS.clear()
 
 
 def key_ok(given: str, expected: str) -> bool:
@@ -2636,7 +2705,9 @@ def plan_context(data):
     pid = str(data.get("project_id") or "")
     if pid:
         share = 0.2 if n_ctx <= 8192 else 0.3
-        budget = max(0, min(int(n_ctx * share), avail - 600))
+        # capped: excerpts ride on the newest message and are re-read each time, so a 64K window mustn't
+        # turn into 19K tokens of excerpts per message (10K is what the 32K window already used)
+        budget = max(0, min(int(n_ctx * share), 10000, avail - 600))
         if split:
             proj_text, excerpts, proj_t = build_project_context(pid, query, budget, split=True)
         else:
@@ -3646,21 +3717,67 @@ def detect_memory():
     return ram, vram
 
 
+# ---- How long a conversation the model is started with (its context window, in tokens)
+# Qwen3.5 only keeps a per-token cache in one layer out of four, so long contexts are cheap: the 9B measures
+# about 17 MB per 1,000 tokens with the 8-bit cache StellAI uses. The planning figures below add working
+# buffers on top. The 4B and 35B figures are estimates on the same basis, not measurements.
+CTX_TARGET = {"4b": 32768, "9b": 65536, "35b": 65536}
+CTX_GB_PER_1K = {"4b": 0.02, "9b": 0.02, "35b": 0.03}
+
+
+def context_for(key, model_gb, ram, vram, cores):
+    """The biggest context that keeps the model where it runs fastest on this computer.
+
+    - No usable graphics card: memory isn't the limit, re-reading is (a CPU reads a few dozen tokens a second,
+      so a long chat would take many minutes to load after a restart). Short contexts stay.
+    - 4B / 9B on a graphics card: model + context must fit on the card, or part of the model falls back to the
+      CPU and every reply gets slower.
+    - 35B: its always-used core (about 2.5 GB) and the context sit on the card, the experts in RAM."""
+    if vram < 4:
+        if key == "35b":
+            return 16384
+        return 16384 if cores >= 6 and ram >= 12 else 8192
+    floor = (32768 if vram >= 4.5 else 16384) if key == "35b" else 8192
+    gpu = vram - (1.0 if vram < 8 else 2.0)        # what --fit leaves free (voice, and vision on 8 GB+ cards)
+    ctx = CTX_TARGET.get(key, 8192)
+    while ctx > floor:
+        kv = ctx / 1000 * CTX_GB_PER_1K.get(key, 0.03)
+        if key == "35b":
+            fits = kv + 2.5 <= gpu and model_gb + kv + 4 <= ram + vram
+        else:
+            fits = model_gb + kv <= gpu
+        if fits:
+            break
+        ctx //= 2
+    return max(ctx, floor)
+
+
+def physical_cores():
+    """Real processor cores (not threads), as the setup counts them."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            text = f.read()
+        pairs = set(zip(re.findall(r"^physical id\s*:\s*(\d+)", text, re.M), re.findall(r"^core id\s*:\s*(\d+)", text, re.M)))
+        if pairs:
+            return len(pairs)
+    except OSError:
+        pass
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
 def model_file_for(key, ram, vram):
-    """Same choices as the setup: the best version that fits this computer."""
+    """Same choices as the setup: the best version that fits this computer, and its context window."""
     if key == "4b":
-        return "Qwen3.5-4B-Q4_K_M.gguf", 2.7, 8192
-    if key == "9b":
-        if 5 <= vram < 8:
-            return "Qwen3.5-9B-Q3_K_M.gguf", 4.6, 8192
-        return "Qwen3.5-9B-Q4_K_M.gguf", 5.7, 8192
-    total = ram + vram
-    ctx = 32768 if vram >= 5 else 16384
-    if total >= 40:
-        return "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf", 22.2, ctx
-    if total >= 30:
-        return "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf", 17.5, ctx
-    return "Qwen3.5-35B-A3B-UD-IQ3_S.gguf", 13.6, ctx
+        name, gb = "Qwen3.5-4B-Q4_K_M.gguf", 2.7
+    elif key == "9b":
+        name, gb = ("Qwen3.5-9B-Q3_K_M.gguf", 4.6) if 5 <= vram < 8 else ("Qwen3.5-9B-Q4_K_M.gguf", 5.7)
+    elif ram + vram >= 40:
+        name, gb = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf", 22.2
+    elif ram + vram >= 30:
+        name, gb = "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf", 17.5
+    else:
+        name, gb = "Qwen3.5-35B-A3B-UD-IQ3_S.gguf", 13.6
+    return name, gb, context_for(key, gb, ram, vram, physical_cores())
 
 
 class LinuxServerControl:
@@ -3796,6 +3913,7 @@ def server_status():
         st["context"] = int((props.get("default_generation_settings") or {}).get("n_ctx") or 0)
         st["model_path"] = os.path.basename(str(props.get("model_path") or ""))
         st["loaded"] = True
+        st["sleeping"] = bool(props.get("is_sleeping"))   # unloaded after a quiet spell; the next message wakes it
     except (urllib.error.URLError, OSError, ValueError):
         pass
     if SERVER_CONTROL:
@@ -3807,6 +3925,184 @@ def server_status():
     ram, vram = detect_memory()
     st.update(ram_gb=ram, vram_gb=vram)
     return st
+
+
+# ---- Speed test: real numbers for this computer ---------------------------------------------
+SPEED_FILE = None     # JSON list of past results, set in start()
+_SPEED_LOCK = threading.Lock()
+_SPEED_WORDS = ("the server reads this passage to measure how quickly it takes in text before it starts to answer "
+                "stars planets orbit circuit resistor voltage current signal memory window garden river mountain "
+                "morning coffee letter number station bridge engine market school music colour paper").split()
+
+
+def _speed_prompt(n_words=1100):
+    import random
+    rnd = random.Random(time.time_ns())        # different every run, so nothing is answered from the cache
+    return f"Passage {rnd.randrange(10**9)}. " + " ".join(rnd.choice(_SPEED_WORDS) for _ in range(n_words)) + "\n\nSummary:"
+
+
+def _resample_wav(wav, rate=16000):
+    """Any mono/stereo 16-bit WAV -> 16 kHz mono (what Whisper expects)."""
+    import array
+    with wave.open(io.BytesIO(wav)) as w:
+        src_rate, ch, width, frames = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.readframes(w.getnframes())
+    if width != 2:
+        raise ValueError("16-bit audio only")
+    a = array.array("h")
+    a.frombytes(frames[:len(frames) // 2 * 2])
+    if sys.byteorder == "big":
+        a.byteswap()
+    if ch > 1:
+        a = a[::ch]
+    if src_rate != rate and len(a) > 1:
+        n = int(len(a) * rate / src_rate)
+        step = (len(a) - 1) / max(1, n - 1)
+        out = array.array("h", bytes(2 * n))
+        for i in range(n):
+            x = i * step
+            j = int(x)
+            f = x - j
+            out[i] = int(a[j] * (1 - f) + a[min(j + 1, len(a) - 1)] * f)
+        a = out
+    if sys.byteorder == "big":
+        a.byteswap()
+    return pcm_to_wav(a.tobytes(), rate), len(a) / rate
+
+
+def _speed_history():
+    try:
+        with open(SPEED_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def run_speed_test(whisper_url="", language="en"):
+    """Measures this server as it is set up now: how fast the model reads and writes, how long it takes to wake,
+    and how long hearing and speaking take. Takes 10-60 s and uses the model, so it only runs when Stella is idle."""
+    if not _SPEED_LOCK.acquire(blocking=False):
+        return {"error": "A speed test is already running."}
+    try:
+        if llama_busy():
+            return {"error": "Stella is answering someone right now. Try again when she's idle."}
+        started = time.time()
+        out = {"at": int(started * 1000), "model": "", "results": []}
+
+        def add(key, name, value, unit, detail=""):
+            out["results"].append({"key": key, "name": name, "value": round(value, 2), "unit": unit, "detail": detail})
+
+        # -- the model: wake-up, reading, writing
+        try:
+            props = _llama("/props", timeout=10)
+            out["model"] = os.path.basename(str(props.get("model_path") or ""))
+            asleep = bool(props.get("is_sleeping"))
+            t0 = time.time()
+            r = _llama("/completion", {"prompt": _speed_prompt(), "n_predict": 96, "cache_prompt": False,
+                                       "ignore_eos": True, "temperature": 0.7, "stream": False}, timeout=600)
+            total = time.time() - t0
+            tm = r.get("timings") or {}
+            pn, ps = int(tm.get("prompt_n") or 0), float(tm.get("prompt_per_second") or 0)
+            gn, gs = int(tm.get("predicted_n") or 0), float(tm.get("predicted_per_second") or 0)
+            if asleep:
+                work = (float(tm.get("prompt_ms") or 0) + float(tm.get("predicted_ms") or 0)) / 1000
+                add("wake", "Waking up", max(0.0, total - work), "s", "from asleep to ready (the model had been unloaded)")
+            if ps:
+                add("read", "Reading", ps, "tokens/s", f"{pn} tokens read; a full page of text takes about {700 / ps:.1f} s")
+            if gs:
+                add("write", "Writing", gs, "tokens/s", f"about {gs * 0.75:.0f} words a second; a 150-word answer takes about {200 / gs:.0f} s")
+            if not ps and not gs:
+                out["results"].append({"key": "model", "name": "AI model", "error": "it answered without timing figures"})
+        except (urllib.error.URLError, OSError, ValueError, TypeError) as e:
+            out["results"].append({"key": "model", "name": "AI model", "error": f"not reachable ({e})"})
+
+        # -- speaking, then hearing that same sentence back (so the transcript can be checked too)
+        sentence = "Testing, one two three. The quick brown fox jumps over the lazy dog."
+        spoken = None
+        try:
+            ac = avatar_config()
+            engine = "Piper"
+            t0 = time.time()
+            if ac["engine"] == "kokoro" and KOKORO.ready():
+                spoken, engine = KOKORO.say(sentence, ac["kokoro_voice"], 1.0), "Kokoro"
+            elif os.path.isfile(_avatar_path("voices", ac["voice"] + ".onnx")):
+                TTS.say("Ready.", ac["voice"], 1.0)          # loads the voice first, as in normal use
+                t0 = time.time()
+                spoken = TTS.say(sentence, ac["voice"], 1.0)
+            if spoken:
+                took = time.time() - t0
+                _, seconds = _resample_wav(spoken)
+                add("speak", "Speaking", took, "s", f"{engine} made {seconds:.1f} s of speech"
+                    + (f" ({seconds / took:.0f}x faster than real time)" if took > 0 else ""))
+        except Exception as e:   # noqa: BLE001 - one part failing shouldn't lose the other figures
+            out["results"].append({"key": "speak", "name": "Speaking", "error": str(e)[:200]})
+        if whisper_url:
+            try:
+                if spoken:
+                    wav, seconds = _resample_wav(spoken)
+                else:   # no voice installed: time Whisper on a tone of the same length
+                    import array
+                    seconds = 4.0
+                    wav = pcm_to_wav(array.array("h", [int(3000 * math.sin(i / 9)) for i in range(64000)]).tobytes(), 16000)
+                t0 = time.time()
+                heard = clean_transcript(transcribe(whisper_url, wav, language))
+                took = time.time() - t0
+                ok = not spoken or len(set(_terms(heard)) & {"quick", "brown", "fox", "lazy", "dog", "testing"}) >= 3
+                add("hear", "Hearing", took, "s", f"for {seconds:.1f} s of speech"
+                    + (f'; heard: "{heard[:80]}"' if spoken else "") + ("" if ok else " (that's not what was said)"))
+            except Exception as e:   # noqa: BLE001
+                out["results"].append({"key": "hear", "name": "Hearing", "error": str(e)[:200]})
+
+        if EMBEDDER.url:
+            try:
+                t0 = time.time()
+                EMBEDDER.embed([" ".join(_SPEED_WORDS * 4)] * 8, EMBEDDER.DOC)
+                add("search", "File search", (time.time() - t0) / 8 * 1000, "ms", "per page indexed")
+            except Exception as e:   # noqa: BLE001
+                out["results"].append({"key": "search", "name": "File search", "error": str(e)[:200]})
+
+        out["took_s"] = round(time.time() - started, 1)
+        # compare with the last run on the same model, then remember this one (keeps 30)
+        hist = _speed_history()
+        prev = next((h for h in reversed(hist) if h.get("model") == out["model"]), None)
+        if prev:
+            old = {x.get("key"): x.get("value") for x in prev.get("results", []) if "value" in x}
+            for x in out["results"]:
+                if x.get("value") and old.get(x["key"]):
+                    x["change_pct"] = round((x["value"] - old[x["key"]]) / old[x["key"]] * 100)
+            out["compared_to"] = prev.get("at")
+        if SPEED_FILE and any("value" in x for x in out["results"]):
+            try:
+                with open(SPEED_FILE + ".tmp", "w") as f:
+                    json.dump((hist + [out])[-30:], f)
+                os.replace(SPEED_FILE + ".tmp", SPEED_FILE)
+            except OSError:
+                pass
+        log("speed test: " + ", ".join(f"{x['name'].lower()} {x['value']} {x['unit']}" for x in out["results"] if "value" in x))
+        return out
+    finally:
+        _SPEED_LOCK.release()
+
+
+def speed_text(report):
+    if report.get("error"):
+        return report["error"]
+    lines = ["StellAI speed test" + (f" — {report['model']}" if report.get("model") else ""), ""]
+    for x in report.get("results", []):
+        if "error" in x:
+            lines.append(f"  ✗ {x['name']}: {x['error']}")
+            continue
+        better_when_higher = x["unit"].endswith("/s")
+        ch = x.get("change_pct")
+        change = ""
+        if ch:
+            change = f"  ({'+' if ch > 0 else ''}{ch}% vs last time: {'faster' if (ch > 0) == better_when_higher else 'slower'})"
+        lines.append(f"  {x['name']}: {x['value']:g} {x['unit']}{change}")
+        if x.get("detail"):
+            lines.append(f"      {x['detail']}")
+    lines.append("")
+    lines.append(f"Took {report.get('took_s', 0):g} s.")
+    return "\n".join(lines)
 
 
 # ---- Health check ("doctor") --------------------------------------------------------------
@@ -3836,7 +4132,10 @@ def run_doctor():
         try:
             props = _llama("/props", timeout=5)
             n = (props.get("default_generation_settings") or {}).get("n_ctx")
-            add("AI model", "ok", f"{os.path.basename(str(props.get('model_path') or 'loaded'))}, {n} tokens of context")
+            if props.get("is_sleeping"):
+                add("AI model", "ok", "asleep to free memory; it wakes up on the next message (a few seconds)")
+            else:
+                add("AI model", "ok", f"{os.path.basename(str(props.get('model_path') or 'loaded'))}, {n} tokens of context")
         except (urllib.error.URLError, OSError, ValueError):
             add("AI model", "ok", "running")
     elif code == 503:
@@ -3972,6 +4271,221 @@ def shrink_result(result, max_chars):
         o[path[-1]] = o[path[-1]][:target] + " […shortened to fit Stella's memory]"
         result["truncated"] = True
     return result
+
+
+# ---- Instant answers --------------------------------------------------------------
+# Simple, unambiguous requests ("what time is it", "add milk to the shopping list", "remind me to call Sam in
+# 20 minutes") are answered here without waking the model: instant on any hardware. Anything not matched
+# exactly returns None and goes to the model as usual, so this must stay strict rather than clever.
+_Q_LEAD = re.compile(r"^(?:(?:hey|ok|okay|hi|hello)[\s,]+)?(?:stella[\s,!.]+)?(?:(?:can|could|would|will) you\s+)?"
+                     r"(?:please\s+)?", re.I)
+_Q_TAIL = re.compile(r"(?:[\s,]+(?:please|thanks|thank you|for me|stella))*[\s.!?]*$", re.I)
+_Q_TIME = re.compile(r"(?:what(?:'s| is)? (?:the )?time(?: is it)?|what time is it|tell me the time)(?: right now| now)?", re.I)
+_Q_DATE = re.compile(r"what(?:'s| is) (?:the |today'?s )?date(?: today)?|what day is it(?: today)?|"
+                     r"what day of the week is it(?: today)?|what(?:'s| is) today", re.I)
+_Q_MATH_LEAD = re.compile(r"^(?:what(?:'s| is)|calculate|compute|how much is|work out)\s+", re.I)
+_Q_MATH_WORDS = [(re.compile(p, re.I), r) for p, r in [
+    (r"\s+plus\s+", " + "), (r"\s+minus\s+", " - "), (r"\s+(?:times|multiplied by)\s+", " * "),
+    (r"\s+(?:divided by|over)\s+", " / "), (r"\s+to the power of\s+", " ^ "), (r"(?<=\d)\s*[x×]\s*(?=\d)", " * "),
+    (r"(?<=\d),(?=\d{3}\b)", "")]]
+_Q_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\s+(\d+(?:\.\d+)?)", re.I)
+_Q_ADD = re.compile(r"(?:add|put)\s+(.+?)\s+(?:to|on|onto)\s+(?:my|the|our)\s+(.+?)\s+list", re.I)
+_Q_SHOW = re.compile(r"(?:what(?:'s| is) on|show(?: me)?|read(?: me)?|list)\s+(?:my|the|our)\s+(.+?)\s+list", re.I)
+_Q_REMINDERS = re.compile(r"(?:what are|show(?: me)?|list|read(?: me)?)\s+(?:my|the)\s+reminders|"
+                          r"what reminders do i have|do i have any reminders", re.I)
+_Q_REMIND_IN = re.compile(r"remind me\s+(?:to\s+|about\s+)?(.+?)\s+in\s+(\d+|an?|half an)\s*(min(?:ute)?s?|h(?:ou)?rs?)", re.I)
+_Q_REMIND_IN2 = re.compile(r"remind me\s+in\s+(\d+|an?|half an)\s*(min(?:ute)?s?|h(?:ou)?rs?)\s+(?:to\s+|about\s+)?(.+)", re.I)
+_Q_REMIND_AT = re.compile(r"remind me\s+(?:to\s+|about\s+)?(.+?)\s+(?:(today|tomorrow)\s+)?at\s+"
+                          r"(\d{1,2})(?::(\d\d))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s+(today|tomorrow))?", re.I)
+_Q_NUM = r"(\d+(?:\.5)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty five|forty-five|sixty|ninety|half an?)"
+_Q_UNIT = r"(seconds?|secs?|minutes?|mins?|hours?|hrs?)"
+_Q_TIMER = re.compile(r"(?:set|start|begin|make)\s+(?:a|an|the|me a)\s+(?:(.+?)\s+)?timer\s+(?:for|of)\s+" + _Q_NUM + r"\s*" + _Q_UNIT +
+                      r"(?:\s+(?:and\s+)?" + _Q_NUM + r"\s*" + _Q_UNIT + r")?|"
+                      r"(?:set|start)\s+(?:a|an)\s+" + _Q_NUM + r"[\s-]*" + _Q_UNIT + r"\s+timer|"
+                      r"timer\s+(?:for\s+)?" + _Q_NUM + r"\s*" + _Q_UNIT, re.I)
+_Q_ALARM = re.compile(r"(?:set|make|create)\s+(?:an?|the|my)\s+alarm\s+(?:for|at)\s+(\d{1,2})(?::(\d\d))?\s*(a\.?m\.?|p\.?m\.?)?"
+                      r"(?:\s+(?:tomorrow|tomorrow morning|in the morning|tonight))?|"
+                      r"wake me(?: up)?\s+at\s+(\d{1,2})(?::(\d\d))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s+(?:tomorrow|tomorrow morning|in the morning))?", re.I)
+_Q_WORDNUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+              "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty five": 45, "forty-five": 45, "sixty": 60, "ninety": 90}
+_Q_VAGUE = re.compile(r"\b(it|that|this|those|these|them|same|again|another)\b", re.I)
+
+
+def _quick_now(now_text):
+    from datetime import datetime
+    if now_text:
+        try:
+            return datetime.fromisoformat(str(now_text).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now().astimezone()
+
+
+def _clock(dt):
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def _plain_number(v):
+    if abs(v - round(v)) < 1e-9 and abs(v) < 1e15:
+        return f"{int(round(v)):,}"
+    return f"{v:,.6f}".rstrip("0").rstrip(".") if abs(v) >= 1e-4 else f"{v:.6g}"
+
+
+def _quick_maths(body, asked):
+    """asked: the message began with "what is" / "calculate". Without that, only something that can't be a date,
+    phone number or part number counts ("12 * 7", "(2+3)^2", "10 - 3" with spaces)."""
+    m = _Q_PERCENT.fullmatch(body)
+    if m:
+        return f"{m.group(1)}% of {m.group(2)} is {_plain_number(float(m.group(1)) * float(m.group(2)) / 100)}."
+    expr = body
+    for rx, rep in _Q_MATH_WORDS:
+        expr = rx.sub(rep, expr)
+    expr = expr.strip().rstrip("=").strip()
+    # digits and operators only (no names, units or functions: those go to the model and its calculator tool)
+    if not re.fullmatch(r"[\d\s.+\-*/^()]+", expr) or not re.search(r"\d\s*[+\-*/^]\s*[\d(.-]", expr):
+        return None
+    if not asked and not re.search(r"[+*^(]|\d\s+[-/]\s+\d", expr):
+        return None
+    try:
+        value = safe_eval(expr)
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError, TypeError):
+        return None
+    shown = " ".join(expr.replace("*", "×").replace("/", "÷").split())
+    return f"{shown} = {_plain_number(value)}"
+
+
+def _q_seconds(amount, unit):
+    a = amount.lower()
+    n = 0.5 if a.startswith("half") else _Q_WORDNUM[a] if a in _Q_WORDNUM else float(a)
+    u = unit.lower()
+    return n * (3600 if u.startswith("h") else 60 if u.startswith("m") else 1)
+
+
+def _q_duration(seconds):
+    parts = []
+    for size, name in ((3600, "hour"), (60, "minute"), (1, "second")):
+        n, seconds = divmod(seconds, size)
+        if n:
+            parts.append(f"{n} {name}{'s' if n != 1 else ''}")
+    return " and ".join(parts) or "0 seconds"
+
+
+def _quick_phone(body):
+    """Timers and alarms run on the phone that asked: this returns the phone tool to run (set_timer / set_alarm,
+    the same ones the model would call) with the words to say. Only asked for by clients that are phones."""
+    m = _Q_TIMER.fullmatch(body)
+    if m:
+        g = m.groups()
+        label = (g[0] or "").strip()
+        pairs = [(g[i], g[i + 1]) for i in (1, 3, 5, 7) if g[i] and g[i + 1]]
+        if not pairs or _Q_VAGUE.search(label) or len(label) > 40:
+            return None
+        seconds = int(round(sum(_q_seconds(a, u) for a, u in pairs)))
+        if not 5 <= seconds <= 24 * 3600:
+            return None
+        args = {"seconds": seconds}
+        if label:
+            args["label"] = label[0].upper() + label[1:]
+        return {"reply": f"{'Timer' if not label else label[0].upper() + label[1:] + ' timer'} set for {_q_duration(seconds)}.",
+                "kind": "timer", "changed": "", "phone_tool": {"name": "set_timer", "args": args}}
+    m = _Q_ALARM.fullmatch(body)
+    if m:
+        g = m.groups()
+        hour, minute, ampm = (g[0], g[1], g[2]) if g[0] else (g[3], g[4], g[5])
+        hour, minute, ampm = int(hour), int(minute or 0), (ampm or "").lower().replace(".", "")
+        # An unmistakable time only ("7 am", "6:30 pm", "17:45"); "set an alarm for 7" goes to the model
+        if ampm and 1 <= hour <= 12 and minute < 60:
+            hour = hour % 12 + (12 if ampm == "pm" else 0)
+        elif ampm or not (g[1] or g[4]) or not (13 <= hour <= 23 and minute < 60):
+            return None
+        from datetime import time as _t
+        said = _t(hour, minute).strftime("%I:%M %p").lstrip("0")
+        return {"reply": f"Alarm set for {said}.", "kind": "alarm", "changed": "",
+                "phone_tool": {"name": "set_alarm", "args": {"hour": hour, "minute": minute}}}
+    return None
+
+
+def quick_reply(text, now_text="", phone=False):
+    """An instant answer for a simple request, or None when the model should handle it.
+
+    Returns {"reply": str, "kind": str, "changed": "" | "reminders" | "lists"}, plus "phone_tool" {name, args}
+    when the asking phone should run one of its own tools (only when phone=True)."""
+    raw = " ".join(str(text or "").split())
+    if not raw or len(raw) > 140 or "\n" in str(text):
+        return None
+    body = _Q_TAIL.sub("", _Q_LEAD.sub("", raw, count=1)).strip()
+    if not body:
+        return None
+    now = _quick_now(now_text)
+
+    if phone:
+        hit = _quick_phone(body)
+        if hit:
+            return hit
+    if _Q_TIME.fullmatch(body):
+        return {"reply": f"It's {_clock(now)}.", "kind": "time", "changed": ""}
+    if _Q_DATE.fullmatch(body):
+        return {"reply": f"It's {now.strftime('%A, %B')} {now.day}, {now.year}.", "kind": "date", "changed": ""}
+
+    sums = _Q_MATH_LEAD.sub("", body, count=1)
+    maths = _quick_maths(sums, sums != body)
+    if maths:
+        return {"reply": maths, "kind": "maths", "changed": ""}
+
+    if _Q_REMINDERS.fullmatch(body):
+        items = [r for r in CHATS.reminders(0) if not r["done"]]
+        if not items:
+            return {"reply": "You have no upcoming reminders.", "kind": "reminders", "changed": ""}
+        lines = "\n".join(f"- {_fmt_time(r['due_at'])}: {r['text']}" for r in items[:20])
+        return {"reply": f"Your upcoming reminders:\n{lines}", "kind": "reminders", "changed": ""}
+
+    m = _Q_SHOW.fullmatch(body)
+    if m and not _Q_VAGUE.search(m.group(1)):
+        key = CHATS._list_name(m.group(1))
+        items = [i for i in CHATS.lists().get(key, []) if not i["done"]]
+        if not items:
+            return {"reply": f"Your {key} list is empty.", "kind": "list", "changed": ""}
+        return {"reply": f"On your {key} list:\n" + "\n".join(f"- {i['text']}" for i in items), "kind": "list", "changed": ""}
+
+    m = _Q_ADD.fullmatch(body)
+    if m and not _Q_VAGUE.search(m.group(1)) and not _Q_VAGUE.search(m.group(2)):
+        items = [x.strip() for x in re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", m.group(1)) if x.strip()]
+        name, added = CHATS.add_items(m.group(2), items)
+        if added:
+            return {"reply": f"Added to your {name} list: {', '.join(added)}.", "kind": "list", "changed": "lists"}
+
+    from datetime import timedelta
+    what = due = None
+    m = _Q_REMIND_IN.fullmatch(body)
+    m2 = None if m else _Q_REMIND_IN2.fullmatch(body)
+    if m or m2:
+        what, amount, unit = (m.group(1), m.group(2), m.group(3)) if m else (m2.group(3), m2.group(1), m2.group(2))
+        n = 0.5 if amount.lower().startswith("half") else 1 if amount.lower() in ("a", "an") else int(amount)
+        minutes = n * (60 if unit.lower().startswith("h") else 1)
+        if 0 < minutes <= 7 * 24 * 60:
+            due = now + timedelta(minutes=minutes)
+    else:
+        m = _Q_REMIND_AT.fullmatch(body)
+        if m:
+            what, hour, minute = m.group(1), int(m.group(3)), int(m.group(4) or 0)
+            ampm, day = (m.group(5) or "").lower().replace(".", ""), (m.group(2) or m.group(6) or "").lower()
+            # Only an unmistakable time: "5 pm", "5:30 pm" or 24-hour "17:30". A bare "at 5" goes to the model.
+            if ampm and 1 <= hour <= 12 and minute < 60:
+                hour = hour % 12 + (12 if ampm == "pm" else 0)
+            elif not (not ampm and m.group(4) and 13 <= hour <= 23 and minute < 60):
+                hour = None
+            if hour is not None:
+                due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if day == "tomorrow" or (not day and due <= now):
+                    due += timedelta(days=1)
+                elif day == "today" and due <= now:
+                    due = None
+    if what and due and not _Q_VAGUE.search(what) and len(what) >= 3:
+        r = CHATS.add_reminder(what[0].upper() + what[1:], int(due.timestamp() * 1000))
+        days = (due.date() - now.date()).days
+        when = f"at {_clock(due)}" if days == 0 else f"{'tomorrow' if days == 1 else 'on ' + due.strftime('%A')} at {_clock(due)}"
+        return {"reply": f"Okay, I'll remind you {when}: {r['text']}.", "kind": "reminder", "changed": "reminders"}
+    return None
 
 
 def run_server_tool(name, args):
@@ -4692,7 +5206,7 @@ async function send() {
   addMsg(convId, "user", (text + photos.map(p => `\n![photo](image:${p.id})`).join("")).trim());
   renderSide(); renderMsgs();
   const voice = !!S.voiceNext; S.voiceNext = false;
-  await run(convId, photos, voice);
+  await run(convId, photos, voice, true);
 }
 function stop() { if (S.abort) S.abort.abort(); S.stopRequested = true; SPEAK.cancel(); }
 async function retry() {
@@ -4706,11 +5220,31 @@ function truncateFrom(id) {
   const now = nextTs(); list.slice(i).forEach(m => saveMsg({ ...m, deleted: true, text: "", reasoning: "", updated_at: now }));
 }
 
-async function run(convId, photos, voice = false) {
+// Simple requests (the time, sums, lists, reminders) are answered by the server at once, without the model.
+// Only for a message just sent (not Retry: a reminder mustn't be set twice).
+async function quickAnswer(convId) {
+  const last = msgsOf(convId).filter(m => m.role === "user").pop();
+  const text = last ? last.text.trim() : "";
+  if (!text || text.length > 140 || text.includes("\n")) return null;
+  const now = new Date(), off = -now.getTimezoneOffset(), pad = n => String(Math.abs(n)).padStart(2, "0");
+  const iso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `${off >= 0 ? "+" : "-"}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+  try { const r = await api("/quick", { method: "POST", json: { text, now: iso } }); return r && r.reply ? r.reply : null; } catch { return null; }
+}
+
+async function run(convId, photos, voice = false, fresh = false) {
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
   SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
   try {
+    // (not in Writer, Tutor, Brainstorm or custom modes, where "what time is it?" may be part of the story)
+    const quick = fresh && !photos.length && ["general", "programmer", "electronics"].includes(curMode().id) ? await quickAnswer(convId) : null;
+    if (quick) {
+      if (AVATAR_MODE) { SPEAK.begin(); SPEAK.feed(quick, true); avatarCaption(quick); if (AV.avatar) AV.avatar.react(quick); }
+      postAvatar({ state: "reply", text: quick });
+      addMsg(convId, "assistant", quick);
+      return;
+    }
     let p = await prepare(convId, photos.length, voice);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
@@ -5010,7 +5544,7 @@ function onSearch() {
 // ---------------------------------------------------------------- server: status, models, health check, backups
 async function openServer() {
   const d = dialog(`<h2>🖥 Server</h2><div id="sv">Loading…</div>
-    <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button><div id="docOut"></div>
+    <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button> <button id="spd">Speed test</button><div id="docOut"></div>
     <h3 class="hud" style="margin-top:18px">Backups</h3><div id="bk">Loading…</div>
     <div class="btns"><button id="close">Close</button></div>`);
   let timer = 0, closed = false;
@@ -5061,6 +5595,19 @@ async function openServer() {
     try { const r = await api("/doctor"); const ic = { ok: ["✓", "var(--accent)"], warn: ["!", "var(--gold)"], fail: ["✗", "var(--red)"] };
       d.querySelector("#docOut").innerHTML = (r.checks || []).map(c => { const [i, col] = ic[c.state] || ic.fail;
         return `<div class="check"><span class="ic" style="color:${col}">${i}</span><div><b>${esc(c.name)}</b>: ${esc(c.detail)}${c.fix && c.state !== "ok" ? `<div class="sub">→ ${esc(c.fix)}</div>` : ""}</div></div>`; }).join(""); }
+    catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  // Real numbers for this server: reading, writing, waking, hearing and speaking, compared with the last run
+  d.querySelector("#spd").onclick = async e => {
+    e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Measuring… (up to a minute; ${esc(NAME())} can't chat meanwhile)</p>`;
+    try { const r = await api("/speedtest", { method: "POST", json: {} });
+      d.querySelector("#docOut").innerHTML = (r.results || []).map(x => {
+        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">✗</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
+        const up = x.unit.endsWith("/s"), ch = x.change_pct;
+        const diff = ch ? ` <span style="color:${(ch > 0) === up ? "var(--accent)" : "var(--gold)"}">(${ch > 0 ? "+" : ""}${ch}% vs last time)</span>` : "";
+        return `<div class="check"><span class="ic" style="color:var(--accent)">◆</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
+        + `<p class="sub">${esc(r.model || "")} · took ${r.took_s} s</p>`; }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
     e.target.disabled = false;
   };
@@ -5376,7 +5923,10 @@ function updateAvatarState() {
   const s = $("#avState"); if (s) s.textContent = dotTxt || "";
 }
 function animUrl(a) { return "/avatar/bin/animations/" + encodeURIComponent(a.file) + "?key=" + encodeURIComponent(KEY); }
+const neonOf = c => ({ on: !!c.neon, glow: c.neon_glow || "#3dff9e", haze: c.neon_haze || "#ff3fb4", crowd: c.neon_crowd !== false });
 function lightOn() { return AV.cfg.light === "on" || (AV.cfg.light === "auto" && (AV.slow || AV.autoLight)); }
+// Phones, tablets and light-mode screens load a copy of the character with smaller textures (the server makes it once)
+function liteChar() { return lightOn() || matchMedia("(pointer: coarse)").matches || new URLSearchParams(location.search).get("app") === "1"; }
 async function loadAvatarConfig() {
   try { AV.cfg = await api("/avatar/config"); } catch (e) { avatarStatus("Couldn't load avatar settings: " + e.message); return; }
   AV.rev = AV.cfg.rev;
@@ -5388,9 +5938,14 @@ async function loadAvatarConfig() {
   if (!AV.avatar) return;
   AV.avatar.setCamera(AV.cfg.camera); AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setLight(lightOn());
   AV.avatar.setGestures(AV.cfg.gestures);
+  AV.avatar.setNeon(neonOf(AV.cfg));
   AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
-  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY),
-    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || ""));
+  if (AV.lite === undefined) AV.lite = liteChar();   // decided once per page, so she isn't reloaded mid-session
+  const lite = AV.lite;
+  await AV.avatar.setStyle(AV.cfg.style, "/avatar/bin/characters/" + encodeURIComponent(AV.cfg.character || "") + "?key=" + encodeURIComponent(KEY) + (lite ? "&lite=1" : ""),
+    (AV.cfg.character || "") + "@" + (AV.cfg.model_v || "") + (lite ? "@lite" : ""));
+  if (AV.loadingMsg && $("#avStatus").textContent === AV.loadingMsg) avatarStatus("");
+  AV.loadingMsg = "";
   AV.avatar.setAnimations((AV.cfg.animations || []).map(a => ({ ...a, url: animUrl(a) })));
   if (libs !== "downloading") startWake();
 }
@@ -5481,6 +6036,13 @@ function openAvatarSettings() {
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
     <label class="sub" style="display:block;margin-top:10px">Camera</label>
     <select id="cam">${[["face", "Face close-up"], ["upper", "Head and shoulders"], ["full", "Whole body"]].map(([v, l]) => `<option value="${v}" ${c.camera === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <h3 class="hud" style="margin-top:16px">Neon glow</h3>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="neon" style="width:auto" ${c.neon ? "checked" : ""}> Neon look: glowing edges, coloured back lights and a dark stage</label>
+    <div style="display:flex;gap:16px;align-items:center;margin:6px 0">
+      <label class="sub" style="display:flex;gap:6px;align-items:center">Glow <input type="color" id="ng" value="${esc(neonOf(c).glow)}" style="width:52px;height:32px;padding:2px"></label>
+      <label class="sub" style="display:flex;gap:6px;align-items:center">Haze <input type="color" id="nh" value="${esc(neonOf(c).haze)}" style="width:52px;height:32px;padding:2px"></label></div>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ncr" style="width:auto" ${neonOf(c).crowd ? "checked" : ""}> Dancing silhouettes behind her</label>
+    <p class="sub">Glowing edges and the outline work best on toon-shaded characters (VRoid ones are). Changes show straight away; Save keeps them.</p>
     <h3 class="hud" style="margin-top:16px">Animations</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
@@ -5521,6 +6083,8 @@ function openAvatarSettings() {
     <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save</button></div>`);
   let style = c.style;
   const $d = q => d.querySelector(q);
+  const neonNow = () => ({ on: $d("#neon").checked, glow: $d("#ng").value, haze: $d("#nh").value, crowd: $d("#ncr").checked });
+  for (const id of ["#neon", "#ng", "#nh", "#ncr"]) $d(id).addEventListener("input", () => AV.avatar && AV.avatar.setNeon(neonNow()));
   const mark = () => { $d("#stOrb").className = style === "orb" ? "primary" : ""; $d("#stVrm").className = style === "vrm" ? "primary" : ""; };
   $d("#stOrb").onclick = () => { style = "orb"; mark(); };
   $d("#stVrm").onclick = () => { style = "vrm"; mark(); if (!c.has_model) $d("#vrmFile").click(); };
@@ -5562,13 +6126,14 @@ function openAvatarSettings() {
     SPEAK.say(`Hi, I'm ${NAME()}. It's 3:30 and the board is running at 5V. This is how I sound.`);
     Object.assign(AV.cfg, prev); SPEAK.enabled = was;
   };
-  $d("#close").onclick = () => { d.remove(); if (AV.avatar) AV.avatar.setHeight(AV.cfg.height_cm); };
+  $d("#close").onclick = () => { d.remove(); if (AV.avatar) { AV.avatar.setHeight(AV.cfg.height_cm); AV.avatar.setNeon(neonOf(AV.cfg)); } };
   $d("#save").onclick = async () => {
     try {
       AV.cfg = await api("/avatar/config", { method: "POST", json: { style, character: $d("#chr") ? $d("#chr").value : undefined, camera: $d("#cam").value, voice: $d("#vc").value,
         speed: +$d("#sp").value, speak: $d("#spk").checked, height_cm: +$d("#ht").value,
         gestures: $d("#ges").checked, wake: $d("#wk").checked, engine: $d("#eng").value, kokoro_voice: $d("#kv") ? $d("#kv").value : undefined,
-        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value } });
+        followup: $d("#fu").checked, barge_in: $d("#bi").checked, wake_word: $d("#ww").value, wake_sensitivity: +$d("#ws").value, light: $d("#lt").value,
+        neon: $d("#neon").checked, neon_glow: $d("#ng").value, neon_haze: $d("#nh").value, neon_crowd: $d("#ncr").checked } });
       store.set("avatarSpeakFrom", $d("#oth").value);
       store.set("avatarCaption", $d("#capAt").value); applyCaptionAt();
       d.remove(); loadAvatarConfig();
@@ -5585,9 +6150,15 @@ async function startAvatarScreen() {
   AV.slow = mod.looksLikeSlowDevice();
   try { AV.cfg = await api("/avatar/config"); } catch {}
   AV.avatar = mod.createAvatar($("#avatarHost"), { camera: AV.cfg.camera, height: AV.cfg.height_cm, light: lightOn(), gestures: AV.cfg.gestures,
-    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m) });
+    neon: neonOf(AV.cfg), stageHost: $("#stage"),
+    onError: e => avatarStatus("3D character: " + e.message + " (showing the orb)"), onInfo: m => avatarStatus(m),
+    onProgress: (got, total) => { AV.loadingMsg = total ? `Loading ${NAME()}'s 3D character… ${Math.round(got / 1e6)} of ${Math.round(total / 1e6)} MB`
+      : `Loading ${NAME()}'s 3D character… ${Math.round(got / 1e6)} MB`; avatarStatus(AV.loadingMsg); } });
   await AV.avatar.setStyle("orb");
-  await loadAvatarConfig();
+  // The page is running: tell the phone app now. The 3D character can take a while longer on mobile data;
+  // the orb shows (with download progress) until she's ready.
+  try { window.StellaiApp && window.StellaiApp.ready(); } catch {}
+  loadAvatarConfig().catch(e => avatarStatus("Avatar: " + e.message));
   // Automatic light mode: switch on if this device draws too slowly
   setTimeout(() => { if (AV.avatar && AV.cfg.light === "auto" && !AV.slow && AV.avatar.fps() < 32) { AV.autoLight = true; AV.avatar.setLight(true); } }, 8000);
   // Browsers only allow sound after a tap: ask once if needed
@@ -5707,7 +6278,8 @@ def avatar_config():
     cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
            "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
            "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": "",
-           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": False}
+           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": False,
+           "neon": False, "neon_glow": "#3dff9e", "neon_haze": "#ff3fb4", "neon_crowd": True}
     try:
         with open(_avatar_path("config.json")) as f:
             saved = json.load(f)
@@ -5757,7 +6329,10 @@ def save_avatar_config(new):
         cur["engine"] = new["engine"]
     if new.get("kokoro_voice") in KOKORO_VOICES:
         cur["kokoro_voice"] = new["kokoro_voice"]
-    for k in ("speak", "speak_others", "name_tag", "wake", "gestures", "followup", "barge_in"):
+    for k in ("neon_glow", "neon_haze"):
+        if isinstance(new.get(k), str) and re.fullmatch(r"#[0-9a-fA-F]{6}", new[k]):
+            cur[k] = new[k].lower()
+    for k in ("speak", "speak_others", "name_tag", "wake", "gestures", "followup", "barge_in", "neon", "neon_crowd"):
         if k in new:
             cur[k] = bool(new[k])
     if "speed" in new:
@@ -6380,6 +6955,40 @@ def _tts_speakable_ok():
     return bool(piper_exe()) and os.path.isfile(_avatar_path("voices", avatar_config()["voice"] + ".onnx"))
 
 
+class PhraseCache:
+    """Short spoken phrases ("Okay.", "Reminder set.") are kept as audio, so repeats don't run the voice engine."""
+    MAX_CHARS, MAX_ITEMS, MAX_BYTES = 90, 150, 24_000_000
+
+    def __init__(self):
+        import collections
+        self.items, self.size, self.lock = collections.OrderedDict(), 0, threading.Lock()
+        self.hits = self.misses = 0
+
+    def get(self, key):
+        with self.lock:
+            wav = self.items.get(key)
+            if wav is None:
+                self.misses += 1
+                return None
+            self.items.move_to_end(key)
+            self.hits += 1
+            return wav
+
+    def put(self, key, wav):
+        if not wav or len(wav) > 2_000_000:
+            return
+        with self.lock:
+            if key in self.items:
+                self.size -= len(self.items.pop(key))
+            self.items[key] = wav
+            self.size += len(wav)
+            while len(self.items) > self.MAX_ITEMS or self.size > self.MAX_BYTES:
+                self.size -= len(self.items.popitem(last=False)[1])
+
+
+PHRASES = PhraseCache()
+
+
 class AvatarBus:
     """What Stella is doing on any device (listening, thinking, replying), for avatar screens to show.
     Screens poll /avatar/events?since=N about once a second."""
@@ -6506,6 +7115,135 @@ def avatar_rev():
     return _REV_CACHE["rev"]
 
 
+# ---- Lighter characters for phones and small screens ------------------------------------------
+# VRoid characters carry 2048-4096 px textures: most of the download, and hundreds of MB of graphics memory once
+# loaded. Phones and light-mode screens get a copy with textures capped at 1024 px (made once, kept in
+# avatar/lite). The original file is never changed, and big screens still get it.
+LITE_TEXTURE = 1024
+_LITE = {"lock": threading.Lock(), "busy": set(), "failed": set()}
+
+
+def slim_vrm(data, max_px=LITE_TEXTURE):
+    """A copy of a .vrm/.glb with oversized textures scaled down, or None when there's nothing to gain."""
+    import struct
+    from PIL import Image
+    if len(data) < 28 or data[:4] != b"glTF":
+        return None
+    version, total = struct.unpack_from("<II", data, 4)
+    jlen, jtype = struct.unpack_from("<II", data, 12)
+    if jtype != 0x4E4F534A:
+        return None
+    doc = json.loads(data[20:20 + jlen].decode("utf-8"))
+    off = 20 + jlen
+    if off + 8 > len(data):
+        return None
+    blen, btype = struct.unpack_from("<II", data, off)
+    if btype != 0x004E4942:
+        return None
+    blob = memoryview(data)[off + 8:off + 8 + blen]
+    views = doc.get("bufferViews") or []
+    if len(doc.get("buffers") or []) != 1 or any(v.get("buffer", 0) != 0 for v in views):
+        return None
+    replaced = {}
+    for img in doc.get("images") or []:
+        vi = img.get("bufferView")
+        if vi is None or vi in replaced or not 0 <= vi < len(views):
+            continue
+        v = views[vi]
+        raw = bytes(blob[v.get("byteOffset", 0):v.get("byteOffset", 0) + v["byteLength"]])
+        try:
+            im = Image.open(io.BytesIO(raw))
+            fmt = im.format
+            if fmt not in ("PNG", "JPEG") or max(im.size) <= max_px:
+                continue
+            scale = max_px / max(im.size)
+            size = (max(1, round(im.width * scale)), max(1, round(im.height * scale)))
+            if im.mode not in ("RGB", "RGBA", "L", "LA"):
+                im = im.convert("RGBA" if "A" in im.mode or "transparency" in im.info else "RGB")
+            small = im.resize(size, Image.LANCZOS)
+            out = io.BytesIO()
+            if fmt == "JPEG":
+                small.convert("RGB").save(out, "JPEG", quality=88, optimize=True)
+            else:
+                small.save(out, "PNG", optimize=True)
+        except Exception:   # noqa: BLE001 - an image Pillow can't read stays as it is
+            continue
+        if out.tell() < len(raw):
+            replaced[vi] = out.getvalue()
+    if not replaced:
+        return None
+    # Rebuild the binary part: every view in its original order, 4-byte aligned, with the new image bytes
+    parts, pos = [], 0
+    for i in sorted(range(len(views)), key=lambda k: views[k].get("byteOffset", 0)):
+        v = views[i]
+        chunk = replaced.get(i)
+        if chunk is None:
+            chunk = bytes(blob[v.get("byteOffset", 0):v.get("byteOffset", 0) + v["byteLength"]])
+        pad = (-pos) % 4
+        parts.append(b"\0" * pad)
+        pos += pad
+        v["byteOffset"], v["byteLength"] = pos, len(chunk)
+        parts.append(chunk)
+        pos += len(chunk)
+    parts.append(b"\0" * ((-pos) % 4))
+    binary = b"".join(parts)
+    doc["buffers"][0]["byteLength"] = len(binary)
+    js = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    js += b" " * ((-len(js)) % 4)
+    return (b"glTF" + struct.pack("<II", version, 12 + 8 + len(js) + 8 + len(binary)) +
+            struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
+def lite_character(name):
+    """Path of the lighter copy of a character, or None while it's being made (or when it can't be). The first
+    request starts the work in the background and gets the original, so nobody waits."""
+    src = _avatar_path("bin", "characters", name)
+    try:
+        st = os.stat(src)
+    except OSError:
+        return None
+    tag = f"{int(st.st_mtime)}-{st.st_size}"
+    folder = _avatar_path("lite")
+    dest = os.path.join(folder, f"{name}.{tag}.vrm")
+    if os.path.isfile(dest):
+        return dest if os.path.getsize(dest) > 0 else None    # empty marker: nothing to gain for this file
+    key = (name, tag)
+    with _LITE["lock"]:
+        if key in _LITE["busy"] or key in _LITE["failed"]:
+            return None
+        _LITE["busy"].add(key)
+
+    def work():
+        try:
+            started = time.time()
+            with open(src, "rb") as f:
+                data = f.read()
+            small = slim_vrm(data)
+            os.makedirs(folder, exist_ok=True)
+            for old in os.listdir(folder):               # copies of earlier versions of this character
+                if old.startswith(name + ".") and old != os.path.basename(dest):
+                    try:
+                        os.remove(os.path.join(folder, old))
+                    except OSError:
+                        pass
+            with open(dest + ".part", "wb") as f:
+                f.write(small or b"")
+            os.replace(dest + ".part", dest)
+            if small:
+                log(f"avatar: lighter copy of {name} for phones: {len(data) / 1e6:.1f} MB -> {len(small) / 1e6:.1f} MB "
+                    f"({time.time() - started:.1f}s)")
+        except ImportError:
+            _LITE["failed"].add(key)
+        except Exception as e:   # noqa: BLE001 - screens simply keep using the original
+            _LITE["failed"].add(key)
+            log(f"avatar: couldn't make a lighter copy of {name}: {e}")
+        finally:
+            _LITE["busy"].discard(key)
+
+    threading.Thread(target=work, daemon=True).start()
+    return None
+
+
 def _free_name(folder, name):
     base, ext = os.path.splitext(name)
     cand, i = name, 2
@@ -6618,51 +7356,72 @@ export function createAvatar(host, opts = {}) {
   let impl = null, style = "", state = "idle", level = 0, destroyed = false;
   const o = { camera: "upper", height: 172.7, light: false, gestures: true, animations: [], key: "", ...opts };
   const onError = o.onError || (() => {});
+  const stage = createStage(o.stageHost || host, o);      // the neon stage sits behind either look
+  const keep = ":scope > :not([data-loading]):not([data-stage])";
+  const sync = () => { impl.setState(state); impl.setLevel(level); impl.setNeon && impl.setNeon(o.neon); };
 
-  let ver = "";
-  async function setStyle(next, modelUrl, version = "") {
-    if (next === style && impl && (next !== "vrm" || version === ver)) return;
-    ver = version;
+  let ver = "", seq = 0, loading = null;     // loading = {key, promise} while a 3D character downloads
+  function showOrb() {
+    if (impl && style === "orb") return;
     if (impl) impl.destroy();
-    impl = null; style = next; host.innerHTML = "";
-    if (next === "vrm") {
+    host.querySelectorAll(keep).forEach(el => el.remove());
+    impl = createOrb(host, o); style = "orb";
+  }
+  // The current look (usually the orb) stays on screen while a 3D character downloads and is set up
+  // in a hidden layer; it's swapped in only when it's ready. A big character over mobile data can take a while.
+  async function setStyle(next, modelUrl, version = "") {
+    const key = next + "|" + (next === "vrm" ? modelUrl + "|" + version : "");
+    if (next === style && impl && (next !== "vrm" || version === ver)) { seq++; loading = null; return; }
+    if (loading && loading.key === key) return loading.promise;
+    const my = ++seq;
+    if (next !== "vrm") { loading = null; showOrb(); ver = version; sync(); return; }
+    const layer = document.createElement("div");
+    layer.dataset.loading = "1"; layer.style.cssText = "position:absolute;inset:0;visibility:hidden";
+    host.appendChild(layer);
+    if (!impl) showOrb();
+    const promise = (async () => {
       try {
-        impl = await createVRM(host, modelUrl, o);
-        if (destroyed || style !== "vrm") { impl.destroy(); return; }
+        const v = await createVRM(layer, modelUrl, o);
+        if (destroyed || my !== seq) { v.destroy(); layer.remove(); return; }
+        if (impl) impl.destroy();
+        host.querySelectorAll(keep).forEach(el => el.remove());
+        delete layer.dataset.loading; layer.style.visibility = "";
+        impl = v; style = "vrm"; ver = version; sync();
       } catch (e) {
-        onError(e);
-        style = "orb"; host.innerHTML = "";
-        impl = createOrb(host, o);
-      }
-    } else {
-      impl = createOrb(host, o);
-    }
-    impl.setState(state); impl.setLevel(level);
+        layer.remove();
+        if (destroyed || my !== seq) return;
+        onError(e); showOrb(); sync();
+      } finally { if (my === seq) loading = null; }
+    })();
+    loading = { key, promise };
+    return promise;
   }
   const call = (fn, ...a) => impl && impl[fn] && impl[fn](...a);
   return {
     setStyle,
     get style() { return style; },
-    setState(s) { state = s; call("setState", s); },
-    setLevel(x) { level = x; call("setLevel", x); },
+    setState(s) { state = s; stage.setState(s); call("setState", s); },
+    setLevel(x) { level = x; stage.setLevel(x); call("setLevel", x); },
+    /** Neon look: {on, glow: "#rrggbb", haze: "#rrggbb", crowd: true/false} */
+    setNeon(n) { o.neon = n; stage.setNeon(n); call("setNeon", n); },
     setVisemes(v) { call("setVisemes", v); },
     setCamera(c) { o.camera = c; call("setCamera", c); },
     setHeight(cm) { o.height = cm; call("setHeight", cm); },
-    setLight(on) { o.light = !!on; call("setLight", o.light); },
+    setLight(on) { o.light = !!on; stage.setLight(o.light); call("setLight", o.light); },
     setGestures(on) { o.gestures = !!on; },
     setAnimations(list) { o.animations = list || []; call("setAnimations", o.animations); },
     play(what) { return call("play", what); },
     trigger(tag) { call("trigger", tag); },
     react(text) { call("react", text); },
     fps() { return impl && impl.fps ? impl.fps() : 0; },
-    destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; host.innerHTML = ""; },
+    destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; stage.destroy(); host.innerHTML = ""; },
   };
 }
 
 // ------------------------------------------------------------------ the orb
 function createOrb(host, o) {
   const canvas = document.createElement("canvas");
-  canvas.style.cssText = "width:100%;height:100%;display:block";
+  canvas.style.cssText = "position:relative;width:100%;height:100%;display:block";
   host.appendChild(canvas);
   const ctx = canvas.getContext("2d");
   let state = "idle", level = 0, smooth = 0, raf = 0, w = 0, h = 0, dpr = 1, last = performance.now(), t = 0, fps = 60, acc = 0;
@@ -6755,6 +7514,88 @@ function createOrb(host, o) {
     setLight() { resize(); },
     fps: () => fps,
     destroy() { cancelAnimationFrame(raf); ro.disconnect(); canvas.remove(); },
+  };
+}
+
+// ------------------------------------------------------------------ the neon stage
+// A dark stage behind Stella: coloured haze that breathes with her voice, a glowing floor, and (optional)
+// soft, blurred dancer silhouettes swaying on both sides with the middle left clear. Drawn only while the
+// neon look is on, at 30 frames a second (20 in light mode); the silhouettes are drawn once and reused.
+const hexRgb = (h, d) => { const m = /^#?([0-9a-f]{6})$/i.exec(h || ""); const n = parseInt(m ? m[1] : d, 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+function stageFigure(color, pose) {
+  const c = document.createElement("canvas"); c.width = 220; c.height = 440;
+  const g = c.getContext("2d");
+  g.filter = "blur(10px)"; g.fillStyle = g.strokeStyle = color; g.lineCap = g.lineJoin = "round";
+  g.beginPath(); g.arc(110, 62, 28, 0, 7); g.fill();                                   // head
+  g.beginPath(); g.moveTo(100, 84); g.lineTo(120, 84); g.lineTo(152, 108); g.lineTo(136, 186);
+  g.lineTo(160, 248); g.lineTo(60, 248); g.lineTo(84, 186); g.lineTo(68, 108); g.closePath(); g.fill();   // body
+  g.lineWidth = 19; g.beginPath();
+  g.moveTo(148, 110); if (pose) { g.lineTo(176, 60); g.lineTo(168, 14); } else { g.lineTo(184, 172); g.lineTo(148, 212); }   // her left arm: raised or on the hip
+  g.moveTo(72, 110); g.lineTo(36, 172); g.lineTo(72, 212); g.stroke();                 // other hand on the hip
+  g.lineWidth = 30; g.beginPath(); g.moveTo(128, 244); g.lineTo(140, 422); g.moveTo(92, 244); g.lineTo(84, 422); g.stroke();   // legs
+  return c;
+}
+function createStage(host, o) {
+  const canvas = document.createElement("canvas");
+  canvas.dataset.stage = "1";
+  canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:none;pointer-events:none";
+  host.insertBefore(canvas, host.firstChild);
+  const ctx = canvas.getContext("2d");
+  let neon = null, level = 0, smooth = 0, state = "idle", raf = 0, last = 0, t = 0, w = 0, h = 0, figs = null, figKey = "";
+  // [x across the screen (0..0.5, mirrored on the right), size (1 = nearest), pose]: far ones first
+  const spots = [[0.06, 0.62, 1], [0.17, 0.66, 0], [0.28, 0.7, 1], [0.11, 0.8, 0], [0.23, 0.86, 1], [0.33, 0.95, 0]];
+  const crowd = [];
+  for (const side of [-1, 1]) for (const [x, k, pose] of spots) crowd.push({ x: side < 0 ? x : 1 - x, k, pose, flip: side, ph: Math.random() * 6.3, sp: 0.85 + Math.random() * 0.3 });
+  crowd.sort((a, b) => a.k - b.k);
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    if (!neon || !neon.on) return;
+    const step = (now - last) / 1000;
+    if (step < (o.light ? 1 / 20 : 1 / 31)) return;
+    const dt = Math.min(0.1, step); last = now; t += dt;
+    const nw = host.clientWidth, nh = host.clientHeight;
+    if (nw !== w || nh !== h) { w = nw; h = nh; canvas.width = Math.max(1, w); canvas.height = Math.max(1, h); }   // soft by design: 1 pixel per CSS pixel is plenty
+    smooth = lerp(smooth, level, 1 - Math.exp(-dt * 10));
+    const hz = hexRgb(neon.haze, "ff3fb4"), gl = hexRgb(neon.glow, "3dff9e");
+    const H = `${hz[0]},${hz[1]},${hz[2]}`, G = `${gl[0]},${gl[1]},${gl[2]}`;
+    let g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, "#05030a"); g.addColorStop(0.6, `rgba(${H},0.08)`); g.addColorStop(1, `rgba(${H},0.28)`);
+    ctx.globalAlpha = 1; ctx.fillStyle = "#05030a"; ctx.fillRect(0, 0, w, h); ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    g = ctx.createRadialGradient(w / 2, h * 0.55, 0, w / 2, h * 0.55, Math.max(w, h) * 0.6);
+    g.addColorStop(0, `rgba(${H},${0.16 + 0.22 * smooth})`); g.addColorStop(1, `rgba(${H},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    if (neon.crowd !== false) {
+      const key = neon.haze;
+      if (key !== figKey) { figKey = key; figs = [stageFigure(`rgb(${H})`, 0), stageFigure(`rgb(${H})`, 1)]; }
+      const fast = state === "talking" ? 1.8 : 1;
+      // sized by the narrower side, and squeezed outwards on tall (portrait) screens so the middle stays hers
+      const spread = w >= h ? 1 : 0.62;
+      for (const f of crowd) {
+        const fh = Math.min(h * 0.72, w * 0.62) * f.k, fw = fh / 2, feet = h * (0.99 - (1 - f.k) * 0.35);
+        const x = f.x < 0.5 ? f.x * spread : 1 - (1 - f.x) * spread;
+        const a = t * 1.5 * f.sp * fast + f.ph;
+        ctx.save();
+        ctx.globalAlpha = 0.16 + 0.3 * f.k;
+        ctx.translate(x * w + Math.sin(a) * fw * 0.08, feet + Math.abs(Math.cos(a)) * fh * 0.012);
+        ctx.rotate(Math.sin(a) * 0.07); ctx.scale(f.flip, 1);
+        ctx.drawImage(figs[f.pose], -fw / 2, -fh, fw, fh);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.save(); ctx.translate(w / 2, h * 0.97); ctx.scale(1, 0.22);          // a flat pool of light on the floor
+    g = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.45);
+    g.addColorStop(0, `rgba(${G},${0.2 + 0.25 * smooth})`); g.addColorStop(1, `rgba(${G},0)`);
+    ctx.fillStyle = g; ctx.fillRect(-w / 2, -h * 4.6, w, h * 4.6 + w);
+    ctx.restore();
+  }
+  raf = requestAnimationFrame(frame);
+  return {
+    setNeon(n) { neon = n || null; canvas.style.display = neon && neon.on ? "block" : "none"; last = 0; },
+    setLevel(x) { level = clamp(x); },
+    setState(s) { state = s; },
+    setLight() {},
+    destroy() { cancelAnimationFrame(raf); canvas.remove(); },
   };
 }
 
@@ -6868,13 +7709,14 @@ async function createVRM(host, url, o) {
   host.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   const cam = new THREE.PerspectiveCamera(28, 1, 0.05, 60);
-  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x1a1030, 1.6));
+  const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x1a1030, 1.6); scene.add(hemi);
   const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(1, 2, 3); scene.add(key);
   const rim = new THREE.DirectionalLight(0x5ce1e6, 1.4); rim.position.set(-2, 1.5, -2); scene.add(rim);
+  const rim2 = new THREE.DirectionalLight(0xff3fb4, 0); rim2.position.set(2, 1.2, -1.5); scene.add(rim2);   // neon: second back light
 
   const loader = new GLTFLoader();
   loader.register(parser => new VRMLoaderPlugin(parser));
-  const gltf = await new Promise((res, rej) => loader.load(url, res, undefined, e => rej(new Error("couldn't load the character: " + (e && e.message || e)))));
+  const gltf = await new Promise((res, rej) => loader.load(url, res, x => o.onProgress && o.onProgress(x.loaded || 0, x.total || 0), e => rej(new Error("couldn't load the character: " + (e && e.message || e)))));
   const vrm = gltf.userData.vrm;
   if (!vrm) throw new Error("that file isn't a VRM character");
   VRMUtils.removeUnnecessaryVertices && VRMUtils.removeUnnecessaryVertices(gltf.scene);
@@ -6978,6 +7820,48 @@ async function createVRM(host, url, o) {
     if (jump) { cam.position.copy(camGoal); aimNow.copy(camAim); }
   }
   setHeight(o.height);
+
+  // ---- neon look: glowing edges (the toon shader's rim light, and its outline when the model has one, in the
+  // glow colour, unaffected by lighting), dimmer front light with two coloured back lights, and a soft outer
+  // glow around her silhouette (a CSS drop-shadow on the see-through canvas; off in light mode). Talking
+  // makes the edges glow brighter.
+  const neon = { on: false, glow: new THREE.Color("#3dff9e"), haze: new THREE.Color("#ff3fb4"), pulse: 0 };
+  const toon = [], tmpC = new THREE.Color();
+  vrm.scene.traverse(m => {
+    if (!m.isMesh) return;
+    for (const mt of [].concat(m.material)) {
+      if (!mt || !("parametricRimColorFactor" in mt) || !mt.parametricRimColorFactor || toon.some(x => x.m === mt)) continue;
+      toon.push({ m: mt, rim: mt.parametricRimColorFactor.clone(), pow: mt.parametricRimFresnelPowerFactor, lift: mt.parametricRimLiftFactor,
+        mix: mt.rimLightingMixFactor, oc: mt.outlineColorFactor ? mt.outlineColorFactor.clone() : null, omix: mt.outlineLightingMixFactor });
+    }
+  });
+  function cssGlow() {
+    const c = "#" + neon.glow.getHexString();
+    renderer.domElement.style.filter = neon.on && !light ? `drop-shadow(0 0 3px ${c}) drop-shadow(0 0 14px ${c}99)` : "";
+  }
+  function setNeon(n) {
+    neon.on = !!(n && n.on);
+    try { neon.glow.set((n && n.glow) || "#3dff9e"); neon.haze.set((n && n.haze) || "#ff3fb4"); } catch {}
+    hemi.intensity = neon.on ? 0.55 : 1.6; key.intensity = neon.on ? 1.0 : 2.2;
+    if (neon.on) rim.color.copy(neon.glow); else rim.color.set(0x5ce1e6);
+    rim.intensity = neon.on ? 3 : 1.4;
+    rim2.color.copy(neon.haze); rim2.intensity = neon.on ? 2.2 : 0;
+    for (const x of toon) {
+      const mt = x.m;
+      try {
+        if (neon.on) {
+          mt.parametricRimFresnelPowerFactor = 2.6; mt.parametricRimLiftFactor = 0.05;
+          if (x.mix !== undefined) mt.rimLightingMixFactor = 0;
+          if (x.oc) { mt.outlineColorFactor.copy(neon.glow); if (x.omix !== undefined) mt.outlineLightingMixFactor = 0; }
+        } else {
+          mt.parametricRimColorFactor.copy(x.rim); mt.parametricRimFresnelPowerFactor = x.pow; mt.parametricRimLiftFactor = x.lift;
+          if (x.mix !== undefined) mt.rimLightingMixFactor = x.mix;
+          if (x.oc) { mt.outlineColorFactor.copy(x.oc); if (x.omix !== undefined) mt.outlineLightingMixFactor = x.omix; }
+        }
+      } catch {}
+    }
+    cssGlow();
+  }
 
   let lastW = 0, lastH = 0;
   function resize() {
@@ -7194,6 +8078,11 @@ async function createVRM(host, url, o) {
       relaxed: Math.max(state === "listening" ? 0.25 : 0, extra.relaxed || 0) };
     for (const k in emo) { emo[k] = lerp(emo[k], goal[k], 0.08); setEx(k, emo[k] * (1 - mouth * 0.5)); }
 
+    if (neon.on) {             // edges glow brighter with her voice
+      neon.pulse = lerp(neon.pulse, level, 1 - Math.exp(-dt * 12));
+      tmpC.copy(neon.glow).multiplyScalar(0.9 + neon.pulse * 0.9);
+      for (const x of toon) x.m.parametricRimColorFactor.copy(tmpC);
+    }
     cam.position.lerp(camGoal, 0.05); aimNow.lerp(camAim, 0.05); cam.lookAt(aimNow);
     vrm.update(dt);
     renderer.render(scene, cam);
@@ -7201,14 +8090,15 @@ async function createVRM(host, url, o) {
   raf = requestAnimationFrame(frame);
   setTimeout(() => trigger("greeting"), 1200);    // a little wave when the screen opens
   setAnimations(o.animations);
+  setNeon(o.neon);
   return {
     setState(s) { state = s; },
     setLevel(x) { level = clamp(x); },
     setVisemes(v) { visemes = v; visemesAt = performance.now(); },
     setCamera: m => setCamera(m),
     setHeight,
-    setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); },
-    setAnimations, play, trigger, react,
+    setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); cssGlow(); },
+    setNeon, setAnimations, play, trigger, react,
     fps: () => fps,
     destroy() {
       cancelAnimationFrame(raf); ro.disconnect(); mixer.stopAllAction();
@@ -7380,6 +8270,9 @@ def make_http_handler(cfg, chats):
                     return self.send_json(400, {"error": "send 16-bit mono PCM, up to 60 s"})
                 seconds = len(pcm) / (rate * 2)
                 started = time.time()
+                if not has_speech(pcm, rate):
+                    log(f"phone: {seconds:.1f}s of silence (Whisper skipped)")
+                    return self.send_json(200, {"text": ""})
                 try:
                     text = clean_transcript(transcribe(cfg.whisper, pcm_to_wav(pcm, rate), cfg.language))
                 except (urllib.error.URLError, OSError, RuntimeError) as e:
@@ -7399,16 +8292,26 @@ def make_http_handler(cfg, chats):
                         return self.send_json(503, {"error": "The voice is still downloading", "status": AVATAR["status"]})
                     speed = float(req.get("speed") or ac["speed"])
                     wav = None
+                    said = str(req.get("text", ""))
+                    kvoice = req.get("kokoro_voice") or ac["kokoro_voice"]
+                    short = len(said) <= PhraseCache.MAX_CHARS
+                    key = None
                     if (req.get("engine") or ac["engine"]) == "kokoro":
                         if KOKORO.ready():
+                            key = ("kokoro", str(kvoice), round(speed, 2), speakable(said))
+                            wav = PHRASES.get(key) if short else None
                             try:
-                                wav = KOKORO.say(str(req.get("text", "")), req.get("kokoro_voice") or ac["kokoro_voice"], speed)
+                                wav = wav or KOKORO.say(said, kvoice, speed)
                             except Exception as e:   # noqa: BLE001 - fall back to Piper rather than going silent
                                 log(f"kokoro failed, using Piper: {e}")
+                                key = None
                         else:
                             KOKORO.prepare()
                     if wav is None:
-                        wav = TTS.say(str(req.get("text", "")), voice, speed)
+                        key = ("piper", voice, round(speed, 2), speakable(said))
+                        wav = (PHRASES.get(key) if short else None) or TTS.say(said, voice, speed)
+                    if short and key:
+                        PHRASES.put(key, wav)
                 except (ValueError, TypeError) as e:
                     return self.send_json(400, {"error": str(e)})
                 except (RuntimeError, OSError) as e:
@@ -7470,6 +8373,30 @@ def make_http_handler(cfg, chats):
 
             if path == "/llm/v1/chat/completions":
                 return self.proxy_llm()
+
+            if path == "/quick":
+                # Instant answers for simple requests; {"reply": null} means "ask the model"
+                try:
+                    data = json.loads(self.read_body(10_000) or b"{}")
+                    hit = quick_reply(data.get("text", ""), data.get("now", ""), bool(data.get("phone")))
+                except (ValueError, TypeError, AttributeError, OverflowError, KeyError) as e:
+                    log(f"quick answer failed: {e}")
+                    hit = None
+                if hit:
+                    log(f"instant answer ({hit['kind']}): no model needed")
+                return self.send_json(200, hit or {"reply": None})
+
+            if path == "/speedtest":
+                report = run_speed_test(cfg.whisper if DOCTOR["whisper"] else "", cfg.language)
+                if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
+                    body = speed_text(report).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                return self.send_json(409 if report.get("error") else 200, report)
 
             if path == "/context":
                 try:
@@ -7611,10 +8538,16 @@ def make_http_handler(cfg, chats):
 
         def authorized(self):
             auth = self.headers.get("Authorization", "")
-            if auth.startswith("Bearer ") and key_ok(auth[7:].strip(), cfg.key):
+            given = auth[7:].strip() if auth.startswith("Bearer ") else ""
+            if given and key_ok(given, cfg.key):
                 return True
             qs = parse_qs(urlparse(self.path).query)
-            return key_ok(qs.get("key", [""])[0], cfg.key)
+            given = given or qs.get("key", [""])[0]
+            if key_ok(given, cfg.key):
+                return True
+            if given:
+                note_wrong_key(self.client_address[0])
+            return False
 
         def send_json(self, code, obj):
             body = json.dumps(obj).encode()
@@ -7772,6 +8705,10 @@ def make_http_handler(cfg, chats):
                 if kind not in ("characters", "animations") or not _safe_bin_name(name):
                     return self.send_json(404, {"error": "not found"})
                 # revalidated each time (not cached forever), so a replaced file replaces the screen's copy
+                if kind == "characters" and parse_qs(urlparse(self.path).query).get("lite", [""])[0] == "1":
+                    lite = lite_character(name)   # phones and light-mode screens: smaller textures
+                    if lite:
+                        return self.send_file(lite, "application/octet-stream", revalidate=True)
                 return self.send_file(_avatar_path("bin", kind, name), "application/octet-stream", revalidate=True)
             if path == "/avatar/model.vrm":
                 ch = avatar_config()["character"]
@@ -7790,6 +8727,8 @@ def make_http_handler(cfg, chats):
                 q = parse_qs(urlparse(self.path).query)
                 return self.send_json(200, {"results": CHAT_SEARCH.search(q.get("q", [""])[0], k=20,
                                                                            exclude=q.get("exclude", [""])[0])})
+            if path == "/speedtest":      # past results (POST runs a new one)
+                return self.send_json(200, {"history": _speed_history()[-10:]})
             if path == "/doctor":
                 report = run_doctor()
                 if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
@@ -7910,6 +8849,8 @@ def start(cfg):
     base = os.path.dirname(CHATS_PATH)
     BACKUP["dir"] = os.path.abspath(getattr(cfg, "backup_dir", "") or os.path.join(base, "backups"))
     BACKUP["config"] = os.path.join(base, "backup.json")
+    global SPEED_FILE
+    SPEED_FILE = os.path.join(base, "speed-tests.json")
     BACKUP["paths"] = {"projects": PROJECT_DIR, "images": IMAGE_DIR, "diagrams": DIAGRAM_DIR, "wakewords": WAKEWORD_DIR}
     DOCTOR["whisper"] = cfg.whisper
     AVATAR["dir"] = os.path.abspath(getattr(cfg, "avatar_dir", "") or os.path.join(base, "avatar"))
@@ -8081,9 +9022,23 @@ KEY=\$(cat "$KEY_FILE")
 IP=\$(hostname -I | awk '{print \$1}')
 TS_IP=\$(tailscale ip -4 2>/dev/null | head -1)
 
+# Firewall: Stella's two ports are open to your home network and to Tailscale only, never to everyone.
+# (Rules from older versions, which allowed any address, are removed.)
 if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
-  sudo ufw allow $PORT/tcp >/dev/null
-  sudo ufw allow 8092/tcp >/dev/null
+  NETS="100.64.0.0/10 \$(ip -o -f inet addr show scope global 2>/dev/null \\
+    | awk '\$2 !~ /^(tailscale|docker|br-|veth|virbr)/ {print \$4}' \\
+    | python3 -c 'import ipaddress, sys
+for line in sys.stdin:
+    try:
+        n = ipaddress.ip_interface(line.strip()).network
+    except ValueError:
+        continue
+    if n.is_private:
+        print(n)' | sort -u | tr '\n' ' ')"
+  for P in $PORT 8092; do
+    sudo ufw delete allow \$P/tcp >/dev/null 2>&1 || true
+    for NET in \$NETS; do sudo ufw allow from "\$NET" to any port \$P proto tcp >/dev/null; done
+  done
 fi
 
 set_gov() { for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "\$1" | sudo tee "\$g" >/dev/null 2>&1; done; }
@@ -8165,18 +9120,37 @@ echo "================================================================"
 # Stella's model. model.conf is re-read on every start, so the phone app can switch models: it rewrites
 # model.conf, creates .switch-model and stops llama-server, and this loop starts the new model.
 rm -f "$LLM_DIR/.switch-model"
+# Newer llama-server options are only used when this build lists them (an unknown option would stop it starting).
+LLAMA_HELP=\$("$LLM_DIR/llama.cpp/build/bin/llama-server" --help 2>&1 || true)
+has_opt() { grep -q -- "\$1" <<< "\$LLAMA_HELP"; }
+GPU_MB=\$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
 while true; do
   source "$LLM_DIR/model.conf"
   CTX=\${NET_CONTEXT:-\$CONTEXT}
-  VIS=""; FIT=""
-  if [[ -n "\${MMPROJ_FILE:-}" && -s "\${MMPROJ_FILE:-}" ]]; then VIS="--mmproj \$MMPROJ_FILE"; fi
+  VIS=""; FIT=""; VIS_GPU=0; IDLE=""
+  if [[ -n "\${MMPROJ_FILE:-}" && -s "\${MMPROJ_FILE:-}" ]]; then
+    VIS="--mmproj \$MMPROJ_FILE"; VIS_GPU=1
+    # Graphics cards under 8 GB: the photo add-on (about 1 GB) runs on the CPU, so that memory holds more of the
+    # model. Photos take a few seconds longer to read. To keep it on the GPU: add VISION_GPU="1" to model.conf
+    if [[ "\$BACKEND" != cpu && "\${VISION_GPU:-0}" != 1 && "\${GPU_MB:-0}" =~ ^[0-9]+\$ && \${GPU_MB:-0} -gt 0 \\
+          && \${GPU_MB:-0} -lt 7800 ]] && has_opt "--no-mmproj-offload"; then
+      VIS="\$VIS --no-mmproj-offload"; VIS_GPU=0
+    fi
+  fi
   if [[ "\$BACKEND" != cpu ]]; then
-    M=1024; [[ -n "\$VIS" ]] && M=\$((M + 1000)); [[ "\${WHISPER_GPU:-0}" == 1 ]] && M=\$((M + 700))
+    M=1024; [[ \$VIS_GPU == 1 ]] && M=\$((M + 1000)); [[ "\${WHISPER_GPU:-0}" == 1 ]] && M=\$((M + 700))
     FIT="--fit-target \$M"
   fi
+  # The model leaves RAM and GPU memory after 30 quiet minutes and reloads on the next message (a few seconds).
+  # Change it with SLEEP_IDLE_MIN="60" in model.conf; "0" keeps it loaded.
+  SLEEP_MIN=\${SLEEP_IDLE_MIN:-30}
+  if [[ "\$SLEEP_MIN" =~ ^[0-9]+\$ && \$SLEEP_MIN -gt 0 ]] && has_opt "--sleep-idle-seconds"; then
+    IDLE="--sleep-idle-seconds \$((SLEEP_MIN * 60))"
+  fi
   if [[ \$CTX -le 8192 ]]; then TB=1024; else TB=2048; fi
-  "$LLM_DIR/llama.cpp/build/bin/llama-server" -m "\$MODEL_FILE" -c "\$CTX" \\
-    -t "\$THREADS" -tb $LOGICAL_CPUS \$GPU_ARGS \$FIT \$VIS -fa on \\
+  # nice 2: speech recognition and Stella's voice get the processor first while the model is writing
+  nice -n 2 "$LLM_DIR/llama.cpp/build/bin/llama-server" -m "\$MODEL_FILE" -c "\$CTX" \\
+    -t "\$THREADS" -tb $LOGICAL_CPUS \$GPU_ARGS \$FIT \$VIS \$IDLE -fa on \\
     --reasoning-budget \$TB --reasoning-budget-message "I have thought enough; time to answer." \\
     --cache-type-k q8_0 --cache-type-v q8_0 --jinja --api-key "\$KEY" --host 0.0.0.0 --port $PORT &
   LLAMA_PID=\$!
@@ -8216,6 +9190,24 @@ Terminal=true
 Type=Application
 Categories=Utility;
 EOF
+cat > "$LLM_DIR/stellai-new-key.sh" <<EOF
+#!/usr/bin/env bash
+# Replaces Stella's API key. Every phone, tablet and browser has to be paired again afterwards, so use it when a
+# device is lost or the key may have been seen by someone else. (Close StellAI Server first.)
+set -e
+if curl -fsS -m 3 http://127.0.0.1:8092/health >/dev/null 2>&1; then
+  echo "Close StellAI Server first (Ctrl+C in its window), then run this again."; exit 1
+fi
+read -r -p "Replace the API key? Every device must be paired again. [y/N] " ans
+[[ "\${ans,,}" == "y" ]] || { echo "Nothing changed."; exit 0; }
+NEWKEY=\$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+( umask 077; printf '%s' "\${NEWKEY:0:32}" > "$KEY_FILE.new" )
+mv -f "$KEY_FILE.new" "$KEY_FILE"
+chmod 600 "$KEY_FILE"
+echo "Done. Start StellAI Server: it shows the new key and a new QR code."
+echo "On each phone: Settings, then Scan to connect. In a browser: open StellAI Web Chat from the menu again."
+EOF
+chmod +x "$LLM_DIR/stellai-new-key.sh"
 cat > "$LLM_DIR/stellai-restore.sh" <<EOF
 #!/usr/bin/env bash
 # Puts a backup back: ./stellai-restore.sh [backup.zip]   (close StellAI Server first)

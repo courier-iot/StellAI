@@ -104,7 +104,7 @@ def test_backend_and_plan():
     desk = hw(20, cores=6, backend="cuda", vram=6.0, cuda="13")
     assert ws.recommend(desk) == "35b"
     p = ws.plan(desk, "35b")
-    assert p["gpu_args"] == ["-ub", "1024"] and p["context"] == 32768 and p["model_file"].endswith("UD-IQ3_S.gguf")
+    assert p["gpu_args"] == ["-ub", "1024"] and p["context"] == 65536 and p["model_file"].endswith("UD-IQ3_S.gguf")
     assert p["whisper_file"] == "ggml-small.en.bin"
     p9 = ws.plan(desk, "9b")
     assert p9["model_file"] == "Qwen3.5-9B-Q3_K_M.gguf" and p9["gpu_args"] == ["-ub", "1024"]
@@ -114,6 +114,10 @@ def test_backend_and_plan():
     # More memory -> better 35B quality: 32 GB RAM + 6 GB GPU, and a 16 GB Tesla T4 server
     assert ws.plan(hw(32, 6, "cuda", 6.0, "13"), "35b")["model_file"].endswith("UD-IQ4_XS.gguf")
     assert ws.plan(hw(32, 8, "cuda", 15.0, "13"), "35b")["model_file"].endswith("UD-Q4_K_XL.gguf")
+    # Context windows: as long as fits without pushing the model off the graphics card; short without one
+    assert p9["context"] == 16384 and ws.plan(desk, "4b")["context"] == 32768
+    assert ws.plan(hw(32, 8, "cuda", 15.0, "13"), "9b")["context"] == 65536
+    assert ws.plan(hw(16, 6), "9b")["context"] == 16384 and ws.plan(hw(32, 8), "35b")["context"] == 16384
     assert ws.is_weak(t470) and not ws.is_weak(desk)
 
 
@@ -227,6 +231,45 @@ def test_misc():
     assert args[args.index("--fit-target") + 1] == "1024"   # no vision file, CPU whisper
     assert ws.whisper_args(c, c.get("plan")) is None
     assert not ws.is_installed(c)
+    # Security: a replaced key is new and saved; the firewall rule is limited to the home network and Tailscale
+    k2 = ws.new_api_key(c)
+    assert k2 != k and len(k2) >= 32 and ws.api_key(c) == k2 and not os.path.exists(c.p("api-key.txt.new"))
+    k = k2
+    assert "remoteip=LocalSubnet,100.64.0.0/10" in ws.firewall_add_args() and "localport=8080,8092" in ws.firewall_add_args()
+    assert ws.firewall_state("LocalPort: 8080,8092\nRemoteIP: LocalSubnet,100.64.0.0/10\n") == "limited"
+    assert ws.firewall_state("LocalPort: 8080,8092\nRemoteIP: Any\n") == "open" and ws.firewall_state("") == "none"
+    # New llama-server options are only used when the installed build lists them in --help
+    assert "--sleep-idle-seconds" not in args and ws.llama_flags(c) == ""
+    os.makedirs(c.p("models"), exist_ok=True)
+    open(c.p("models", "mm.gguf"), "w").close()
+    c.set(hardware={"ram_gb": 20, "cores": 6, "threads": 12, "backend": "cuda", "vram_gb": 6.0, "cuda": "13"})
+    real = ws.llama_flags
+    try:
+        ws.llama_flags = lambda cfg: "--sleep-idle-seconds N\n--mmproj-offload, --no-mmproj-offload\n"
+        args = ws.llama_args(c, c.get("plan"), k)
+        assert args[args.index("--sleep-idle-seconds") + 1] == "1800"
+        assert args[args.index("--mmproj") + 2] == "--no-mmproj-offload"      # 6 GB card: vision on the CPU...
+        assert args[args.index("--fit-target") + 1] == "1024"                 # ...so no GPU memory is held back for it
+        c.set(sleep_idle_min=0, vision_gpu=True)
+        args = ws.llama_args(c, c.get("plan"), k)
+        assert "--sleep-idle-seconds" not in args and "--no-mmproj-offload" not in args
+        assert args[args.index("--fit-target") + 1] == "2024"
+        c.set(sleep_idle_min=10, vision_gpu=False, hardware={"backend": "cuda", "vram_gb": 15.0})
+        args = ws.llama_args(c, c.get("plan"), k)                             # 16 GB Tesla T4: vision stays on the GPU
+        assert args[args.index("--sleep-idle-seconds") + 1] == "600" and "--no-mmproj-offload" not in args
+        # the context window is worked out at every start, so an install from before bigger windows gets them
+        c.set(plan=dict(c.get("plan"), model_key="35b", model_gb=13.6), hardware={"ram_gb": 20, "cores": 6, "backend": "cuda", "vram_gb": 6.0})
+        args = ws.llama_args(c, c.get("plan"), k)
+        assert args[args.index("-c") + 1] == "65536" and args[args.index("--reasoning-budget") + 1] == "2048"
+        c.set(context=16384)
+        assert ws.llama_args(c, c.get("plan"), k)[ws.llama_args(c, c.get("plan"), k).index("-c") + 1] == "16384"
+        c.set(context=0, hardware=None)
+        assert ws.launch_context(c, c.get("plan")) == 8192          # nothing known about the PC: the saved value
+        ws.llama_flags = lambda cfg: "usage: an older build\n"
+        args = ws.llama_args(c, c.get("plan"), k)
+        assert "--sleep-idle-seconds" not in args and "--no-mmproj-offload" not in args
+    finally:
+        ws.llama_flags = real
 
 
 def test_updates():

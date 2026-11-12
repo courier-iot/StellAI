@@ -8,7 +8,7 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 ### Next: long chats that don't run out, and working more like Claude (agreed, not started)
 
-2. [ ] **Bigger context windows** (setup, S): 32K for 4B, 32–64K for 9B, 64K for 35B, sized from free RAM/VRAM (Qwen3.5's hybrid attention keeps the cost low).
+2. [x] **Bigger context windows** (0.14.1): 32K for 4B, 16–64K for 9B, 64K for 35B on a graphics card, sized so the model stays on the card; 8–16K without one.
 3. [ ] **Background rolling summaries** (server + clients, M): summarize the oldest turns while idle from ~60% full, fold old summaries together; no waiting.
 4. [ ] **Recall inside the current chat** (server, M): search the summarized-away part of the same chat and bring exact passages back.
 5. [ ] **Pinned working notes per chat** (all, M): goals, decisions, names, story facts; always included, never summarized.
@@ -20,12 +20,18 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 ## Also discussed, not yet built
 
+- [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.
+- [ ] **Resource savings left out**: smaller (Q8) vision file (couldn't check that the download exists), SearXNG on demand, Windows Defender exclusion and power plan (manual for now).
+
 - [ ] **"Hey Stella" wake word**: the app support is done; train the model in the Colab notebook (see the app README) and drop `hey_stella.onnx` into `~/llm/wakewords/` on the server.
 - [ ] **Windows installer, full release**: code signing (no SmartScreen warning), a fixed APK signing key, and testing on real Windows PCs.
 - [ ] **Check on real hardware**: the 0.12.5 background service (does the connection survive switching apps on the owner's phone?), the subtitle window and the in-app avatar on the phone, Kokoro on the Windows backup.
-- [ ] **Security hardening**: firewall rules limited to Tailscale and your home network, Android backup turned off for the app, and a command to replace the API key.
 
 ## Done
+
+- [x] **Speed test, instant timers and alarms, security** (app 0.14.0): measured reading/writing/waking/hearing/speaking with a comparison to the last run; phone timers and alarms without the model; firewall limited to the home network and Tailscale; replace-the-API-key command; wrong keys logged; Android backup off.
+
+- [x] **Lighter on resources** (app 0.13.1, merged with the neon look and 0.12.6): instant answers without the model (time, date, sums, lists, clear reminders); the model sleeps after 30 idle minutes; vision on the CPU for graphics cards under 8 GB; lighter 3D character for phones and light-mode screens; silence skips Whisper; repeated short phrases are cached as audio.
 
 - [x] **Avatar screens on phones** (0.12.4–0.12.5): each screen speaks only its own conversations, with a per-screen choice (this screen / + phone app / every device); subtitles in a small window below or beside her (or film-style, or off); no flicker on touch; the in-app avatar starts at once instead of waiting for the chat history; the phone app stays connected in the background (quiet notification, battery-limits button).
 - [x] **Line icons instead of emoji** in the Android app.

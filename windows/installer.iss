@@ -56,7 +56,7 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/f /im whisper-server.exe"; Flags: 
 
 [Code]
 const
-  RuleArgs = 'advfirewall firewall add rule name="StellAI" dir=in action=allow protocol=TCP localport=8080,8092 profile=private,domain';
+  RuleArgs = 'advfirewall firewall add rule name="StellAI" dir=in action=allow protocol=TCP localport=8080,8092 profile=private,domain remoteip=LocalSubnet,100.64.0.0/10';
 
 function FirewallRuleExists(): Boolean;
 var
@@ -66,7 +66,8 @@ begin
                  SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
-{ Lets phones on your private network (home Wi-Fi, Tailscale) reach Stella: 8080 = AI, 8092 = voice/sync.
+{ Lets phones on your home network and on Tailscale (100.64.0.0/10) reach Stella, and nobody else:
+  8080 = AI, 8092 = voice/sync. An older, wider rule is tightened from the app (Options -> Limit firewall).
   Needs admin once, so Windows asks on the first install only; updates skip this. }
 procedure CurStepChanged(CurStep: TSetupStep);
 var

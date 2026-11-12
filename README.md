@@ -36,6 +36,31 @@ The setup (Linux script or Windows installer) checks the computer and sets thing
 - **Thinking:** Settings → *Thinking before answering*: **Auto** (default) thinks only when a question looks hard (debugging, maths, design, long questions) and answers simple things instantly. Thinking is capped (1K tokens on small setups, 2K on bigger ones) so it can't fill Stella's memory.
 - **Sampling:** Qwen's recommended settings for Qwen3.5 are used (precise for code; a mild repetition penalty elsewhere).
 
+### Light on resources
+
+- **Instant answers:** the time, the date, sums, "add milk to my shopping list", "what's on my parts list" and clear reminders ("remind me to call Sam in 20 minutes", "…at 5:30 pm") are answered by the server itself, without the AI model. Anything else, or anything ambiguous ("remind me at 5"), goes to the model as before. Off in Writer, Tutor, Brainstorm and custom modes.
+- **The model sleeps when idle:** after 30 quiet minutes it leaves RAM and GPU memory, and the next message loads it again (a few seconds). Change it with `SLEEP_IDLE_MIN="60"` in `~/llm/model.conf` (Linux) or `"sleep_idle_min": 60` in the Windows config; `0` keeps it loaded.
+- **Small graphics cards (under 8 GB):** the photo add-on runs on the CPU, so about 1 GB more of the card holds the model. Photos take a few seconds longer to read. To undo: `VISION_GPU="1"` (Linux) or `"vision_gpu": true` (Windows).
+- **Lighter character on phones:** phones, tablets and light-mode screens load a copy of the 3D character with textures capped at 1024 px (made once on the server; the original is untouched). Smaller download, much less graphics memory.
+- **Voice:** silent recordings skip speech recognition, short phrases Stella repeats ("Okay.", "Reminder set.") are kept as audio, and speech recognition gets the processor ahead of the model.
+- New model-server options are only used when the installed llama.cpp build supports them.
+
+### Longer conversations
+
+The context window (how much of a chat Stella holds at once) is sized for the computer: as long as fits without pushing the model off the graphics card, and short where there is no card, because a CPU takes minutes to re-read a long chat. Examples: RTX 2060 6 GB: 4B 32K, 9B 16K, 35B 64K. Tesla T4 16 GB: 9B and 35B 64K. No graphics card: 8K, or 16K with 6+ cores. Windows works it out at every start; on Linux re-run setup or switch models. To set your own: `NET_CONTEXT="32768"` in `~/llm/model.conf`, or `"context": 32768` in the Windows config.
+
+### Speed test
+
+**Speed test** (phone app → Server, the desktop chat's server window, or the Windows app) measures this computer as it is set up: how fast Stella reads and writes, how long she takes to wake after sleeping, and how long hearing and speaking take. Each run is compared with the last one on the same model, so you can see whether a change helped. It takes up to a minute and Stella can't chat meanwhile.
+
+### Security
+
+- **Firewall:** Stella's ports (8080, 8092) are open to your home network and Tailscale only. Linux applies this each time the server starts; on Windows new installs get it, and older ones can switch with **Limit firewall** in the app's Options.
+- **Replacing the API key** (lost phone, key seen by someone): Linux `~/llm/stellai-new-key.sh`, Windows **New API key…** in Options. Every device then pairs again with the new QR code.
+- **Wrong keys are logged** in the server's activity, with the address they came from.
+- **The phone app is left out of Google's backup** and phone-to-phone transfers, so the server address and key stay on the phone.
+- Timers and alarms asked for on a phone ("set a timer for 10 minutes", "wake me up at 6:30 am") are instant answers too.
+
 ### Automatic updates
 
 Both servers keep themselves up to date from this GitHub repo, checking every 30 minutes. They only install an update when Stella has been idle for a couple of minutes, and your chats, memories, projects, models and settings are never touched.

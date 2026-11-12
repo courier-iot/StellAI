@@ -41,6 +41,7 @@ LLAMA_PORT, HUB_PORT, WHISPER_PORT, EMBED_PORT, SEARXNG_PORT = 8080, 8092, 8093,
 EMBED_FILE = "nomic-embed-text-v1.5.Q8_0.gguf"   # small model for meaning-based file search (~140 MB, CPU)
 EMBED_URL = f"https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/{EMBED_FILE}"
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+ABOVE_NORMAL = 0x00008000 if os.name == "nt" else 0   # ABOVE_NORMAL_PRIORITY_CLASS
 
 LLAMA_REPO = "ggml-org/llama.cpp"
 WHISPER_REPO = "ggml-org/whisper.cpp"
@@ -250,6 +251,41 @@ def recommend(hw):
     return "4b"
 
 
+# ---- How long a conversation the model is started with (its context window, in tokens)
+# Qwen3.5 only keeps a per-token cache in one layer out of four, so long contexts are cheap: the 9B measures
+# about 17 MB per 1,000 tokens with the 8-bit cache StellAI uses. The planning figures below add working
+# buffers on top. The 4B and 35B figures are estimates on the same basis, not measurements.
+CTX_TARGET = {"4b": 32768, "9b": 65536, "35b": 65536}
+CTX_GB_PER_1K = {"4b": 0.02, "9b": 0.02, "35b": 0.03}
+
+
+def context_for(key, model_gb, ram, vram, cores):
+    """The biggest context that keeps the model where it runs fastest on this computer.
+
+    - No usable graphics card: memory isn't the limit, re-reading is (a CPU reads a few dozen tokens a second,
+      so a long chat would take many minutes to load after a restart). Short contexts stay.
+    - 4B / 9B on a graphics card: model + context must fit on the card, or part of the model falls back to the
+      CPU and every reply gets slower.
+    - 35B: its always-used core (about 2.5 GB) and the context sit on the card, the experts in RAM."""
+    if vram < 4:
+        if key == "35b":
+            return 16384
+        return 16384 if cores >= 6 and ram >= 12 else 8192
+    floor = (32768 if vram >= 4.5 else 16384) if key == "35b" else 8192
+    gpu = vram - (1.0 if vram < 8 else 2.0)        # what --fit leaves free (voice, and vision on 8 GB+ cards)
+    ctx = CTX_TARGET.get(key, 8192)
+    while ctx > floor:
+        kv = ctx / 1000 * CTX_GB_PER_1K.get(key, 0.03)
+        if key == "35b":
+            fits = kv + 2.5 <= gpu and model_gb + kv + 4 <= ram + vram
+        else:
+            fits = model_gb + kv <= gpu
+        if fits:
+            break
+        ctx //= 2
+    return max(ctx, floor)
+
+
 def plan(hw, model_key, vision=True, whisper=None):
     """Everything needed to install and run: files, URLs and llama-server arguments."""
     m = dict(MODELS[model_key])
@@ -263,13 +299,13 @@ def plan(hw, model_key, vision=True, whisper=None):
             m["file"] = "Qwen3.5-9B-Q3_K_M.gguf"   # 3-bit so it fits entirely on a 6 GB card
             m["size_gb"] = 4.6
     elif model_key == "35b":
-        ctx = 32768 if vram >= 4.5 else 16384   # experts in RAM leave GPU room for a long context
         total = hw["ram_gb"] + vram
         # Best quality that fits RAM + GPU memory (more bits = more accurate, especially for code)
         if total >= 40:
             m["file"], m["size_gb"] = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf", 22.2
         elif total >= 30:
             m["file"], m["size_gb"] = "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf", 17.5
+    ctx = context_for(model_key, m["size_gb"], hw["ram_gb"], vram, hw["cores"])
     if whisper is None:
         whisper = "small" if hw["ram_gb"] >= 14 and hw["cores"] >= 6 else "base"
     wname = f"ggml-{whisper}.en.bin"
@@ -509,6 +545,52 @@ def api_key(cfg):
     with open(path, "w") as f:
         f.write(k)
     return k
+
+
+def new_api_key(cfg):
+    """Replaces the API key (stop the servers first). Every phone, tablet and browser must be paired again."""
+    import secrets
+    k = secrets.token_urlsafe(36).replace("-", "").replace("_", "")[:48]
+    os.makedirs(cfg.root, exist_ok=True)
+    tmp = cfg.p("api-key.txt.new")
+    with open(tmp, "w") as f:
+        f.write(k)
+    os.replace(tmp, cfg.p("api-key.txt"))
+    return k
+
+
+# ---- Firewall: Stella's ports are open to the home network and Tailscale only
+FIREWALL_RULE = "StellAI"
+FIREWALL_FROM = "LocalSubnet,100.64.0.0/10"     # this PC's own network(s) + Tailscale's address range
+
+
+def firewall_add_args():
+    return (f'advfirewall firewall add rule name="{FIREWALL_RULE}" dir=in action=allow protocol=TCP '
+            f'localport={LLAMA_PORT},{HUB_PORT} profile=private,domain remoteip={FIREWALL_FROM}')
+
+
+def firewall_state(show=None):
+    """'limited' (home network + Tailscale only), 'open' (the older rule: any address on a private network),
+    'none' (no rule: Windows asks or blocks) or 'unknown'. Reading the rule needs no administrator rights."""
+    if show is None:
+        if os.name != "nt":
+            return "unknown"
+        try:
+            r = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={FIREWALL_RULE}"],
+                               capture_output=True, text=True, timeout=15, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+            show = (r.stdout or "") if r.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+    if "100.64.0.0" in show:
+        return "limited"
+    return "open" if re.search(r"\b8092\b", show) else "none"
+
+
+def limit_firewall():
+    """Replaces the firewall rule with the limited one. Windows asks for administrator approval (one prompt)."""
+    import ctypes
+    cmd = (f'/c netsh advfirewall firewall delete rule name="{FIREWALL_RULE}" & netsh {firewall_add_args()}')
+    return ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", cmd, None, 0) > 32
 
 
 def is_installed(cfg):
@@ -803,20 +885,74 @@ class Job:
                 pass
 
 
+_LLAMA_HELP = {"tag": None, "text": ""}
+SLEEP_IDLE_MIN = 30      # the model leaves memory after this long without a message (0 in the config = never)
+SMALL_GPU_GB = 8         # below this, the vision add-on runs on the CPU so the GPU memory goes to the model
+
+
+def llama_flags(cfg):
+    """This llama-server build's --help text (read once per installed build). New options are only passed when
+    the build lists them: an unknown option would stop the model from starting at all."""
+    exe = cfg.p("bin", "llama", "llama-server.exe")
+    try:
+        tag = (os.path.getmtime(exe), os.path.getsize(exe))
+    except OSError:
+        return ""
+    if _LLAMA_HELP["tag"] != tag:
+        try:
+            r = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW,
+                               stdin=subprocess.DEVNULL, cwd=os.path.dirname(exe), errors="replace")
+            text = (r.stdout or "") + (r.stderr or "")
+        except (OSError, subprocess.SubprocessError):
+            text = ""
+        _LLAMA_HELP.update(tag=tag, text=text)
+    return _LLAMA_HELP["text"]
+
+
+def vision_on_cpu(cfg, pl, flags):
+    """On small graphics cards the photo add-on (about 1 GB) runs on the CPU: photos take a few seconds longer to
+    read, and that GPU memory holds more of the model for every other reply. Config "vision_gpu": true undoes it."""
+    if pl.get("backend", "cpu") == "cpu" or cfg.get("vision_gpu") or "--no-mmproj-offload" not in flags:
+        return False
+    vram = (cfg.get("hardware") or {}).get("vram_gb") or 0
+    return 0 < vram < SMALL_GPU_GB
+
+
+def launch_context(cfg, pl):
+    """The context window to start the model with. Worked out from the hardware at every start, so servers
+    installed before the bigger windows get them without reinstalling. Config "context": 16384 overrides it."""
+    if cfg.get("context"):
+        return int(cfg.get("context"))
+    hw = cfg.get("hardware")
+    key = pl.get("model_key")
+    if not hw or key not in MODELS:
+        return int(pl["context"])
+    vram = (hw.get("vram_gb") or 0) if pl.get("backend", "cpu") != "cpu" else 0
+    return context_for(key, pl.get("model_gb") or MODELS[key]["size_gb"], hw.get("ram_gb") or 8, vram, hw.get("cores") or 2)
+
+
 def llama_args(cfg, pl, key):
+    ctx = launch_context(cfg, pl)
     a = [cfg.p("bin", "llama", "llama-server.exe"), "-m", cfg.p("models", pl["model_file"]),
-         "-c", str(pl["context"]), "-t", str(cfg.get("threads") or pl["threads"]),
+         "-c", str(ctx), "-t", str(cfg.get("threads") or pl["threads"]),
          "-tb", str(pl.get("threads_batch") or pl["threads"])]   # all threads for reading prompts
     a += pl["gpu_args"]
+    flags = llama_flags(cfg)
     mm = cfg.p("models", pl["mmproj_file"])
     vision = pl.get("vision") and os.path.isfile(mm)
+    cpu_vision = bool(vision) and vision_on_cpu(cfg, pl, flags)
     if vision:
-        a += ["--mmproj", mm]
+        a += ["--mmproj", mm] + (["--no-mmproj-offload"] if cpu_vision else [])
     if pl.get("backend", "cpu") != "cpu":
         # GPU memory --fit leaves free for what it doesn't know about: the vision add-on and GPU Whisper
-        a += ["--fit-target", str(1024 + (1000 if vision else 0) + (700 if cfg.get("whisper_gpu") else 0))]
+        a += ["--fit-target", str(1024 + (1000 if vision and not cpu_vision else 0) + (700 if cfg.get("whisper_gpu") else 0))]
+    # Free the model's RAM and GPU memory after a quiet spell; the next message loads it again in a few seconds
+    idle = cfg.get("sleep_idle_min")
+    idle = SLEEP_IDLE_MIN if idle is None else int(idle)
+    if idle > 0 and "--sleep-idle-seconds" in flags:
+        a += ["--sleep-idle-seconds", str(idle * 60)]
     # Cap thinking so it can't fill the context
-    a += ["--reasoning-budget", "1024" if pl["context"] <= 8192 else "2048",
+    a += ["--reasoning-budget", "1024" if ctx <= 8192 else "2048",
           "--reasoning-budget-message", "I have thought enough; time to answer."]
     a += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja",
           "--api-key", key, "--host", "0.0.0.0", "--port", str(LLAMA_PORT)]
@@ -928,8 +1064,10 @@ class Servers:
 
     def _spawn(self, name, args):
         logf = open(self.cfg.p("logs", f"{name}.log"), "w", encoding="utf-8", errors="replace")
+        # Voice recognition runs a notch above the model, so Stella hears you promptly even while she's writing
+        prio = ABOVE_NORMAL if name == "whisper" else 0
         p = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                             creationflags=NO_WINDOW, cwd=os.path.dirname(args[0]))
+                             creationflags=NO_WINDOW | prio, cwd=os.path.dirname(args[0]))
         self.job.add(p)
         self.procs[name] = (p, logf)
         self.log(f"started {name} (pid {p.pid})")
