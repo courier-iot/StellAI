@@ -222,6 +222,8 @@ const MODES = [
     prompt: "Mode: Writer. You are the user's creative writing partner for fiction: novels, short stories, scenes and worldbuilding.\n- Write vivid, original prose with a strong voice, sensory detail, natural dialogue and good pacing. Show, don't tell.\n- Keep continuity: characters, names, timeline, world rules and established facts. Match the user's genre, tense, point of view and style.\n- When asked to write, write the full passage, not a summary or outline (unless asked). Long replies are welcome.\n- Write story text as plain prose: no headings, bullet points or bold in the story itself.\n- Avoid clichés and purple prose. Give characters distinct voices.\n- Suggest directions or ask questions only at natural decision points or when asked.\n- You don't need to be brief in this mode." },
   { id: "electronics", name: "Electronics", icon: "⚡", desc: "Circuits, PCBs, firmware and calculations", temperature: 0.4,
     prompt: "Mode: Electronics. Act as an experienced electronics engineer.\n- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n- Draw schematics or timing diagrams with render_diagram when a picture helps.\n- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)." },
+  { id: "modeler", name: "3D Modeler", icon: "◆", desc: "Blender modeling on your server, checked step by step", temperature: 0.3, thinking: "on",
+    prompt: "Mode: 3D Modeler. You build and fix 3D models in Blender on the user's server, one careful step at a time. Accuracy matters more than speed.\n- Start with blender_project (status, then new or open) and blender_inspect before changing anything. Never guess object names, bone names or sizes: read them.\n- Each blender_step makes ONE small, checkable change (add one part, move one thing, fix one problem). Write the goal with numbers: metres, degrees, which object or bone.\n- Write bpy with bpy.data, bmesh and the ready-made helpers; avoid edit-mode bpy.ops. Z is up and the front faces -Y (a character's face is in the FRONT view).\n- After each step, read the measured changes, any new mesh problems and the visual check. If something is off, fix it with another step or go back with revert. Never say a step worked when the check or the numbers say otherwise.\n- Tell the user the version number after each change so they can ask to go back. Before big changes (deleting or joining parts, remeshing, re-rigging) explain the plan and wait for a yes.\n- Photos: when the user sends pictures of what they want, save them with blender_project add_reference (label front/left/back/right when you can tell), so every check compares against them. Ask for 2-3 photos from different sides when the shape matters.\n- New object from photos: blender_generate makes a rough shape (several minutes). Then, one step each: turn it so its front faces -Y, scale it from a real measurement (ask the user for one; photos can't show size), clean up the mesh, add materials, and compare with blender_inspect render=true.\n- Editing something to look like a photo: change it step by step and let the reference comparison tell you what still differs.\n- You're strongest at hard-surface parts, props and accessories, materials (including glowing emission), cleanup, attaching parts to bones and exports. Generated shapes are rough for characters and poor for whole rooms. For organic sculpting (faces, bodies, cloth folds) guide the user step by step in Blender instead and check their result.\n- Files: the user drops .blend, .vrm, .glb, .fbx, .obj or .stl files into the 3D inbox folder on the server (blender_project status shows where); exports go to the workspace's exports folder." },
   { id: "tutor", name: "Tutor", icon: "🎓", desc: "Learn step by step instead of just getting answers", temperature: 0.5,
     prompt: "Mode: Tutor. Help the user learn and understand, not just get answers.\n- Explain step by step with simple examples and analogies, building on what they already know.\n- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n- Check understanding with a short question now and then. Correct misconceptions kindly and clearly." },
   { id: "brainstorm", name: "Brainstorm", icon: "💡", desc: "Lots of ideas, from practical to wild", temperature: 1.0, thinking: "off",
@@ -448,7 +450,7 @@ function buildHistory(list) {
   const out = []; let pending = "";
   const flush = () => { if (pending.trim()) out.push({ role: "assistant", content: pending.trim() }); pending = ""; };
   for (const m of list) {
-    if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo]").trim(), _id: m.id, _text: m.text }); }
+    if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo $1]").trim(), _id: m.id, _text: m.text }); }
     else if (m.role === "assistant" && m.text.trim()) pending += m.text + "\n";
     else if (m.role === "tool") pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
   }
@@ -588,13 +590,13 @@ async function run(convId, photos, voice = false, fresh = false) {
     const lastUser = p.history.map(h => h.role).lastIndexOf("user");
     if (lastUser >= 0 && photos.length) {
       const block = (hist[lastUser].content.match(/^\[Automatic context[\s\S]*?\[End of context\]\n\n/) || [""])[0];
-      const parts = [{ type: "text", text: block + (p.history[lastUser]._text.replace(PHOTO, "").trim() || "(The user sent a photo.)") }];
+      const parts = [{ type: "text", text: block + ((p.history[lastUser]._text.replace(PHOTO, "").trim() || "(The user sent a photo.)") + " " + (p.history[lastUser]._text.match(PHOTO) || []).map(t => "[photo " + t.match(/image:([0-9a-f]{16})/)[1] + "]").join(" ")).trim() }];
       for (const ph of photos) parts.push({ type: "image_url", image_url: { url: ph.dataUrl } });
       hist[lastUser] = { role: "user", content: parts };
     }
     const thinking = p.think;
     // Qwen's recommended sampling for Qwen3.5 (model card); a mode's creativity overrides temperature
-    const code = p.mode.id === "programmer" || p.mode.id === "electronics";
+    const code = p.mode.id === "programmer" || p.mode.id === "electronics" || p.mode.id === "modeler";
     for (let round = 0; round < 6; round++) {
       S.status = "Contacting server…"; renderBar();
       const body = { model: "local", stream: true, messages: [{ role: "system", content: p.system }, ...hist, ...turn],
@@ -655,7 +657,7 @@ async function run(convId, photos, voice = false, fresh = false) {
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
   }
 }
-const toolLabel = n => ({ render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
+const toolLabel = n => ({ blender_generate: "Making a 3D shape from the pictures", blender_step: "Working in Blender", blender_inspect: "Looking at the model", blender_project: "Opening the 3D workspace", render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
   project_search: "Searching project files", library_search: "Searching the library", remember: "Remembering" }[n] || (n.startsWith("github") ? "Working with GitHub" : "Calculating"));
 
 async function stream(body) {

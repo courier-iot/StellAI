@@ -54,6 +54,7 @@ Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardw
 - **Check everything** runs the health check and shows what needs fixing.
 - **Back up now** / **Restore a backup…**: backups are also made every night into `%LOCALAPPDATA%\StellAI\backups` (last 14 kept).
 - The phone app's **Server** screen and the desktop chat's **🖥 Server** button show status, switch models and run the same checks.
+- **3D Modeler mode**: install Blender from blender.org (the normal installer); StellAI finds it in Program Files by itself. For VRoid/VRM characters, also add the VRM add-on in Blender (Edit → Preferences → Get Extensions → search "VRM"). Drop models into `%LOCALAPPDATA%\StellAI\3d\inbox`. Reference pictures work the same as on Linux. The photo-to-3D generator isn't installed automatically on Windows yet: set it up from the Hunyuan3D-2 instructions and put `{"python": "C:\\path\\to\\venv\\Scripts\\python.exe"}` in `%LOCALAPPDATA%\StellAI\3d\generator.json`; it runs when a graphics card has 7–9 GB free (StellAI can't pause Stella's model on Windows).
 - **Wake words folder**: drop a trained `hey_stella.onnx` here and it appears in the phone app's wake word list.
 
 ## If the AI model won't start on an NVIDIA GPU

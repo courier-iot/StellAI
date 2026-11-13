@@ -4,7 +4,7 @@ Meet **Stella**, your personal voice assistant and chat app, powered by the AI m
 
 - **Wake word**: say "Hey Jarvis" (or "Alexa" / "Hey Mycroft") and give a command, hands-free.
 - **Default assistant**: long-press the power or home button to talk, instead of Google.
-- **Phone actions**: alarms, timers, opening apps, maps, flashlight, volume, battery, plus drafting texts, dialing and calendar events (which you confirm).
+- **Phone actions**: set and turn off alarms and timers, play/pause/skip music and play songs by name, what's playing, volumes, silent and Do Not Disturb, brightness, reading notifications, contacts and calendar, quick settings panels, opening apps, maps, flashlight, battery, plus drafting texts, dialing and calendar events (which you confirm). See [Phone access](#phone-access).
 - **Spoken replies** through the phone's text-to-speech voice.
 - **Chats sync** across every phone and tablet, stored on your server.
 - **Space theme**: starfield background, HUD-style chat, glowing mic, and 8 accent colors (Settings → Assistant → Theme color).
@@ -185,10 +185,33 @@ Each chat has a **mode**, a mindset that changes how Stella thinks and writes. T
 | ⚡ Electronics | Circuits, PCBs, firmware | Uses the calculators and diagrams |
 | 🎓 Tutor | Learning something | Step by step, hints before answers |
 | 💡 Brainstorm | Ideas | Lots of varied ideas |
+| ◆ 3D Modeler | Blender models, props, VRM characters | Careful, one checked step at a time |
 
 Make your own in the mode picker → **Manage modes** (or copy a built-in one and change it): instructions, creativity, whether she thinks first, fewer tools, and *story memory*, which makes context refreshes keep characters, plot and style instead of tasks. Your modes and each chat's mode sync to all your devices.
 
 Tip for a novel: create a project for it (characters and world in the notes, chapters as files) and chat in **Writer** mode inside it.
+
+## 3D Modeler (Blender on the server)
+
+In **◆ 3D Modeler** mode Stella works on 3D models in a hidden Blender on your server. It's slow on purpose: every change is checked before she tells you about it.
+
+1. **Get a model in**: drop a `.blend`, `.vrm`, `.glb`, `.fbx`, `.obj` or `.stl` file into the **3D inbox** folder (`~/llm/3d/inbox` on Linux, `3d\inbox` next to the chat database on Windows). Your avatar characters already on the server can be used as well. Or start from an empty scene.
+2. **Ask for one change at a time**: "add a halo ring 6 cm above her head, tilted 8°, glowing lime".
+3. For each change Stella writes a small Blender script. The server opens the newest version, runs it, saves a **new numbered version** (nothing is ever overwritten), measures what changed, renders front/side/back/¾ views, and has the vision add-on compare the pictures with the goal. If the script fails or changes nothing, nothing is saved.
+4. **Undo**: "go back to version 7" (saved as a new version, so that can be undone too). The newest 40 versions and the first are kept.
+5. **Export**: "export it as glb" (or fbx, obj, stl, vrm, blend). The file lands in the workspace's `exports` folder.
+
+**From pictures** (anything: a prop, a gadget, furniture, a creature, a character, hair):
+
+- **Reference pictures**: send photos in the chat and ask Stella to use them ("this is the front, this is the side"). She keeps them with the workspace, and every visual check then puts your photos next to her renders and says what still differs. Works for editing existing models to look like a photo.
+- **Photo-to-3D**: "make this from the photos" runs a local photo-to-3D generator (Tencent's open Hunyuan3D-2 on your NVIDIA card) and adds a rough shape as a new version. Then she turns it to face front, scales it from a real measurement you give her (photos can't show size), cleans it up and adds materials, one checked step at a time. One photo works; a front photo plus side/back photos works better. Best for solid objects and props, rough for characters, poor for whole rooms.
+- A shape takes several minutes. It needs about 7–9 GB of free graphics memory: with one card, StellAI pauses Stella's model during the job (Linux, after re-running setup) and loads her again afterwards; with a second card the job runs there and Stella keeps talking. With 2+ cards, `LLAMA_GPUS="0"` in `~/llm/model.conf` keeps Stella on card 0 (setup offers this). Install: Linux setup's "photo-to-3D" question (~11 GB, NVIDIA 8 GB+). The Hunyuan3D models are under Tencent's community license (not licensed for use in the EU, UK or South Korea).
+
+Good at: hard-surface parts, props and accessories, materials and glow, cleanup, attaching parts to bones, exports. Not good at: sculpting faces and bodies; for those she talks you through it in Blender and checks your result.
+
+Needs Blender on the server: Linux setup offers a portable copy (plus the VRM add-on); on Windows install Blender from blender.org. Any Blender already installed is found automatically, or pass `--blender /path/to/blender`. Quick renders use the graphics card; if Blender can't, it switches to slower CPU renders by itself. The pictures are checked only if the vision add-on is installed (the numbers are always measured).
+
+Safety: Stella's scripts can only change the scene. Opening, saving and exporting files, other imports, shell and network access and Blender settings are blocked and handled by StellAI itself. This is a guard rail against mistakes, not a locked sandbox, so keep the server for your own use. Blender leaves memory after 15 quiet minutes.
 
 ## Projects
 
@@ -228,6 +251,21 @@ Long-press any message to **Copy**, **Share**, **Retry** (Stella's last reply) o
 Train a model (see below), then copy the `.onnx` file into `~/llm/wakewords/` on the server. It shows up with a ✦ in Settings → Voice assistant → Wake word, and the app downloads it the first time you use it.
 
 Training: open the [openwakeword-colab-2026 notebook](https://colab.research.google.com/github/alfiedennen/openwakeword-colab-2026/blob/main/train_wakeword.ipynb) in Google Colab, set `TARGET_PHRASE = "hey stella"` and `MODEL_NAME = "hey_stella"`, choose a GPU runtime and **Run all**. It takes about 1.5 hours on Colab Pro, or about 2.5 hours on the free tier (keep the tab open), and downloads `hey_stella.onnx` at the end.
+
+## Phone access
+
+Some phone actions need an access that Android keeps off until you allow it: **Settings → Phone access** in the app shows each one with an **Allow** button.
+
+| Access | Lets Stella |
+|---|---|
+| Notifications & music | read notifications ("did anyone message me?"), say what's playing, control and choose music in the app that's playing. Without it, play/pause/skip still works (like headset buttons) |
+| Do Not Disturb | turn DND on/off, set the phone to silent |
+| Brightness ("Modify system settings") | change the screen brightness |
+| Contacts & calendar | find numbers by name ("text Mom"), read upcoming events |
+
+What Android doesn't let any app do, so Stella can't either: **list or delete alarms** (she turns them off through the clock app, which may ask you to confirm; she can tell you when the next one rings), and **switch Wi-Fi, Bluetooth, mobile data or airplane mode** (she opens the panel and you tap the switch). Playing a song by name works with music apps that accept play requests (Spotify, YouTube Music and most others).
+
+Android 13+ and "restricted setting": because StellAI is installed from a file, Android greys out Notification access at first. Open **App info → ⋮ → Allow restricted settings**, then allow it (the app links there).
 
 ## Adding your own phone actions
 

@@ -61,6 +61,10 @@ object ServerTools {
 
     fun displayName(name: String): String = when (name) {
         "render_diagram" -> "Drawing diagram"
+        "blender_generate" -> "Making a 3D shape from the pictures"
+        "blender_step" -> "Working in Blender"
+        "blender_inspect" -> "Looking at the model"
+        "blender_project" -> "Opening the 3D workspace"
         "project_note" -> "Saving project note"
         "library_search" -> "Searching the library"
         "search_chats" -> "Searching past chats"

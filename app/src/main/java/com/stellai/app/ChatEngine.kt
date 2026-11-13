@@ -817,9 +817,11 @@ class ChatEngine(private val app: App) {
         val ids = PHOTO_REF.findAll(m.text).map { it.groupValues[1] }.toList()
         val text = m.text.replace(PHOTO_REF, "").trim()
         if (ids.isEmpty()) return text
-        if (!withImages) return (text + " " + ids.joinToString(" ") { "[photo]" }).trim()
+        // The id lets server tools use the photo (the 3D Modeler's reference pictures and photo-to-3D).
+        val tags = ids.joinToString(" ") { "[photo $it]" }
+        if (!withImages) return "$text $tags".trim()
         val parts = JSONArray()
-        parts.put(JSONObject().put("type", "text").put("text", text.ifEmpty { "(The user sent a photo.)" }))
+        parts.put(JSONObject().put("type", "text").put("text", (text.ifEmpty { "(The user sent a photo.)" } + " " + tags).trim()))
         for (id in ids) {
             val bytes = try {
                 MediaCache.bytes(app, "image:$id")
@@ -847,7 +849,7 @@ class ChatEngine(private val app: App) {
         turn.forEach { all.put(it) }
         // Qwen's recommended sampling for Qwen3.5 (model card): precise for code, a presence penalty elsewhere
         // to avoid the repetition loops quantized models can fall into. A mode's creativity overrides temperature.
-        val code = mode.id == "programmer" || mode.id == "electronics"
+        val code = mode.id == "programmer" || mode.id == "electronics" || mode.id == "modeler"
         val temperature = mode.temperature ?: if (thinking) (if (code) 0.6 else 1.0) else 0.7
         return JSONObject()
             .put("model", "local")
@@ -872,6 +874,7 @@ class ChatEngine(private val app: App) {
         return """
             You are $name, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
             The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm briefly afterwards; never claim success if a tool failed.
+            Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and mobile data open a settings panel for the user to tap. If a tool says Stella needs an access, tell the user where to turn it on.
             Markdown is fine; always put code in fenced blocks with a language; avoid tables.
             Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically; if it fails, fix it and retry once).
             Describe photos only from what you actually see.
@@ -939,11 +942,25 @@ class ChatEngine(private val app: App) {
             "set_flashlight" to Regex("flash ?light|torch|\\blight\\b"),
             "set_media_volume" to Regex("volume|louder|quieter|\\bmute|turn (it )?(up|down)"),
             "get_battery_status" to Regex("battery|charg(e|ing) level|how much charge"),
+            "cancel_alarm" to Regex("alarm"),
+            "alarm_info" to Regex("alarm"),
+            "open_clock" to Regex("alarm|timer"),
+            "cancel_timer" to Regex("timer"),
+            "media_control" to Regex("\\bplay|pause|resume|skip|next (song|track)|previous|\\bsong|track|music|podcast|stop (the )?(music|song|video)"),
+            "now_playing" to Regex("\\bsong|track|playing|music|listening|what'?s this"),
+            "play_music" to Regex("\\bplay\\b|\\bsong|music|album|playlist|artist|put on"),
+            "set_sound_mode" to Regex("silent|vibrat|do not disturb|\\bdnd\\b|ringer|\\bmute|sound (on|off)|quiet mode"),
+            "set_brightness" to Regex("bright|\\bdim\\b|darker|screen light"),
+            "open_settings" to Regex("wi-?fi|bluetooth|mobile data|airplane|flight mode|hotspot|\\bnfc\\b|location|\\bgps\\b|settings"),
+            "read_notifications" to Regex("notification|\\bmessages?\\b|e-?mails?|whatsapp|unread|anyone (text|message)|did .* (text|message)"),
+            "find_contact" to Regex("\\bcall\\b|\\btext\\b|\\bnumber|contact|message (to|for)"),
+            "upcoming_events" to Regex("calendar|schedule|appointment|meeting|what'?s on|agenda|\\bbusy\\b|free (on|this|tomorrow|today)"),
         )
         /** Server tools kept in "minimal" modes such as Writer. */
         private val MINIMAL_SERVER_TOOLS = setOf("remember", "forget", "project_note", "project_search", "library_search",
             "set_reminder", "add_to_list", "web_search", "fetch_page")
-        private val MINIMAL_PHONE_TOOLS = setOf("set_alarm", "set_timer", "open_app", "open_url")
+        private val MINIMAL_PHONE_TOOLS = setOf("set_alarm", "set_timer", "open_app", "open_url", "cancel_alarm",
+            "media_control", "play_music")
         private const val STREAMING_PREFIX = "streaming-"
     }
 }

@@ -70,8 +70,12 @@ object HubApi {
             .header("Authorization", "Bearer ${apiKey.trim()}")
             .post(argsJson.ifBlank { "{}" }.toRequestBody("application/json".toMediaType()))
             .build()
-        return JSONObject(execute(request))
+        // Blender steps render, measure and have the vision add-on look at the result: minutes, not seconds.
+        return JSONObject(execute(request, if (name.startsWith("blender_")) modeling else http))
     }
+
+    // 35 minutes: a photo-to-3D job can take up to 25, plus importing, rendering and checking it.
+    private val modeling by lazy { http.newBuilder().readTimeout(35, TimeUnit.MINUTES).build() }
 
     /** PNG bytes of a rendered diagram. */
     fun diagram(serverUrl: String, apiKey: String, id: String): ByteArray {

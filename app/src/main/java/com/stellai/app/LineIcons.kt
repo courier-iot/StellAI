@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -87,11 +88,12 @@ object LineIcons {
         "🌙" -> Icons.Outlined.DarkMode
         "★", "⭐" -> Icons.Outlined.StarOutline
         "💻" -> Icons.Outlined.Code
+        "◆", "🧊" -> Icons.Outlined.ViewInAr
         else -> Sparkle
     }
 
     /** Icons offered when you make your own mode (stored as their symbol). */
-    val MODE_CHOICES = listOf("★", "⌨", "✒", "⚡", "🎓", "💡", "📜", "🎮", "🍳", "🧪", "🎵", "📈", "🗺", "🛠", "❤", "🌙")
+    val MODE_CHOICES = listOf("★", "⌨", "✒", "⚡", "🎓", "💡", "📜", "🎮", "🍳", "🧪", "🎵", "📈", "🗺", "🛠", "◆", "❤", "🌙")
 
     fun forFile(kind: String): ImageVector = when (kind) {
         "pdf" -> Icons.Outlined.PictureAsPdf

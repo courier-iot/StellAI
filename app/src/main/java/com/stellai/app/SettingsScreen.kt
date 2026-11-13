@@ -327,6 +327,9 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
             }
 
             HorizontalDivider()
+            PhoneAccessSettings()
+
+            HorizontalDivider()
             SectionTitle("Sync")
             Hint("Chats are stored on the server and shared by every phone or tablet set up with the same server and key.")
             Text(app.sync.status, style = MaterialTheme.typography.bodyMedium)
@@ -454,5 +457,66 @@ private fun GitHubSettings() {
             save(body)
         }) { Text("Save GitHub settings") }
         if (tokenSet) TextButton(enabled = !busy, onClick = { save(org.json.JSONObject().put("token", "")) }) { Text("Remove token") }
+    }
+}
+
+/**
+ * Special access some phone actions need. Each row shows whether it's on and opens Android's page for it.
+ */
+@Composable
+private fun PhoneAccessSettings() {
+    val context = LocalContext.current
+    var notif by remember { mutableStateOf(PhoneExtras.hasNotificationAccess(context)) }
+    var dnd by remember { mutableStateOf(PhoneExtras.hasDndAccess(context)) }
+    var write by remember { mutableStateOf(PhoneExtras.hasWriteSettings(context)) }
+    var people by remember {
+        mutableStateOf(PhoneExtras.has(context, Manifest.permission.READ_CONTACTS) &&
+            PhoneExtras.has(context, Manifest.permission.READ_CALENDAR))
+    }
+    LifecycleResumeEffect(Unit) {
+        notif = PhoneExtras.hasNotificationAccess(context)
+        dnd = PhoneExtras.hasDndAccess(context)
+        write = PhoneExtras.hasWriteSettings(context)
+        people = PhoneExtras.has(context, Manifest.permission.READ_CONTACTS) &&
+            PhoneExtras.has(context, Manifest.permission.READ_CALENDAR)
+        onPauseOrDispose {}
+    }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        people = PhoneExtras.has(context, Manifest.permission.READ_CONTACTS) &&
+            PhoneExtras.has(context, Manifest.permission.READ_CALENDAR)
+    }
+    fun open(kind: String) {
+        try {
+            context.startActivity(PhoneExtras.accessIntent(context, kind))
+        } catch (_: Exception) {
+            try { context.startActivity(PhoneExtras.accessIntent(context, "app")) } catch (_: Exception) {}
+        }
+    }
+
+    SectionTitle("Phone access")
+    Hint("What Stella may do on this phone. Everything is off until you allow it, and nothing leaves your own server.")
+    AccessRow("Notifications & music",
+        "Read your notifications, see what's playing, and control and choose music in apps like Spotify. Without it she can still play, pause and skip.",
+        notif) { open("notifications") }
+    if (!notif && Build.VERSION.SDK_INT >= 33) {
+        Hint("Greyed out or \"restricted setting\"? Android limits this for apps installed from a file: open App info → ⋮ (top right) → Allow restricted settings, then try again.")
+        OutlinedButton(onClick = { open("app") }) { Text("Open App info") }
+    }
+    AccessRow("Do Not Disturb", "Turn Do Not Disturb on or off and set the phone to silent.", dnd) { open("dnd") }
+    AccessRow("Brightness", "Change the screen brightness (Android calls this \"Modify system settings\").", write) { open("write") }
+    AccessRow("Contacts & calendar", "Find numbers by name (\"text Mom\") and read what's on your calendar.", people) {
+        ask.launch(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALENDAR))
+    }
+}
+
+@Composable
+private fun AccessRow(title: String, detail: String, allowed: Boolean, onAllow: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (allowed) Text("On", color = Space.Accent, style = MaterialTheme.typography.labelLarge)
+        else OutlinedButton(onClick = onAllow) { Text("Allow") }
     }
 }
