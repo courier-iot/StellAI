@@ -82,7 +82,7 @@ object PhoneTools {
         put(tool("play_music", "Play a song, artist, album or playlist by name in a music app.",
             props("query" to prop("string", "e.g. 'Bohemian Rhapsody Queen'"),
                 "kind" to prop("string", "song, artist, album, playlist or any"),
-                "app" to prop("string", "optional, e.g. Spotify, YouTube Music")), "query"))
+                "app" to prop("string", "optional, e.g. Spotify; default Stellar Disc if installed")), "query"))
         put(tool("set_sound_mode", "Ringer and Do Not Disturb.",
             props("mode" to prop("string", "normal, vibrate, silent, dnd_on or dnd_off")), "mode"))
         put(tool("set_brightness", "Screen brightness.",

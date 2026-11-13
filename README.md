@@ -263,7 +263,7 @@ Some phone actions need an access that Android keeps off until you allow it: **S
 | Brightness ("Modify system settings") | change the screen brightness |
 | Contacts & calendar | find numbers by name ("text Mom"), read upcoming events |
 
-What Android doesn't let any app do, so Stella can't either: **list or delete alarms** (she turns them off through the clock app, which may ask you to confirm; she can tell you when the next one rings), and **switch Wi-Fi, Bluetooth, mobile data or airplane mode** (she opens the panel and you tap the switch). Playing a song by name works with music apps that accept play requests (Spotify, YouTube Music and most others).
+What Android doesn't let any app do, so Stella can't either: **list or delete alarms** (she turns them off through the clock app, which may ask you to confirm; she can tell you when the next one rings), and **switch Wi-Fi, Bluetooth, mobile data or airplane mode** (she opens the panel and you tap the switch). Playing a song by name works with music apps that accept play requests (Spotify, YouTube Music and most others). With **Stellar Disc** 3.4.0 or newer installed, "play ..." goes there unless another app is already playing or you name one.
 
 Android 13+ and "restricted setting": because StellAI is installed from a file, Android greys out Notification access at first. Open **App info → ⋮ → Allow restricted settings**, then allow it (the app links there).
 

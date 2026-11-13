@@ -278,13 +278,17 @@ object PhoneExtras {
             c.transportControls.playFromSearch(query, extras)
             return Res(true, "Playing \"$query\" in ${appLabel(ctx, c.packageName)}")
         }
-        // 2. Ask a music app to search and play (opens it)
+        // 2. Ask a music app to search and play (opens it). No app named: Stellar Disc if it's installed.
         val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).putExtras(extras)
+        var target = appName
         if (appName.isNotBlank()) {
             val pkg = findPackage(ctx, appName) ?: return Res(false, "No app called \"$appName\" is installed")
             intent.setPackage(pkg)
+        } else if (installed(ctx, STELLAR_DISC)) {
+            intent.setPackage(STELLAR_DISC)
+            target = "Stellar Disc"
         }
-        return if (start(ctx, intent)) Res(true, "Asked ${appName.ifBlank { "your music app" }} to play \"$query\"")
+        return if (start(ctx, intent)) Res(true, "Asked ${target.ifBlank { "your music app" }} to play \"$query\"")
         else Res(false, if (appName.isBlank()) "No music app takes play requests; name one, e.g. Spotify"
                       else "$appName doesn't take play requests; I can open it with open_app instead")
     }
@@ -453,6 +457,16 @@ object PhoneExtras {
     }
 
     // ---- Helpers -------------------------------------------------------------------------------
+    /** The user's own music player (github.com/courier-iot/Stellar-Disc-Player). */
+    private const val STELLAR_DISC = "com.stellapp.disc"
+
+    private fun installed(ctx: Context, pkg: String): Boolean = try {
+        ctx.packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
     /** Package of an installed app by its name ("spotify" → com.spotify.music). */
     fun findPackage(ctx: Context, rawName: String): String? {
         val query = rawName.trim().lowercase()

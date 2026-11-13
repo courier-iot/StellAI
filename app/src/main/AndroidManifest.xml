@@ -34,6 +34,8 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <!-- Stellar Disc, the default player for "play ..." -->
+        <package android:name="com.stellapp.disc" />
         <!-- Music apps that can play a song by name -->
         <intent>
             <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />

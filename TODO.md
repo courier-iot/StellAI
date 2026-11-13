@@ -29,7 +29,7 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 ## Done
 
-- [x] **More phone powers** (app 0.17.0): turn off alarms and timers, next alarm, music control / now playing / play by name, volumes per stream, silent and Do Not Disturb, brightness, notifications, contacts, calendar reading, settings panels; Settings → Phone access. Next: Home Assistant controls, Stellar Disc as a play target.
+- [x] **More phone powers** (app 0.17.0): turn off alarms and timers, next alarm, music control / now playing / play by name, volumes per stream, silent and Do Not Disturb, brightness, notifications, contacts, calendar reading, settings panels; Settings → Phone access. 0.17.1: "play ..." goes to Stellar Disc by default when nothing else is playing. Next: Home Assistant controls.
 - [x] **Picture to model** (app 0.16.0): reference pictures per 3D workspace (every visual check compares with them; chat photos now carry their id so tools can use them); photo-to-3D shapes with Hunyuan3D-2 mini / multi-view on the NVIDIA card, pausing Stella's model on one card or using a second card; `LLAMA_GPUS` keeps Stella on one card. Next: Windows install for the generator, optional texturing (Hunyuan3D-Paint).
 - [x] **3D Modeler mode** (app 0.15.0): Blender kept running in the background on the server; each step is a checked bpy script saved as a new version, with measured changes, four-angle renders and a vision check; revert, history, export (glb/fbx/obj/stl/vrm/blend); Linux setup offers Blender and the VRM add-on. Next: the live add-on for an open Blender window, reusing the same commands.
 
