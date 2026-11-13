@@ -19,6 +19,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,12 +101,39 @@ fun MemoryScreen(onDone: () -> Unit) {
                     ) { Text("Add") }
                 }
                 if (memory.status.isNotEmpty()) Text(memory.status, color = Space.Red, style = MaterialTheme.typography.bodySmall)
+                // Learning from quiet chats (done by the server, for every device)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("review" to "Suggest, I review", "auto" to "Save by itself", "off" to "Off").forEach { (v, label) ->
+                        FilterChip(selected = memory.mode == v, onClick = { scope.launch { memory.changeMode(v) } },
+                            label = { Text(label) })
+                    }
+                }
+                if (memory.suggestions.isNotEmpty()) {
+                    Text("Suggested from your chats (${memory.suggestions.size})", style = HudLabel, color = Space.Accent)
+                    memory.suggestions.take(20).forEach { sug ->
+                        Row(
+                            Modifier.fillMaxWidth().border(1.dp, Space.Accent.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                .padding(start = 14.dp, top = 4.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(sug.text)
+                                if (sug.replaces.isNotBlank()) Text("Replaces: ${sug.replaces}",
+                                    style = HudLabel.copy(fontSize = 10.sp, letterSpacing = 0.5.sp), color = Space.Muted)
+                            }
+                            TextButton(onClick = { scope.launch { memory.resolve(sug.id, true) } }) { Text("Keep") }
+                            TextButton(onClick = { scope.launch { memory.resolve(sug.id, false) } }) {
+                                Text("Drop", color = Space.Muted)
+                            }
+                        }
+                    }
+                }
             }
             when {
                 loading && memory.items.isEmpty() -> Text("Loading…", color = Space.Muted, modifier = Modifier.padding(16.dp))
                 memory.items.isEmpty() -> Text(
-                    "Nothing yet. Tell $name things like \"remember that I prefer metric units\", or turn on " +
-                        "\"Learn from conversations\" in Settings.",
+                    "Nothing yet. Tell $name things like \"remember that I prefer metric units\". She also suggests " +
+                        "facts from chats that have gone quiet, for you to keep or drop here.",
                     color = Space.Muted,
                     modifier = Modifier.padding(16.dp),
                 )

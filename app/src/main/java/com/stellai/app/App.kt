@@ -84,6 +84,17 @@ class App : Application() {
         engine = ChatEngine(this)
         voice = VoiceController(this)
         speaker = Speaker(this)
+        // Stella moved to another server: follow her there (same API key), and say so once
+        HubApi.onMoved = { url, name ->
+            scope.launch(Dispatchers.Main) {
+                if (settings.serverUrl.trim().trimEnd('/') != url.trimEnd('/')) {
+                    settings.serverUrl = url
+                    android.widget.Toast.makeText(this@App, "Stella moved to ${name.ifBlank { url }}: connected there",
+                        android.widget.Toast.LENGTH_LONG).show()
+                    sync.request()
+                }
+            }
+        }
     }
 
     fun setAppVisible(visible: Boolean) {

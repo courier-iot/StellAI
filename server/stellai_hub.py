@@ -512,7 +512,105 @@ class ProjectStoreMixin:
                 (pid,)).fetchall()
 
 
-class ChatDB(ProjectStoreMixin, TaskStoreMixin):
+# ---- Documents beside the chat -----------------------------------------------------------------------------------
+# Long code, chapters and write-ups live in documents next to a chat instead of in it. Stella edits them a section
+# (or an exact passage) at a time, every change is a numbered version, the user can read and edit them in a side
+# panel on any device, and the chat only keeps a short reference ("Updated “Chapter 3” (v4) [doc:id]"), so a
+# 2,000-line program doesn't fill her memory every time it changes.
+DOC_MAX = 400_000
+DOC_KEEP_VERSIONS = 60
+DOC_REF = "[doc:{id}]"
+DOC_TRIGGER = re.compile(r"\b(write|draft|start|create|make|continue|rewrite|edit|revise)\b.{0,40}\b(chapter|story|"
+                         r"novel|essay|article|report|document|doc|readme|script|program|module|class|file|letter|"
+                         r"spec|plan|outline)\b|\bin (a|the) (document|doc|side panel)\b", re.I)
+HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+CODE_DEF = re.compile(r"^\s*(def |class |async def |fun |function |func |fn |pub fn |void |int |public |private |"
+                      r"protected |static |struct |impl |interface |enum |module |export (default )?function )")
+
+
+class DocStoreMixin:
+    def _docs_schema(self):
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS docs(
+                id TEXT PRIMARY KEY, conv_id TEXT NOT NULL, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text',
+                language TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL, text TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS docs_conv ON docs(conv_id);
+            CREATE TABLE IF NOT EXISTS doc_versions(
+                doc_id TEXT NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(doc_id, version));
+        """)
+
+    def docs(self, conv_id):
+        with self.lock:
+            rows = self.db.execute("SELECT id, title, kind, language, version, length(text), updated_at FROM docs "
+                                   "WHERE conv_id=? AND deleted=0 ORDER BY created_at", (str(conv_id),)).fetchall()
+        return [{"id": r[0], "title": r[1], "kind": r[2], "language": r[3], "version": r[4], "chars": r[5],
+                 "updated_at": r[6]} for r in rows]
+
+    def doc(self, did):
+        with self.lock:
+            r = self.db.execute("SELECT id, conv_id, title, kind, language, version, text, updated_at FROM docs "
+                                "WHERE id=? AND deleted=0", (str(did),)).fetchone()
+            if not r:
+                return None
+            vs = self.db.execute("SELECT version, by, note, created_at, length(text) FROM doc_versions WHERE doc_id=? "
+                                 "ORDER BY version DESC LIMIT 30", (r[0],)).fetchall()
+        return {"id": r[0], "conv_id": r[1], "title": r[2], "kind": r[3], "language": r[4], "version": r[5],
+                "text": r[6], "updated_at": r[7],
+                "versions": [{"version": v[0], "by": v[1], "note": v[2], "at": v[3], "chars": v[4]} for v in vs]}
+
+    def doc_version_text(self, did, version):
+        with self.lock:
+            r = self.db.execute("SELECT text FROM doc_versions WHERE doc_id=? AND version=?",
+                                (str(did), int(version))).fetchone()
+        return r[0] if r else None
+
+    def create_doc(self, conv_id, title, text, kind="text", language="", by="stella"):
+        title = " ".join(str(title or "").split())[:120] or "Untitled"
+        text = str(text or "")
+        if len(text) > DOC_MAX:
+            raise ValueError(f"documents hold up to {DOC_MAX:,} characters")
+        did = uuid.uuid4().hex[:10]
+        now = int(time.time() * 1000)
+        with self.lock:
+            self.db.execute("INSERT INTO docs VALUES(?,?,?,?,?,?,?,?,?,0)",
+                            (did, str(conv_id), title, kind, str(language or "")[:30], 1, text, now, now))
+            self.db.execute("INSERT INTO doc_versions VALUES(?,?,?,?,?,?)", (did, 1, text, by, "created", now))
+            self.db.commit()
+        return did
+
+    def save_doc(self, did, text, by="stella", note="", title=None, base_version=None):
+        """A new version of a document. base_version: refuse if someone else changed it meanwhile."""
+        text = str(text)
+        if len(text) > DOC_MAX:
+            raise ValueError(f"documents hold up to {DOC_MAX:,} characters")
+        now = int(time.time() * 1000)
+        with self.lock:
+            r = self.db.execute("SELECT version, text FROM docs WHERE id=? AND deleted=0", (str(did),)).fetchone()
+            if not r:
+                raise ValueError("no such document")
+            if base_version is not None and int(base_version) != r[0]:
+                raise ValueError(f"the document changed meanwhile (now v{r[0]}); reload it and try again")
+            if r[1] == text and title is None:
+                return r[0]
+            v = r[0] + 1
+            self.db.execute("UPDATE docs SET text=?, version=?, updated_at=?" + (", title=?" if title else "") +
+                            " WHERE id=?", (text, v, now) + ((" ".join(str(title).split())[:120],) if title else ()) +
+                            (str(did),))
+            self.db.execute("INSERT INTO doc_versions VALUES(?,?,?,?,?,?)", (str(did), v, text, by, note[:200], now))
+            self.db.execute("DELETE FROM doc_versions WHERE doc_id=? AND version <= ?", (str(did), v - DOC_KEEP_VERSIONS))
+            self.db.commit()
+        return v
+
+    def delete_doc(self, did):
+        with self.lock:
+            cur = self.db.execute("UPDATE docs SET deleted=1, updated_at=? WHERE id=?", (int(time.time() * 1000), str(did)))
+            self.db.commit()
+        return cur.rowcount > 0
+
+
+class ChatDB(ProjectStoreMixin, TaskStoreMixin, DocStoreMixin):
     """Chat history shared by all devices.
 
     Every change gets a increasing sequence number; devices ask for "everything
@@ -565,6 +663,13 @@ class ChatDB(ProjectStoreMixin, TaskStoreMixin):
                 ts INTEGER NOT NULL, vec BLOB);
             CREATE INDEX IF NOT EXISTS chat_chunk_conv ON chat_chunks(conv_id);
             CREATE TABLE IF NOT EXISTS chat_dirty(conv_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS memory_suggestions(
+                id TEXT PRIMARY KEY, text TEXT NOT NULL, replaces TEXT NOT NULL DEFAULT '',
+                conv_id TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS chat_notes(
+                id TEXT PRIMARY KEY, conv_id TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'user',
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS chat_note_conv ON chat_notes(conv_id);
             CREATE TABLE IF NOT EXISTS chunk_vecs(
                 file_id TEXT NOT NULL, idx INTEGER NOT NULL, vec BLOB NOT NULL, PRIMARY KEY(file_id, idx));
             CREATE INDEX IF NOT EXISTS note_proj ON project_notes(project_id);
@@ -578,6 +683,7 @@ class ChatDB(ProjectStoreMixin, TaskStoreMixin):
             self.db.execute("ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
         self.project_versions = {}
         self._tasks_schema()
+        self._docs_schema()
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(messages)")}
         if "deleted" not in cols:  # older databases
             self.db.execute("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
@@ -678,6 +784,93 @@ class ChatDB(ProjectStoreMixin, TaskStoreMixin):
         cursor = rows[-1][-1] if more else max(self.seq, since)
         return {"server_id": self.server_id, "cursor": cursor, "more": more,
                 "conversations": out_c, "messages": out_m}
+
+    # ---- Pinned notes per chat ----------------------------------------------------------
+    MAX_CHAT_NOTES = 40
+
+    def chat_notes(self, conv_id):
+        with self.lock:
+            rows = self.db.execute("SELECT id, text, source, created_at, updated_at FROM chat_notes WHERE conv_id=? "
+                                   "ORDER BY created_at", (str(conv_id),)).fetchall()
+        return [{"id": r[0], "text": r[1], "source": r[2], "created_at": r[3], "updated_at": r[4]} for r in rows]
+
+    def add_chat_note(self, conv_id, text, source="user"):
+        text = " ".join(str(text).split())[:400]
+        if len(text) < 2:
+            raise ValueError("the note is empty")
+        now = int(time.time() * 1000)
+        with self.lock:
+            dup = self.db.execute("SELECT id FROM chat_notes WHERE conv_id=? AND lower(text)=lower(?)",
+                                  (str(conv_id), text)).fetchone()
+            if dup:
+                nid = dup[0]
+            else:
+                if self.db.execute("SELECT COUNT(*) FROM chat_notes WHERE conv_id=?", (str(conv_id),)).fetchone()[0] \
+                        >= self.MAX_CHAT_NOTES:
+                    raise ValueError(f"this chat already has {self.MAX_CHAT_NOTES} pinned notes; remove or merge some")
+                nid = uuid.uuid4().hex[:6]
+                self.db.execute("INSERT INTO chat_notes VALUES(?,?,?,?,?,?)", (nid, str(conv_id), text, source, now, now))
+            self.db.commit()
+        return {"id": nid, "text": text, "source": source}
+
+    def update_chat_note(self, conv_id, nid, text):
+        text = " ".join(str(text).split())[:400]
+        if len(text) < 2:
+            raise ValueError("the note is empty")
+        with self.lock:
+            cur = self.db.execute("UPDATE chat_notes SET text=?, updated_at=? WHERE conv_id=? AND id=?",
+                                  (text, int(time.time() * 1000), str(conv_id), str(nid)))
+            self.db.commit()
+        if not cur.rowcount:
+            raise ValueError("no pinned note with that id")
+        return {"id": nid, "text": text}
+
+    def delete_chat_note(self, conv_id, nid):
+        with self.lock:
+            cur = self.db.execute("DELETE FROM chat_notes WHERE conv_id=? AND id=?", (str(conv_id), str(nid)))
+            self.db.commit()
+        return cur.rowcount > 0
+
+    # ---- Suggested memories (waiting for the user to keep or drop) ---------------------
+    def memory_suggestions(self):
+        with self.lock:
+            rows = self.db.execute("SELECT id, text, replaces, conv_id, created_at FROM memory_suggestions "
+                                   "ORDER BY created_at DESC LIMIT 100").fetchall()
+            known = {r[0]: r[1] for r in self.db.execute("SELECT id, text FROM memories")}
+        return [{"id": r[0], "text": r[1], "replaces": r[2], "replaces_text": known.get(r[2], ""), "conv_id": r[3],
+                 "created_at": r[4]} for r in rows]
+
+    def suggest_memory(self, text, replaces="", conv_id=""):
+        text = " ".join(str(text).split())[:300]
+        if len(text) < 3:
+            return None
+        with self.lock:
+            if self.db.execute("SELECT 1 FROM memories WHERE lower(text)=lower(?)", (text,)).fetchone() or \
+                    self.db.execute("SELECT 1 FROM memory_suggestions WHERE lower(text)=lower(?)", (text,)).fetchone():
+                return None
+            sid = uuid.uuid4().hex[:8]
+            self.db.execute("INSERT INTO memory_suggestions VALUES(?,?,?,?,?)",
+                            (sid, text, str(replaces or ""), str(conv_id or ""), int(time.time() * 1000)))
+            self.db.execute("DELETE FROM memory_suggestions WHERE id NOT IN (SELECT id FROM memory_suggestions "
+                            "ORDER BY created_at DESC LIMIT 100)")
+            self.db.commit()
+        return sid
+
+    def resolve_suggestion(self, sid, accept, text=None):
+        with self.lock:
+            r = self.db.execute("SELECT text, replaces FROM memory_suggestions WHERE id=?", (sid,)).fetchone()
+            if not r:
+                raise ValueError("no such suggestion")
+            self.db.execute("DELETE FROM memory_suggestions WHERE id=?", (sid,))
+            self.db.commit()
+        if not accept:
+            return None
+        if r[1]:
+            self.delete_memory(r[1])
+        if r[0].startswith("(forget) "):
+            return None
+        mid, _ = self.add_memory(text if text and str(text).strip() else r[0], "learned")
+        return mid
 
     # ---- Long-term memory -----------------------------------------------------------
     MAX_MEMORIES = 200
@@ -1489,8 +1682,12 @@ If the conversation shows an existing fact is now wrong, put its id in "remove" 
 Reply with JSON only: {"add": [...], "remove": [...]}. Empty lists are fine and are the usual answer."""
 
 
-def learn_memories(messages):
-    """Ask the local model which facts from a conversation are worth keeping."""
+def learn_memories(messages, conv_id=""):
+    """Ask the local model which facts from a conversation are worth keeping. In review mode they become
+    suggestions for the user to keep or drop; in auto mode they're saved; off: nothing."""
+    mode = memory_settings()["mode"]
+    if mode == "off":
+        return {"added": [], "removed": [], "suggested": [], "mode": mode}
     existing = CHATS.memories()
     known = "\n".join(f"[{m['id']}] {m['text']}" for m in existing[:120]) or "(none yet)"
     convo = "\n".join(f"{m.get('role', 'user').upper()}: {str(m.get('text', ''))[:1500]}"
@@ -1508,28 +1705,32 @@ def learn_memories(messages):
         "response_format": {"type": "json_schema", "json_schema": {"name": "memory_update", "schema": LEARN_SCHEMA}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    req = urllib.request.Request(
-        LLAMA_URL.rstrip("/") + "/v1/chat/completions",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        content = json.loads(resp.read())["choices"][0]["message"].get("content") or "{}"
+    content = _quick_model(body, timeout=180)["choices"][0]["message"].get("content") or "{}"
     m = re.search(r"\{[\s\S]*\}", content)
     update = json.loads(m.group(0)) if m else {}
-    removed, added = [], []
+    removed, added, suggested = [], [], []
     ids = {x["id"] for x in existing}
-    for mid in update.get("remove", [])[:5]:
-        mid = str(mid).strip("[] ")
-        if mid in ids and CHATS.delete_memory(mid):
+    gone = [str(mid).strip("[] ") for mid in update.get("remove", [])[:5] if str(mid).strip("[] ") in ids]
+    facts = [" ".join(f.split()) for f in update.get("add", [])[:5] if isinstance(f, str) and len(f.strip()) >= 3]
+    if mode == "review":
+        # a removal paired with a new fact is shown as "replace X with Y"; a lone removal as "forget X?"
+        for i, fact in enumerate(facts):
+            sid = CHATS.suggest_memory(fact, gone[i] if i < len(gone) else "", conv_id)
+            if sid:
+                suggested.append(fact)
+        for mid in gone[len(facts):]:
+            old = next((x["text"] for x in existing if x["id"] == mid), "")
+            if old and CHATS.suggest_memory("(forget) " + old, mid, conv_id):
+                suggested.append("(forget) " + old)
+        return {"added": [], "removed": [], "suggested": suggested, "mode": mode}
+    for mid in gone:
+        if CHATS.delete_memory(mid):
             removed.append(mid)
-    for fact in update.get("add", [])[:5]:
-        if isinstance(fact, str) and len(fact.strip()) >= 3:
-            _, new = CHATS.add_memory(fact, "learned")
-            if new:
-                added.append(" ".join(fact.split()))
-    return {"added": added, "removed": removed}
+    for fact in facts:
+        _, new = CHATS.add_memory(fact, "learned")
+        if new:
+            added.append(fact)
+    return {"added": added, "removed": removed, "suggested": [], "mode": mode}
 
 
 SERVER_TOOLS["remember"] = (tool_remember, _fn(
@@ -1555,6 +1756,44 @@ def _llama(path, body=None, timeout=60):
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+# ---- The helper: a small second model for quick background jobs ------------------------------------------------
+# Memory learning and "which mode is this?" checks go to a small model (Qwen3.5 0.8B/2B, on the CPU or a spare
+# card) when one runs, so they don't queue behind Stella's main model. Without a helper the main model does them.
+HELPER = {"url": "", "ok_until": 0.0, "down_until": 0.0}
+
+
+def helper_up():
+    if not HELPER["url"]:
+        return False
+    now = time.time()
+    if now < HELPER["ok_until"]:
+        return True
+    if now < HELPER["down_until"]:
+        return False
+    try:
+        with urllib.request.urlopen(HELPER["url"].rstrip("/") + "/health", timeout=2) as r:
+            ok = r.status == 200
+    except (urllib.error.URLError, OSError):
+        ok = False
+    HELPER["ok_until" if ok else "down_until"] = now + (60 if ok else 30)
+    return ok
+
+
+def _quick_model(body, timeout=120, helper_timeout=60):
+    """A chat completion for a background job: on the helper when it's up, else on the main model."""
+    if helper_up():
+        try:
+            req = urllib.request.Request(HELPER["url"].rstrip("/") + "/v1/chat/completions",
+                                         data=json.dumps(body).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=helper_timeout) as r:
+                return json.loads(r.read())
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            log(f"helper model didn't answer ({e}); using the main model")
+            HELPER["ok_until"], HELPER["down_until"] = 0.0, time.time() + 30
+    return _llama("/v1/chat/completions", body, timeout=timeout)
 
 
 def count_tokens(text):
@@ -2036,8 +2275,18 @@ TOOL_GROUPS = {
     "project": ["project_note", "project_search"],
     "library": ["library_search"],
     "blender": ["blender_project", "blender_step", "blender_inspect", "blender_generate"],
+    "cad": ["cad_project", "cad_step", "cad_inspect"],
+    "pcb": ["pcb_project", "pcb_check", "pcb_circuit", "pcb_library", "pcb_step"],
+    "move": ["move_stella"],
+    "code": ["run_python"],
 }
 TOOL_TRIGGERS = {
+    "code": re.compile(r"\b(python|script|run (this|the|it|my) code|test (this|the|my) (code|function)|plot|graph|"
+                       r"chart|simulat|csv|spreadsheet|analy[sz]e (the |this )?(data|file|numbers)|compute|"
+                       r"numpy|fft|monte carlo|regression|curve fit|statistic|integrat|derivative|"
+                       r"bode|step response|transfer function)\b", re.I),
+    "move": re.compile(r"\b(move|migrate|transfer|relocate)\b.{0,30}\b(yourself|stella|you|over|everything|"
+                       r"to (the |my )?(server|desktop|laptop|pc|computer|proxmox))|\bmove (to|over)\b", re.I),
     "electronics": re.compile(r"resist|volt|ohm|\bleds?\b|circuit|schemat|diagram|flow ?chart|capacit|filter|divider|"
                               r"current|\bamps?\b|watt|pcb|timing|waveform|state machine|e12|e24|e96|draw|sketch|"
                               r"inductor|transistor|mosfet|op.?amp|\bmah\b|frequency|\bhz\b", re.I),
@@ -2047,6 +2296,10 @@ TOOL_TRIGGERS = {
                          r"source code|my code|codebase", re.I),
     "blender": re.compile(r"blender|\b3d\b|3-d|\bmesh|\bvrm\b|\bglb\b|\bfbx\b|model(l)?ing|sculpt|\buvs?\b|"
                           r"\brig(ged|ging)?\b|armature|topology|polygon|vertices", re.I),
+    "cad": re.compile(r"freecad|\bcad\b|\bstep file|\.step\b|\bstl\b|3d print|bracket|enclosure|\bmount\b|"
+                      r"fillet|chamfer|\bmm\b|millimet|\bpart\b.*\b(design|model)|fan duct", re.I),
+    "pcb": re.compile(r"kicad|\bpcb\b|circuit board|schematic|gerber|footprint|\bdrc\b|\berc\b|\btraces?\b|"
+                      r"\bnets?\b|copper|\bbom\b", re.I),
 }
 
 
@@ -2066,8 +2319,14 @@ def select_tools(query, mode="", mode_tools="all", in_project=False, sticky=()):
             names += TOOL_GROUPS["electronics"]
         if mode == "programmer":
             names += TOOL_GROUPS["github"]
+        if mode in ("programmer", "electronics", "cad", "pcb", "tutor"):
+            names += TOOL_GROUPS["code"]
         if mode == "modeler":
             names += TOOL_GROUPS["blender"]
+        if mode == "cad":
+            names += TOOL_GROUPS["cad"]
+        if mode == "pcb":
+            names += TOOL_GROUPS["pcb"]
     if in_project:
         names += TOOL_GROUPS["project"]
     if CHATS.library()["files"]:
@@ -2148,10 +2407,25 @@ def plan_context(data):
     if "mode_tools" in data:   # newer clients let the server choose which server tools to send
         tools = select_tools(str(data.get("query", "")), str(data.get("mode", "")), str(data.get("mode_tools")),
                              bool(data.get("project_id")), [str(n) for n in (data.get("sticky") or [])])
+    if tools is not None and data.get("auto") and "switch_mode" not in tools:
+        tools = list(tools) + ["switch_mode"]      # Auto chats: Stella can switch when the quick check missed
+    chat_id = str(data.get("chat_id") or "")
+    if tools is not None and chat_id:
+        tools = list(tools) + [t for t in chat_tools_for(chat_id, str(data.get("last") or data.get("query") or ""))
+                               if t not in tools]
+        if "document" not in tools and (CHATS.docs(chat_id) or str(data.get("mode", "")) in ("programmer", "writer")
+                                        or DOC_TRIGGER.search(str(data.get("last") or data.get("query") or ""))):
+            tools.append("document")
     tools_json = json.dumps([SERVER_TOOLS[n][1] for n in tools]) if tools else ""
     split = bool(data.get("split"))   # newer clients: stable instructions + a per-message context block
     query = str(data.get("query", ""))
     mem_stable, mem_turn = select_memories(query) if split else ("", "")
+    notes = chat_notes_section(chat_id) if split else ""
+    if notes:   # pinned notes: always included, with the stable instructions (they change rarely)
+        mem_stable = (mem_stable + "\n\n" + notes).strip()
+    docs = docs_section(chat_id) if split else ""
+    if docs:    # documents beside the chat: their names and sections, not their text
+        mem_stable = (mem_stable + "\n\n" + docs).strip()
     fixed_t = count_tokens(str(data.get("fixed", "")) + tools_json) + 900 * int(data.get("images") or 0)
     fixed_t += count_tokens(mem_stable) + count_tokens(mem_turn)
     avail = n_ctx - reply_reserve - fixed_t
@@ -2175,6 +2449,11 @@ def plan_context(data):
         proj_t += count_tokens(lib_text)
     avail -= proj_t
     msgs = data.get("messages") or []
+    drop, lane_note = (fold_lanes(data.get("chat_id"), msgs) if data.get("auto") and data.get("chat_id")
+                       else (set(), ""))
+    if drop:   # other topics in this chat: left out and summarized (the client drops the same indices)
+        msgs = [m for i, m in enumerate(msgs) if i not in drop]
+        avail -= count_tokens(lane_note)
     counts = [count_tokens(str(m.get("content", ""))) + 6 for m in msgs]
     keep_from, kept = len(msgs), 0
     for i in range(len(msgs) - 1, -1, -1):
@@ -2185,7 +2464,651 @@ def plan_context(data):
     return {"n_ctx": n_ctx, "reply_reserve": reply_reserve, "fixed_tokens": fixed_t, "project_tokens": proj_t,
             "history_tokens": sum(counts), "kept_tokens": kept, "keep_from": keep_from,
             "project_context": proj_text, "tools": tools, "memory_context": mem_stable, "think": think,
-            "turn_context": "\n\n".join(x for x in (mem_turn, excerpts) if x)}
+            "drop": sorted(drop), "lane_note": lane_note,
+            "turn_context": "\n\n".join(x for x in (mem_turn, excerpts, lane_note) if x)}
+
+
+# ---- Long chats: pinned notes, recall, and summaries made in the background ------------------------------------
+# Pinned notes are facts for one chat (goals, decisions, names, story facts) that always ride along with it and
+# are never summarized away. Recall finds the exact words in the part of a chat that was summarized to make room.
+# The background summarizer keeps busy chats from ever filling up: while Stella is idle it folds the oldest part
+# of any chat that's past ~60% of her context into its rolling summary, so nobody waits for "Refreshing context".
+NOTE_TRIGGER = re.compile(r"\b(pin|note (that|this|down)|remember (that|this) for (this|the) chat|don'?t forget|"
+                          r"we decided|let'?s go with|from now on|keep in mind|the (main )?character|is called|"
+                          r"our goal)\b", re.I)
+SUMMARIZER = {"last_run": 0.0, "made": 0, "error": "", "busy": False}
+SUMMARIZE_AT = 0.60          # start folding at 60% of the context window
+SUMMARIZE_KEEP = 0.35        # keep about 35% of it as recent, word-for-word history
+
+
+def chat_notes_section(conv_id):
+    notes = CHATS.chat_notes(conv_id) if conv_id else []
+    if not notes:
+        return ""
+    return ("## Pinned notes for this chat\nAlways true here unless the user changes them (pinned by the user or "
+            "you; update with pin_note):\n" + "\n".join(f"- [{n['id']}] {n['text']}" for n in notes))
+
+
+def last_summary_ts(conv_id):
+    with CHATS.lock:
+        r = CHATS.db.execute("SELECT MAX(created_at) FROM messages WHERE conv_id=? AND role='summary' AND deleted=0",
+                             (conv_id,)).fetchone()
+    return int(r[0]) if r and r[0] else 0
+
+
+def tool_pin_note(args):
+    cid = str(args.get("conversation_id") or "")
+    if not cid:
+        raise ValueError("pinned notes need a chat (this app is too old to send it)")
+    action = str(args.get("action", "add")).lower()
+    if action == "list":
+        return {"notes": CHATS.chat_notes(cid)}, "Read the pinned notes"
+    if action == "remove":
+        ok = CHATS.delete_chat_note(cid, str(args.get("note_id", "")).strip("[] "))
+        return {"removed": ok}, "Unpinned a note" if ok else "No such note"
+    if action == "update":
+        n = CHATS.update_chat_note(cid, str(args.get("note_id", "")).strip("[] "), args.get("text", ""))
+        return {"updated": n}, f"Updated a pinned note: {n['text']}"
+    n = CHATS.add_chat_note(cid, args.get("text", ""), "stella")
+    return {"pinned": n}, f"Pinned: {n['text']}"
+
+
+def tool_recall_chat(args):
+    cid = str(args.get("conversation_id") or "")
+    query = str(args.get("query", "")).strip()
+    if not cid or not query:
+        raise ValueError("give query (and this chat)")
+    cut = last_summary_ts(cid)
+    CHAT_SEARCH.index_now(cid)
+    hits = CHAT_SEARCH.search(query, k=4, only=cid, before=cut or None)
+    if not hits and cut:
+        hits = CHAT_SEARCH.search(query, k=3, only=cid)
+    return {"found": len(hits), "summarized_before": cut or None,
+            "passages": [{"when": h["date"], "text": h["excerpt"]} for h in hits],
+            "note": "These are the exact earlier words of this chat; trust them over the summary."}, \
+        f"Looked back in this chat for “{query}”: {len(hits)} passage{'s' if len(hits) != 1 else ''}"
+
+
+SERVER_TOOLS["pin_note"] = (tool_pin_note, _fn(
+    "pin_note",
+    "Pin a short fact to THIS chat so it's never forgotten or summarized away: a goal, a decision, a name, a "
+    "number, a story fact, a rule the user set for this chat. Pin when something is decided or must stay true; "
+    "one fact per note. action: add (default), update (note_id + text), remove (note_id), list.",
+    {"text": _p("The fact, one sentence, e.g. 'The bracket is 70 x 70 mm, 3 mm PETG'"),
+     "action": _p("add, update, remove or list"), "note_id": _p("For update/remove: the id in brackets")}, []))
+SERVER_TOOLS["recall_chat"] = (tool_recall_chat, _fn(
+    "recall_chat",
+    "Look up the exact earlier words of THIS chat (code, numbers, names, what was agreed) from the part that was "
+    "summarized to free memory. Use it when the summary is too vague for what the user is asking.",
+    {"query": _p("Keywords to look for, e.g. 'resistor values for the LED'")}, ["query"]))
+
+
+def chat_tools_for(chat_id, query):
+    """The long-chat tools that make sense for this chat right now."""
+    if not chat_id:
+        return []
+    out = []
+    with CHATS.lock:
+        users = CHATS.db.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND role='user' AND deleted=0",
+                                 (chat_id,)).fetchone()[0]
+    if users >= 4 or CHATS.chat_notes(chat_id) or NOTE_TRIGGER.search(query or ""):
+        out.append("pin_note")
+    if last_summary_ts(chat_id):
+        out.append("recall_chat")
+    return out
+
+
+def _chat_style(conv_mode):
+    if conv_mode == "writer":
+        return "story"
+    if conv_mode.startswith("c-"):
+        with CHATS.lock:
+            r = CHATS.db.execute("SELECT style FROM modes WHERE id=?", (conv_mode,)).fetchone()
+        return r[0] if r and r[0] in ("work", "story") else "work"
+    return "work"
+
+
+def summarize_in_background(conv_id, n_ctx=None, force=False):
+    """Folds the oldest part of one chat into its rolling summary if it's past SUMMARIZE_AT. True if it did."""
+    n_ctx = n_ctx or context_size()
+    with CHATS.lock:
+        conv = CHATS.db.execute("SELECT mode FROM conversations WHERE id=? AND deleted=0", (conv_id,)).fetchone()
+        if not conv:
+            return False
+        rows = CHATS.db.execute(
+            "SELECT id, role, text, created_at FROM messages WHERE conv_id=? AND deleted=0 ORDER BY created_at, id",
+            (conv_id,)).fetchall()
+    last = max((i for i, r in enumerate(rows) if r[1] == "summary"), default=-1)
+    previous = rows[last][2] if last >= 0 else ""
+    after = [r for r in rows[last + 1:] if r[1] in ("user", "assistant", "tool")]
+    est = [int(len(r[2]) / 3.3) + 6 for r in after]
+    total = sum(est) + int(len(previous) / 3.3)
+    if not force and total < n_ctx * SUMMARIZE_AT:
+        return False
+    # keep the newest ~35% word for word (at least the last two exchanges); fold everything before it
+    keep, i = 0, len(after)
+    while i > 0 and keep + est[i - 1] <= n_ctx * SUMMARIZE_KEEP:
+        i -= 1
+        keep += est[i]
+    users = [j for j, r in enumerate(after) if r[1] == "user"]
+    if len(users) < 3:
+        return False
+    cut = min(i, users[-2])
+    while cut > 0 and after[cut][1] != "user":    # never split a question from its answer
+        cut -= 1
+    if cut <= 0:
+        return False
+    part = after[:cut]
+    msgs = [{"role": r[1], "content": re.sub(r"!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)", "[picture]", r[2])}
+            for r in part]
+    notes = chat_notes_section(conv_id)
+    if notes:   # pinned notes stay pinned: the summary needn't repeat them
+        msgs.insert(0, {"role": "summary", "content": "(Pinned separately, don't repeat:) " + notes})
+    summary = summarize_chat(previous, msgs, _chat_style(conv[0] or ""))
+    prev_ts, next_ts = part[-1][3], after[cut][3]
+    created = (prev_ts + next_ts) // 2 if next_ts - prev_ts >= 2 else next_ts - 1
+    now = int(time.time() * 1000)
+    with CHATS.lock:
+        upd = max(now, (CHATS.db.execute("SELECT COALESCE(MAX(updated_at),0) FROM messages WHERE conv_id=?",
+                                         (conv_id,)).fetchone()[0] or 0) + 1)
+        CHATS.db.execute(
+            "INSERT INTO messages (id, conv_id, role, text, reasoning, created_at, updated_at, seq, deleted) "
+            "VALUES(?,?,?,?,?,?,?,?,0)", (uuid.uuid4().hex, conv_id, "summary", summary.strip(), "", created, upd,
+                                         CHATS._next()))
+        CHATS.db.commit()
+    log(f"summarized the oldest {len(part)} messages of a chat in the background ({total} → ~{keep} tokens)")
+    return True
+
+
+def summarizer_loop():
+    """While Stella is idle, keeps every recently used chat under SUMMARIZE_AT of her context window."""
+    time.sleep(90)
+    while True:
+        try:
+            if server_idle(120) and _llama_up():
+                n_ctx = context_size()
+                since = int((time.time() - 3 * 86400) * 1000)
+                with CHATS.lock:
+                    convs = [r[0] for r in CHATS.db.execute(
+                        "SELECT id FROM conversations WHERE deleted=0 AND updated_at > ? ORDER BY updated_at DESC "
+                        "LIMIT 30", (since,))]
+                    recent = {r[0] for r in CHATS.db.execute(
+                        "SELECT DISTINCT conv_id FROM messages WHERE updated_at > ?", (since,))}
+                for cid in convs + [c for c in recent if c not in convs][:20]:
+                    if not server_idle(120):
+                        break
+                    SUMMARIZER["busy"] = True
+                    try:
+                        if summarize_in_background(cid, n_ctx):
+                            SUMMARIZER["made"] += 1
+                    finally:
+                        SUMMARIZER["busy"] = False
+                SUMMARIZER["last_run"] = time.time()
+        except Exception as e:      # never stop for one chat
+            SUMMARIZER["error"] = str(e)[:200]
+            log(f"background summary skipped: {e}")
+        time.sleep(120)
+
+
+def _llama_up():
+    try:
+        with urllib.request.urlopen(LLAMA_URL.rstrip("/") + "/health", timeout=3) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+# ---- Automatic memory with a review list ------------------------------------------------------------------------
+# The server reads chats that have gone quiet and picks out lasting facts (on the helper model when it runs). In
+# "review" mode (the default) they wait in a list for you to keep or drop; "auto" saves them straight away; "off"
+# doesn't look at all. Every device sees the same list.
+MEMORY_MODES = ("review", "auto", "off")
+LEARNER = {"made": 0, "error": ""}
+
+
+def memory_settings():
+    try:
+        with open(os.path.join(MOVE["base"] or ".", "memory-settings.json")) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    mode = d.get("mode") if d.get("mode") in MEMORY_MODES else "review"
+    return {"mode": mode}
+
+
+def save_memory_settings(data):
+    mode = str(data.get("mode", "")).lower()
+    if mode not in MEMORY_MODES:
+        raise ValueError("mode is review, auto or off")
+    with open(os.path.join(MOVE["base"] or ".", "memory-settings.json"), "w") as f:
+        json.dump({"mode": mode}, f)
+    return memory_settings()
+
+
+def learner_loop():
+    """Every few minutes, while Stella is idle: learn from chats that have been quiet for 20 minutes."""
+    time.sleep(180)
+    while True:
+        try:
+            if memory_settings()["mode"] != "off" and server_idle(120) and _llama_up():
+                quiet = int((time.time() - 20 * 60) * 1000)
+                oldest = int((time.time() - 3 * 86400) * 1000)
+                with CHATS.lock:
+                    rows = CHATS.db.execute(
+                        "SELECT conv_id, MAX(updated_at) FROM messages WHERE deleted=0 AND role='user' "
+                        "GROUP BY conv_id HAVING MAX(updated_at) BETWEEN ? AND ? ORDER BY 2 DESC LIMIT 20",
+                        (oldest, quiet)).fetchall()
+                for cid, last in rows:
+                    if not server_idle(120):
+                        break
+                    with CHATS.lock:
+                        done = CHATS.db.execute("SELECT v FROM meta WHERE k=?", ("learned:" + cid,)).fetchone()
+                    if done and int(done[0]) >= last:
+                        continue
+                    with CHATS.lock:
+                        msgs = [{"role": r[0], "text": r[1]} for r in reversed(CHATS.db.execute(
+                            "SELECT role, text FROM messages WHERE conv_id=? AND deleted=0 AND role IN "
+                            "('user','assistant') ORDER BY created_at DESC LIMIT 16", (cid,)).fetchall())]
+                    res = learn_memories(msgs, conv_id=cid)
+                    LEARNER["made"] += len(res.get("added", [])) + len(res.get("suggested", []))
+                    with CHATS.lock:
+                        CHATS.db.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", ("learned:" + cid, str(last)))
+                        CHATS.db.commit()
+        except Exception as e:
+            LEARNER["error"] = str(e)[:200]
+            log(f"memory learning skipped: {e}")
+        time.sleep(300)
+
+
+# ---- Code runner: Python on the server ---------------------------------------------------------------------------
+# Stella runs short Python scripts to check maths, test code, simulate circuits and analyse files, instead of
+# guessing. Each run gets an empty folder (plus any files it asked for), a time limit, a memory limit and, where
+# Linux allows it, no network. Pictures it saves (plots) show in the chat. A guard rail, not a sandbox: the code
+# is checked before it runs, and it can't reach past its folder through the usual file and process functions.
+CODE_RUNNER_CMD = None    # e.g. ["StellAI.exe", "--python-runner"] in the packaged Windows app
+CODE_BAD_IMPORTS = {"subprocess", "socket", "ctypes", "multiprocessing", "requests", "urllib", "http", "ftplib",
+                    "smtplib", "telnetlib", "asyncio", "ssl", "webbrowser", "pty", "pexpect", "paramiko", "winreg",
+                    "shutil", "importlib", "signal", "resource", "sqlite3"}
+CODE_BAD_CALLS = {"system", "popen", "spawnl", "spawnv", "spawnve", "spawnvp", "execv", "execve", "execl", "execlp",
+                  "execvp", "fork", "forkpty", "kill", "killpg", "remove", "unlink", "rmdir", "removedirs", "rename",
+                  "replace", "chmod", "chown", "symlink", "link", "putenv", "chdir", "startfile", "__import__",
+                  "eval", "exec", "compile", "breakpoint", "rmtree", "setrlimit"}
+CODE_UNSHARE = {"checked": False, "ok": False}
+
+
+def check_python_code(code):
+    """Problems that stop a script from running (files outside its folder, processes, network)."""
+    if len(code) > 60000:
+        return ["the script is too long (60,000 characters max)"]
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return [f"syntax error on line {e.lineno}: {e.msg}"]
+    probs = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            probs += [f"import {a.name} isn't allowed here" for a in n.names if a.name.split(".")[0] in CODE_BAD_IMPORTS]
+        elif isinstance(n, ast.ImportFrom):
+            if n.level or (n.module or "").split(".")[0] in CODE_BAD_IMPORTS:
+                probs.append(f"from {n.module} import isn't allowed here")
+        elif isinstance(n, ast.Attribute) and (n.attr in CODE_BAD_CALLS or n.attr.startswith("__")):
+            probs.append(f".{n.attr} isn't allowed (no processes, deleting files or reaching outside the folder)")
+        elif isinstance(n, ast.Name) and n.id in CODE_BAD_CALLS:
+            probs.append(f"{n.id}() isn't allowed")
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "open" and n.args:
+            a = n.args[0]
+            if isinstance(a, ast.Constant) and isinstance(a.value, str) and (
+                    os.path.isabs(a.value) or ".." in a.value.replace("\\", "/").split("/") or a.value.startswith("~")):
+                probs.append(f"open('{a.value}') reaches outside the run's folder; use plain file names")
+    return sorted(set(probs))[:8]
+
+
+def _no_network_prefix():
+    """["unshare", "-rn"] when this Linux lets a normal user run without network, else []."""
+    if not CODE_UNSHARE["checked"]:
+        CODE_UNSHARE["checked"] = True
+        import shutil
+        u = shutil.which("unshare")
+        if u and os.name != "nt":
+            try:
+                CODE_UNSHARE["ok"] = subprocess.run([u, "-rn", "true"], capture_output=True, timeout=10).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                CODE_UNSHARE["ok"] = False
+        CODE_UNSHARE["cmd"] = [u, "-rn"] if CODE_UNSHARE["ok"] else []
+    return list(CODE_UNSHARE.get("cmd") or [])
+
+
+CODE_PRELUDE = r'''# StellAI code runner: limits, then the script
+import os, sys
+try:
+    import resource
+    mb = int(os.environ.get("STELLAI_MEM_MB", "2048"))
+    resource.setrlimit(resource.RLIMIT_AS, (mb * 2**20, mb * 2**20))
+    secs = int(os.environ.get("STELLAI_CPU_S", "60"))
+    resource.setrlimit(resource.RLIMIT_CPU, (secs, secs + 2))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (200 * 2**20, 200 * 2**20))
+except Exception:
+    pass
+os.environ["MPLBACKEND"] = "Agg"
+sys.argv = ["script.py"]
+'''
+
+
+def tool_run_python(args):
+    code = str(args.get("code", ""))
+    if not code.strip():
+        raise ValueError("give code: the Python script to run")
+    probs = check_python_code(code)
+    if probs:
+        return {"ok": False, "error": "not run: " + "; ".join(probs)}, "Script blocked"
+    timeout = max(5, min(300, int(args.get("timeout") or 60)))
+    work = tempfile.mkdtemp(prefix="stellai-run-")
+    copied = []
+    try:
+        for pid in [str(p) for p in (args.get("photos") or [])][:6]:     # chat photos, by their [photo id]
+            src = os.path.join(IMAGE_DIR, re.sub(r"[^0-9a-f]", "", pid) + ".jpg")
+            if os.path.isfile(src):
+                import shutil as _sh
+                _sh.copyfile(src, os.path.join(work, os.path.basename(src)))
+                copied.append(os.path.basename(src))
+        project = str(args.get("project_id") or "")
+        for name in [str(n) for n in (args.get("project_files") or [])][:10]:
+            text = _project_file_text(project, name)
+            if text is not None:
+                safe = re.sub(r"[^\w.\- ]", "_", os.path.basename(name))[:80] or "file.txt"
+                with open(os.path.join(work, safe), "w", encoding="utf-8") as f:
+                    f.write(text)
+                copied.append(safe)
+        with open(os.path.join(work, "script.py"), "w", encoding="utf-8") as f:
+            f.write(CODE_PRELUDE + "\n" + code)
+        before = set(os.listdir(work))
+        runner = list(CODE_RUNNER_CMD) if CODE_RUNNER_CMD else [sys.executable, "-I"]
+        cmd = _no_network_prefix() + runner + [os.path.join(work, "script.py")]
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": work, "TMPDIR": work, "MPLBACKEND": "Agg",
+               "MPLCONFIGDIR": os.path.join(work, ".mpl"), "PYTHONIOENCODING": "utf-8", "STELLAI_CPU_S": str(timeout),
+               "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+        started = time.time()
+        try:
+            p = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=timeout + 5, stdin=subprocess.DEVNULL,
+                               creationflags=0x08000000 if os.name == "nt" else 0)
+            code_rc, out, err = p.returncode, p.stdout, p.stderr
+        except subprocess.TimeoutExpired as e:
+            code_rc, out, err = -9, (e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else \
+                (e.stdout or ""), f"stopped: the script ran longer than {timeout} s"
+        took = round(time.time() - started, 2)
+        if code_rc != 0 and not err.strip() and (code_rc < 0 or took >= timeout - 0.5):
+            err = f"stopped: the script used its {timeout} s time limit"
+        made = sorted(n for n in set(os.listdir(work)) - before if not n.startswith("."))
+        images, texts = [], {}
+        for name in made:
+            full = os.path.join(work, name)
+            ext = os.path.splitext(name)[1].lower()
+            if ext == ".png" and len(images) < 4 and os.path.getsize(full) < 8_000_000:
+                iid = uuid.uuid4().hex[:16]
+                import shutil as _sh
+                _sh.copyfile(full, os.path.join(DIAGRAM_DIR, iid + ".png"))
+                images.append(iid)
+            elif ext in (".txt", ".csv", ".json", ".md", ".log") and len(texts) < 4:
+                with open(full, encoding="utf-8", errors="replace") as f:
+                    texts[name] = f.read(4000)
+        res = {"ok": code_rc == 0, "exit_code": code_rc, "seconds": took, "stdout": out[-8000:],
+               "stderr": err[-4000:], "files_made": made[:20], "file_previews": texts, "inputs": copied,
+               "network": "off" if _no_network_prefix() else "not blocked on this computer"}
+        if images:
+            res["image"] = images[0]
+            res["title"] = "Plot"
+            if len(images) > 1:
+                res["more_images"] = images[1:]
+        summary = (f"Ran Python ({took:g} s)" if code_rc == 0 else
+                   f"Python stopped with an error ({took:g} s)")
+        return res, summary
+    finally:
+        import shutil as _sh
+        _sh.rmtree(work, ignore_errors=True)
+
+
+def _project_file_text(project_id, name):
+    """The extracted text of a project (or library) file by name, or None."""
+    p = CHATS.project(project_id) if project_id else None
+    for f in (p or {}).get("files", []):
+        if f.get("name") == name or os.path.basename(f.get("name", "")) == os.path.basename(name):
+            return _file_text(f["id"])
+    return None
+
+
+SERVER_TOOLS["run_python"] = (tool_run_python, _fn(
+    "run_python",
+    "Run a short Python 3 script on the server and get its output: check maths and unit conversions, test code, "
+    "simulate a circuit or a filter, analyse a CSV, make a plot (save it with plt.savefig('plot.png'); pictures "
+    "show in the chat). numpy and matplotlib are available. The script starts in an empty folder (plus any "
+    "photos or project files you list), may only use plain file names, has no network, and is stopped after the "
+    "time limit. print() what you need. Prefer this over doing long arithmetic in your head.",
+    {"code": _p("The Python script"),
+     "timeout": _p("Seconds, 5-300 (default 60)", "integer"),
+     "photos": {"type": "array", "items": {"type": "string"},
+                "description": "Photo ids from [photo ...] in the chat, copied in as <id>.jpg"},
+     "project_files": {"type": "array", "items": {"type": "string"},
+                       "description": "Names of this project's files to copy in (their text)"}},
+    ["code"]))
+
+
+# ---- Continue in a new chat -----------------------------------------------------------------------------------
+def continue_in_new_chat(conv_id):
+    """A new chat that starts from this one's summary and pinned notes (same project and mode)."""
+    with CHATS.lock:
+        c = CHATS.db.execute("SELECT title, project_id, mode FROM conversations WHERE id=? AND deleted=0",
+                             (conv_id,)).fetchone()
+        rows = CHATS.db.execute("SELECT role, text FROM messages WHERE conv_id=? AND deleted=0 ORDER BY created_at, id",
+                                (conv_id,)).fetchall()
+    if not c:
+        raise ValueError("no such chat")
+    last = max((i for i, r in enumerate(rows) if r[0] == "summary"), default=-1)
+    previous = rows[last][1] if last >= 0 else ""
+    msgs = [{"role": r[0], "content": r[1]} for r in rows[last + 1:] if r[0] in ("user", "assistant", "tool")]
+    summary = summarize_chat(previous, msgs, _chat_style(c[2] or "")) if msgs else previous
+    if not summary.strip():
+        raise ValueError("there's nothing to carry over yet")
+    new_id = uuid.uuid4().hex
+    now = int(time.time() * 1000)
+    title = (c[0] or "Chat")[:150] + " (continued)"
+    with CHATS.lock:
+        CHATS.db.execute("INSERT INTO conversations (id, title, created_at, updated_at, deleted, seq, project_id, mode) "
+                         "VALUES(?,?,?,?,0,?,?,?)", (new_id, title, now, now, CHATS._next(), c[1] or "", c[2] or ""))
+        CHATS.db.execute("INSERT INTO messages (id, conv_id, role, text, reasoning, created_at, updated_at, seq, "
+                         "deleted) VALUES(?,?,?,?,?,?,?,?,0)",
+                         (uuid.uuid4().hex, new_id, "summary", "Carried over from “" + (c[0] or "the previous chat") +
+                          "”:\n" + summary.strip(), "", now, now + 1, CHATS._next()))
+        CHATS.db.commit()
+    for n in CHATS.chat_notes(conv_id):
+        try:
+            CHATS.add_chat_note(new_id, n["text"], n["source"])
+        except ValueError:
+            pass
+    return {"conversation_id": new_id, "title": title}
+
+
+def doc_outline(text, kind):
+    """[(line number, level, title)] — headings for text, definitions for code."""
+    out = []
+    in_fence = False
+    for i, line in enumerate(text.split("\n"), 1):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+        if kind != "code" and not in_fence:
+            m = HEADING.match(line)
+            if m:
+                out.append((i, len(m.group(1)), m.group(2).strip()))
+        elif kind == "code" and CODE_DEF.match(line) and len(out) < 200:
+            out.append((i, 1 + (len(line) - len(line.lstrip())) // 4, line.strip()[:90]))
+    return out
+
+
+def _find_section(text, kind, name):
+    """(start, end) line indices (0-based, end exclusive) of the section whose heading matches name."""
+    lines = text.split("\n")
+    outline = doc_outline(text, kind)
+    want = _norm_name(name)
+    hit = next((o for o in outline if _norm_name(o[2]) == want), None) or \
+        next((o for o in outline if want and want in _norm_name(o[2])), None)
+    if not hit:
+        names = "; ".join(o[2] for o in outline[:40]) or "none"
+        raise ValueError(f"no section called '{name}'. Sections: {names}")
+    start = hit[0] - 1
+    end = len(lines)
+    for o in outline:
+        if o[0] > hit[0] and o[1] <= hit[1]:
+            end = o[0] - 1
+            break
+    while end > start + 1 and not lines[end - 1].strip():   # keep the blank lines between sections
+        end -= 1
+    return start, end
+
+
+def _doc_ref(d, verb, version, extra=""):
+    return f"{verb} “{d['title']}” (v{version}){extra} {DOC_REF.format(id=d['id'])}"
+
+
+def _resolve_doc(conv_id, ref):
+    ref = str(ref or "").strip().strip("[]").replace("doc:", "")
+    if ref:
+        d = CHATS.doc(ref)
+        if d:
+            return d
+        for x in CHATS.docs(conv_id):
+            if _norm_name(x["title"]) == _norm_name(ref):
+                return CHATS.doc(x["id"])
+    docs = CHATS.docs(conv_id)
+    if not ref and len(docs) == 1:
+        return CHATS.doc(docs[0]["id"])
+    raise ValueError("which document? " + ("; ".join(f"{x['title']} [doc:{x['id']}]" for x in docs) or
+                                           "this chat has none yet: create one"))
+
+
+def _snippet(text, pos, n=3):
+    lines = text.split("\n")
+    line = text[:pos].count("\n")
+    a, b = max(0, line - n), min(len(lines), line + n + 1)
+    return "\n".join(f"{i + 1:>5}| {lines[i]}" for i in range(a, b))
+
+
+def tool_document(args):
+    cid = str(args.get("conversation_id") or "")
+    action = str(args.get("action", "read")).lower().strip()
+    if action == "list":
+        return {"documents": CHATS.docs(cid)}, "Listed this chat's documents"
+    if action == "create":
+        content = str(args.get("content", ""))
+        lang = str(args.get("language", "")).lower()
+        kind = "code" if lang and lang not in ("markdown", "md", "text", "txt") else "text"
+        did = CHATS.create_doc(cid, args.get("title", ""), content, kind, lang)
+        d = CHATS.doc(did)
+        return {"doc": did, "version": 1, "lines": content.count("\n") + 1,
+                "note": "It's shown beside the chat. Refer to it briefly instead of repeating it."}, \
+            _doc_ref(d, "Created", 1)
+    d = _resolve_doc(cid, args.get("doc"))
+    text, kind = d["text"], d["kind"]
+    if action in ("read", "outline"):
+        out = {"doc": d["id"], "title": d["title"], "version": d["version"], "lines": text.count("\n") + 1,
+               "outline": [f"line {o[0]}: {'  ' * (o[1] - 1)}{o[2]}" for o in doc_outline(text, kind)][:120]}
+        if args.get("section"):
+            a, b = _find_section(text, kind, args["section"])
+            out["section"] = "\n".join(text.split("\n")[a:b])
+        elif args.get("start_line"):
+            lines = text.split("\n")
+            a = max(1, int(args["start_line"]))
+            b = min(len(lines), int(args.get("end_line") or a + 120))
+            out["text"] = "\n".join(f"{i:>5}| {lines[i - 1]}" for i in range(a, b + 1))
+        elif action == "read":
+            limit = int(args.get("_max_chars") or 12000)
+            out["text"] = text if len(text) <= limit else text[:limit]
+            if len(text) > limit:
+                out["more"] = "longer than shown: read a section or a line range"
+        return out, f"Read “{d['title']}”"
+    if action == "replace":
+        find, repl = str(args.get("find", "")), str(args.get("replace", ""))
+        if not find:
+            raise ValueError("give find (the exact text to change, copied from the document) and replace")
+        n = text.count(find)
+        if n == 0:
+            # tolerate differences in surrounding whitespace at line ends
+            loose = re.compile(r"[ \t]*\n[ \t]*".join(re.escape(part.strip()) for part in find.strip().split("\n")))
+            ms = list(loose.finditer(text))
+            if len(ms) != 1:
+                raise ValueError("that text isn't in the document exactly (read it first and copy the passage)")
+            start, end = ms[0].span()
+        elif n > 1:
+            raise ValueError(f"that text appears {n} times; include more around it so it's unique")
+        else:
+            start = text.index(find)
+            end = start + len(find)
+        new = text[:start] + repl + text[end:]
+        v = CHATS.save_doc(d["id"], new, "stella", str(args.get("note", ""))[:200])
+        delta = repl.count("\n") - text[start:end].count("\n")
+        return {"doc": d["id"], "version": v, "around": _snippet(new, start)}, \
+            _doc_ref(d, "Updated", v, f": changed {text[start:end].count(chr(10)) + 1} line(s)" +
+                     (f", {delta:+d}" if delta else ""))
+    if action in ("set_section", "append", "insert_after"):
+        content = str(args.get("content", ""))
+        lines = text.split("\n")
+        if action == "set_section":
+            a, b = _find_section(text, kind, args.get("section", ""))
+            new_lines = lines[:a] + content.split("\n") + lines[b:]
+            what = f": rewrote section “{args.get('section')}”"
+        elif action == "insert_after":
+            a, b = _find_section(text, kind, args.get("section", ""))
+            new_lines = lines[:b] + content.split("\n") + lines[b:]
+            what = f": added after “{args.get('section')}”"
+        else:
+            new_lines = lines + ([""] if lines and lines[-1].strip() else []) + content.split("\n")
+            what = ": added to the end"
+        new = "\n".join(new_lines)
+        v = CHATS.save_doc(d["id"], new, "stella", str(args.get("note", ""))[:200])
+        return {"doc": d["id"], "version": v, "lines": new.count("\n") + 1}, _doc_ref(d, "Updated", v, what)
+    if action == "rename":
+        v = CHATS.save_doc(d["id"], text, "stella", "renamed", title=args.get("title", ""))
+        return {"doc": d["id"], "version": v}, _doc_ref(CHATS.doc(d["id"]), "Renamed", v)
+    if action == "revert":
+        ver = int(args.get("version") or 0)
+        old = CHATS.doc_version_text(d["id"], ver)
+        if old is None:
+            raise ValueError(f"version {ver} isn't kept; recent: {[x['version'] for x in d['versions'][:10]]}")
+        v = CHATS.save_doc(d["id"], old, "stella", f"back to v{ver}")
+        return {"doc": d["id"], "version": v}, _doc_ref(d, f"Back to v{ver} in", v)
+    raise ValueError("action: create, read, outline, replace, set_section, insert_after, append, rename, revert, list")
+
+
+SERVER_TOOLS["document"] = (tool_document, _fn(
+    "document",
+    "Documents beside the chat, for anything long the user will keep: code over ~60 lines, chapters, essays, specs, "
+    "READMEs. The user sees them in a side panel; the chat keeps only a one-line reference, so don't paste the "
+    "content into your reply. Edit in small pieces instead of rewriting: replace (find = an exact passage copied "
+    "from the document, replace = its new text), set_section (a heading's whole section, or a code definition), "
+    "insert_after (after a section), append. read/outline show the sections and line numbers first; every change "
+    "is a numbered version (revert to undo). action create: title + content (+ language for code).",
+    {"action": _p("create, read, outline, replace, set_section, insert_after, append, rename, revert or list"),
+     "doc": _p("The document: its id from [doc:...] or its title (optional when the chat has only one)"),
+     "title": _p("For create/rename"), "content": _p("For create, set_section, insert_after, append"),
+     "language": _p("For create: python, kotlin, cpp, … for code; leave out for text"),
+     "find": _p("For replace: the exact text to change"), "replace": _p("For replace: the new text"),
+     "section": _p("For read/set_section/insert_after: a heading or definition name"),
+     "start_line": _p("For read: first line", "integer"), "end_line": _p("For read: last line", "integer"),
+     "version": _p("For revert", "integer"), "note": _p("Optional: what this change does")},
+    ["action"]))
+
+
+def docs_section(conv_id):
+    docs = CHATS.docs(conv_id) if conv_id else []
+    if not docs:
+        return ""
+    lines = ["## Documents beside this chat",
+             "The user sees these in a side panel. Read or edit them with the document tool; don't paste them."]
+    for x in docs[:12]:
+        d = CHATS.doc(x["id"])
+        heads = [o[2] for o in doc_outline(d["text"], d["kind"])][:12]
+        lines.append(f"- “{x['title']}” [doc:{x['id']}] v{x['version']}, {d['text'].count(chr(10)) + 1} lines"
+                     + (f"; sections: {', '.join(heads)}" if heads else ""))
+    return "\n".join(lines)
 
 
 def tool_project_note(args):
@@ -2549,7 +3472,7 @@ def tool_github_read(args):
     ref = str(args.get("ref") or "")
     data = _gh("GET", f"/repos/{repo}/contents/{_q(path)}" + (f"?ref={urllib.parse.quote(ref)}" if ref else ""))
     if isinstance(data, list):
-        items = [("📁 " if x["type"] == "dir" else "") + x["path"] for x in data]
+        items = [x["path"] + ("/" if x["type"] == "dir" else "") for x in data]
         return {"repo": repo, "path": path or "/", "entries": items}, f"Listed {repo}/{path}"
     if data.get("encoding") == "base64" and data.get("content") is not None:
         text = base64.b64decode(data["content"]).decode("utf-8", "replace")
@@ -2903,11 +3826,32 @@ class ChatSearch:
             self.cache = (self.version, docs, df, avgdl)
             return self.cache
 
-    def search(self, query, k=6, exclude=""):
+    def index_now(self, conv_id):
+        """Re-index one chat right away if it changed (recall inside the chat you're in)."""
+        with CHATS.lock:
+            dirty = CHATS.db.execute("SELECT 1 FROM chat_dirty WHERE conv_id=?", (conv_id,)).fetchone()
+            if dirty:
+                CHATS.db.execute("DELETE FROM chat_dirty WHERE conv_id=?", (conv_id,))
+                CHATS.db.execute("INSERT INTO chat_dirty VALUES(?)", (conv_id,))
+                CHATS.db.commit()
+        if dirty:
+            with CHATS.lock:
+                others = [r[0] for r in CHATS.db.execute("SELECT conv_id FROM chat_dirty WHERE conv_id<>?", (conv_id,))]
+                CHATS.db.execute("DELETE FROM chat_dirty WHERE conv_id<>?", (conv_id,))
+                CHATS.db.commit()
+            try:
+                self.index_dirty(limit=1)
+            finally:
+                with CHATS.lock:
+                    CHATS.db.executemany("INSERT OR IGNORE INTO chat_dirty VALUES(?)", [(o,) for o in others])
+                    CHATS.db.commit()
+
+    def search(self, query, k=6, exclude="", only="", before=None):
         import array
         import math as _m
         _, docs, df, avgdl = self._load()
-        docs = [d for d in docs if d["conv"] != exclude]
+        docs = [d for d in docs if d["conv"] != exclude and (not only or d["conv"] == only)
+                and (before is None or (d["ts"] or 0) < before)]
         if not docs or not query.strip():
             return []
         q = set(_terms(query))
@@ -2942,7 +3886,7 @@ class ChatSearch:
         best, seen = [], set()
         for i in sorted(fused, key=lambda i: -fused[i]):
             d = docs[i]
-            if d["conv"] in seen:
+            if d["conv"] in seen and not only:
                 continue
             seen.add(d["conv"])
             best.append({"conversation_id": d["conv"], "title": d["title"], "when": d["ts"],
@@ -3132,6 +4076,11 @@ def restore_backup(zip_path, cfg):
 
 
 # ---- Server status and switching models ---------------------------------------------
+try:      # the model catalog shared with the setup (stellai_tune.py sits next to this file)
+    import stellai_tune as TUNE
+except ImportError:
+    TUNE = None
+
 MODEL_CATALOG = [
     {"key": "4b", "label": "Qwen3.5 4B", "repo": "unsloth/Qwen3.5-4B-GGUF", "about": "Fast; fine for everyday help."},
     {"key": "9b", "label": "Qwen3.5 9B", "repo": "unsloth/Qwen3.5-9B-GGUF", "about": "Smarter at code and reasoning."},
@@ -3255,17 +4204,33 @@ class LinuxServerControl:
             pass
         return out
 
+    def _tune_hw(self, conf):
+        hw = TUNE.detect(self.models_dir)
+        budget = float(conf.get("RAM_BUDGET_GB") or 0) or max(4.0, hw["ram_gb"] - 4)
+        ids = [] if conf.get("LLAMA_GPUS") == "-1" else \
+            [int(x) for x in conf.get("LLAMA_GPUS", "").split(",") if x.strip().isdigit()] or None
+        return hw, budget, ids
+
     def catalog(self):
         ram, vram = detect_memory()
         conf = self._read_conf()
         current = os.path.basename(conf.get("MODEL_FILE", ""))
         out = []
+        if TUNE:
+            try:
+                hw, budget, ids = self._tune_hw(conf)
+                out = TUNE.library(hw, budget, self.models_dir, current, ids, self.download)
+            except Exception as e:      # never lose the model list over the catalog
+                log(f"model catalog: {e}")
+                out = []
         for m in MODEL_CATALOG:
             fname, gb, ctx = model_file_for(m["key"], ram, vram)
             path = os.path.join(self.models_dir, fname)
+            have = os.path.isfile(path) and os.path.getsize(path) > 100_000_000
+            if out and not have:
+                continue        # with the full catalog, the old three only show when they're downloaded
             out.append({**{k: m[k] for k in ("key", "label", "about")}, "file": fname, "size_gb": gb, "context": ctx,
-                        "installed": os.path.isfile(path) and os.path.getsize(path) > 100_000_000,
-                        "current": fname == current, "download": self.download.get(m["key"])})
+                        "installed": have, "current": fname == current, "download": self.download.get(m["key"])})
         return out
 
     def status(self):
@@ -3280,12 +4245,17 @@ class LinuxServerControl:
         if not entry["installed"]:
             raise ValueError("download it first")
         conf = self._read_conf()
-        mmproj = ""
+        mmproj, spec = "", ""
+        man = TUNE.read_manifest(self.models_dir).get(key, {}) if TUNE and "|" in key else {}
         if conf.get("MMPROJ_FILE") or conf.get("VISION", "") == "1":
-            cand = os.path.join(self.models_dir, entry["file"].replace(".gguf", ".mmproj-F16.gguf"))
+            cand = os.path.join(self.models_dir, man["mmproj"]) if man.get("mmproj") else \
+                os.path.join(self.models_dir, entry["file"].replace(".gguf", ".mmproj-F16.gguf"))
             mmproj = cand if os.path.isfile(cand) else ""
+        if (man.get("tuned") or {}).get("mtp"):
+            spec = " ".join(TUNE.MTP_ARGS)     # the setup's speed test showed the MTP speed-up helps here
+        ctx = (man.get("tuned") or {}).get("context") or entry["context"]
         conf.update(MODEL_LABEL=entry["label"], MODEL_FILE=os.path.join(self.models_dir, entry["file"]),
-                    NET_CONTEXT=str(entry["context"]), MMPROJ_FILE=mmproj)
+                    NET_CONTEXT=str(ctx), MMPROJ_FILE=mmproj, SPEC_ARGS=spec)
         with open(self.conf + ".tmp", "w") as f:
             for k, v in conf.items():
                 f.write(f'{k}="{v}"\n')
@@ -3302,9 +4272,20 @@ class LinuxServerControl:
         entry = next((m for m in self.catalog() if m["key"] == key), None)
         if not entry:
             raise ValueError("unknown model")
-        repo = next(m["repo"] for m in MODEL_CATALOG if m["key"] == key)
         state = {"state": "downloading", "done": 0, "total": 0, "error": ""}
         self.download[key] = state
+        if TUNE and "|" in key:
+            vision = bool(self._read_conf().get("MMPROJ_FILE"))
+
+            def work_tuned():
+                try:
+                    TUNE.download_model(key, self.models_dir, state, _download_file, vision=vision)
+                    state["state"] = "ready"
+                except Exception as e:
+                    state.update(state="failed", error=str(e))
+            threading.Thread(target=work_tuned, daemon=True).start()
+            return "download started"
+        repo = next(m["repo"] for m in MODEL_CATALOG if m["key"] == key)
 
         def work():
             files = [(f"https://huggingface.co/{repo}/resolve/main/{entry['file']}", entry["file"])]
@@ -3573,6 +4554,32 @@ def _probe(url, timeout=4):
         return 0, str(getattr(e, "reason", e))
 
 
+def gpu_driver_check():
+    """(state, detail, fix) for NVIDIA cards, or None without any. Catches the classic Proxmox container problem:
+    the host's driver was updated and the container's driver programs no longer match it."""
+    import shutil
+    smi = shutil.which("nvidia-smi")
+    if not smi and not os.path.exists("/dev/nvidiactl"):
+        return None
+    if not smi:
+        return ("fail", "the cards are there but nvidia-smi isn't installed",
+                "Run stellai-setup.sh again: in a Proxmox container it installs the host's driver version.")
+    try:
+        p = subprocess.run([smi, "--query-gpu=name,driver_version", "--format=csv,noheader"], capture_output=True,
+                           text=True, timeout=20, creationflags=0x08000000 if os.name == "nt" else 0)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return ("warn", f"nvidia-smi didn't answer ({e})", "")
+    text = (p.stdout or "") + (p.stderr or "")
+    if "mismatch" in text.lower():
+        return ("fail", "driver/library version mismatch: Stella's model is running on the processor",
+                "The NVIDIA driver on the Proxmox host changed. Run stellai-setup.sh again in the container (it "
+                "installs the matching version), then restart StellAI. Or reboot the host if it was just updated.")
+    if p.returncode != 0:
+        return ("warn", "nvidia-smi failed: " + " ".join(text.split())[:160], "Check the graphics driver.")
+    rows = [r.split(",") for r in p.stdout.strip().splitlines() if r.strip()]
+    return ("ok", f"{len(rows)} card(s), driver {rows[0][1].strip() if rows and len(rows[0]) > 1 else '?'}", "")
+
+
 def run_doctor():
     """Checks every part of StellAI and says what to do about problems."""
     import shutil
@@ -3596,11 +4603,19 @@ def run_doctor():
         add("AI model", "warn", "still loading", "Wait a minute; big models take a while to load.")
     else:
         add("AI model", "fail", f"not reachable ({err or code})", "Start StellAI Server; if it stops right away, check llama.log / the Activity box.")
+    gpu = gpu_driver_check()
+    if gpu:
+        add("Graphics cards", *gpu)
     if DOCTOR["whisper"]:
         code, err = _probe(DOCTOR["whisper"].rstrip("/") + "/health")
         add("Voice recognition", "ok" if code in (200, 404) else "fail",
             "running" if code in (200, 404) else f"not reachable ({err or code})",
             "" if code in (200, 404) else "Voice commands won't work. Re-run setup to install Whisper.")
+    if HELPER["url"]:
+        code, err = _probe(HELPER["url"].rstrip("/") + "/health")
+        add("Helper model", "ok" if code == 200 else "warn",
+            "running (memory learning and mode checks)" if code == 200 else "not running; the main model does its jobs",
+            "" if code == 200 else "Check helper.log; re-run setup to download the helper model again.")
     if EMBEDDER.url:
         code, err = _probe(EMBEDDER.url + "/health")
         add("Meaning search", "ok" if code == 200 else "warn", "running" if code == 200 else "not running; keyword search only",
@@ -4726,9 +5741,11 @@ BPY_BAD_OPS = {"wm", "script", "preferences", "extensions", "file", "export_scen
                "screen", "ed", "workspace", "cachefile", "sequencer", "clip", "buttons", "console", "info"}
 
 
-def check_bpy_code(code):
-    """Problems that stop a step from running: no files, network, shell or Blender settings, only scene edits.
-    A guard rail against mistakes, not a sandbox."""
+def check_bpy_code(code, allowed=None, extra_bad=(), bad_prefixes=()):
+    """Problems that stop a step from running: no files, network, shell or program settings, only design edits.
+    A guard rail against mistakes, not a sandbox. Defaults are for Blender; the CAD and PCB designers pass their
+    own allowed imports and blocked names."""
+    allowed = allowed or BPY_IMPORTS
     if len(code) > 40000:
         return ["the script is too long (40,000 characters max); split the change into smaller steps"]
     try:
@@ -4738,18 +5755,20 @@ def check_bpy_code(code):
     probs = []
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
-            probs += [f"import {a.name} isn't allowed" for a in n.names if a.name.split(".")[0] not in BPY_IMPORTS]
+            probs += [f"import {a.name} isn't allowed" for a in n.names if a.name.split(".")[0] not in allowed]
         elif isinstance(n, ast.ImportFrom):
-            if n.level or (n.module or "").split(".")[0] not in BPY_IMPORTS:
+            if n.level or (n.module or "").split(".")[0] not in allowed:
                 probs.append(f"from {n.module} import isn't allowed")
-        elif isinstance(n, ast.Name) and n.id in BPY_BAD_NAMES:
+        elif isinstance(n, ast.Name) and (n.id in BPY_BAD_NAMES or n.id in extra_bad or
+                                          any(n.id.startswith(b) for b in bad_prefixes)):
             probs.append(f"{n.id}() isn't allowed")
         elif isinstance(n, ast.Attribute):
             base_is_ops = (isinstance(n.value, ast.Attribute) and n.value.attr == "ops") or \
                           (isinstance(n.value, ast.Name) and n.value.id == "ops")
             if n.attr.startswith("_"):
                 probs.append(f"'.{n.attr}' isn't allowed")
-            elif n.attr in BPY_BAD_ATTRS or n.attr.startswith("save"):
+            elif n.attr in BPY_BAD_ATTRS or n.attr in extra_bad or n.attr.lower().startswith("save") or \
+                    any(n.attr.startswith(b) for b in bad_prefixes):
                 probs.append(f"'.{n.attr}' isn't allowed (no files, scripts or settings)")
             elif base_is_ops and n.attr in BPY_BAD_OPS:
                 probs.append(f"bpy.ops.{n.attr} isn't allowed (files, rendering and windows are handled by StellAI)")
@@ -4823,14 +5842,15 @@ def _blender_render(views=None, focus="", look="solid", reopen=""):
     return image_id, info
 
 
-def _vision_check(image_id, goal, facts, layout, workspace=""):
+def _vision_check(image_id, goal, facts, layout, workspace="", refs=None):
     """Asks the vision add-on whether the renders match the step's goal (and the workspace's reference pictures).
     Text, or why it couldn't look."""
     import base64
     try:
         with open(os.path.join(DIAGRAM_DIR, image_id + ".png"), "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        refs = _ref_images(workspace) if workspace else []
+        if refs is None:
+            refs = _ref_images(workspace) if workspace else []
         content = []
         for label, path in refs:
             with open(path, "rb") as f:
@@ -5513,6 +6533,2124 @@ SERVER_TOOLS["blender_inspect"] = (tool_blender_inspect, _fn(
      "workspace": _p("Default: the active workspace")}, []))
 
 
+# ---- Versioned workspaces for the CAD and PCB designers ----------------------------------------------
+class Workspaces:
+    """Numbered versions of one design: a file per version (CAD) or a folder per version (a KiCad project).
+    Lives next to the 3D Modeler's folders, under the same root."""
+
+    def __init__(self, kind, ext, label):
+        self.kind, self.ext, self.label = kind, ext, label      # ext "" = one folder per version
+
+    def root(self, *parts):
+        return os.path.join(BLENDER["root"], self.kind, *parts)
+
+    def name(self, name):
+        name = str(name or "").strip().lower()
+        if not name:
+            try:
+                with open(self.root("active.txt"), encoding="utf-8") as f:
+                    name = f.read().strip()
+            except OSError:
+                name = ""
+            if not name:
+                raise ValueError(f"no {self.label} workspace yet: start one with action new")
+        if not WS_NAME.fullmatch(name):
+            raise ValueError("workspace names use lowercase letters, digits and dashes, e.g. fan-duct")
+        return name
+
+    def dir(self, name, *parts):
+        return self.root("workspaces", name, *parts)
+
+    def versions(self, name):
+        d = self.dir(name, "versions")
+        pat = re.compile(r"v(\d{4,})" + (re.escape(self.ext) if self.ext else ""))
+        out = []
+        for f in os.listdir(d) if os.path.isdir(d) else []:
+            m = pat.fullmatch(f)
+            if m and (self.ext or os.path.isdir(os.path.join(d, f))):
+                out.append(int(m.group(1)))
+        return sorted(out)
+
+    def path(self, name, v):
+        return self.dir(name, "versions", f"v{v:04d}{self.ext}")
+
+    def latest(self, name):
+        vs = self.versions(name)
+        if not vs:
+            raise ValueError(f"workspace {name} has no saved versions")
+        return vs[-1]
+
+    def next(self, name):
+        v = (self.versions(name) or [0])[-1] + 1
+        return v, self.path(name, v)
+
+    def activate(self, name):
+        os.makedirs(self.root(), exist_ok=True)
+        with open(self.root("active.txt"), "w", encoding="utf-8") as f:
+            f.write(name)
+
+    def history(self, name):
+        try:
+            with open(self.dir(name, "history.json"), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return []
+
+    def record(self, name, v, what):
+        hist = self.history(name) + [{"version": v, "what": str(what)[:300], "at": int(time.time())}]
+        with open(self.dir(name, "history.json"), "w", encoding="utf-8") as f:
+            json.dump(hist[-500:], f, indent=1)
+        keep = set(self.versions(name)[-BLENDER_KEEP:]) | {1}
+        for old in self.versions(name):
+            if old not in keep:
+                p = self.path(name, old)
+                shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else _quiet_remove(p)
+
+    def list(self):
+        d = self.root("workspaces")
+        names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        return [{"name": n, "latest_version": self.versions(n)[-1]}
+                for n in names if WS_NAME.fullmatch(n) and self.versions(n)]
+
+    def start(self, name):
+        name = str(name or "").strip().lower()
+        if not WS_NAME.fullmatch(name):
+            raise ValueError("give a name: lowercase letters, digits and dashes, e.g. fan-duct")
+        if self.versions(name):
+            raise ValueError(f"workspace {name} already exists; use action open, or pick another name")
+        for sub in ("versions", "exports", "refs"):
+            os.makedirs(self.dir(name, sub), exist_ok=True)
+        return name
+
+    # reference pictures, the same as the 3D Modeler's
+    def refs(self, name):
+        try:
+            with open(self.dir(name, "refs", "refs.json"), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return []
+
+    def ref_images(self, name, limit=3):
+        refs = [r for r in self.refs(name) if os.path.isfile(self.dir(name, "refs", r["file"]))]
+        order = {l: i for i, l in enumerate(REF_LABELS)}
+        refs.sort(key=lambda r: order.get(r.get("label") or "", 99))
+        return [(r.get("label") or "reference", self.dir(name, "refs", r["file"])) for r in refs[:limit]]
+
+    def refs_action(self, action, args):
+        name = self.name(args.get("name"))
+        refs = self.refs(name)
+        os.makedirs(self.dir(name, "refs"), exist_ok=True)
+        if action == "references":
+            return {"workspace": name, "references": refs}, f"{len(refs)} reference picture(s)"
+        if action == "clear_references":
+            for r in refs:
+                _quiet_remove(self.dir(name, "refs", r["file"]))
+            refs = []
+        else:
+            labels = args.get("labels") or []
+            if isinstance(labels, str):
+                labels = [l for l in re.split(r"[,\s]+", labels) if l]
+            for i, src in enumerate(_photo_files(args.get("photos") or "latest")):
+                label = str(labels[i]).lower() if i < len(labels) else ""
+                if label and label not in REF_LABELS:
+                    raise ValueError(f"labels are {', '.join(REF_LABELS)}")
+                if label:
+                    refs = [r for r in refs if r.get("label") != label]
+                fname = f"ref-{uuid.uuid4().hex[:8]}.jpg"
+                shutil.copyfile(src, self.dir(name, "refs", fname))
+                refs.append({"file": fname, "label": label, "photo": os.path.basename(src)[:-4], "at": int(time.time())})
+        with open(self.dir(name, "refs", "refs.json"), "w", encoding="utf-8") as f:
+            json.dump(refs[-8:], f, indent=1)
+        return {"workspace": name, "references": refs[-8:]}, f"{len(refs[-8:])} reference picture(s)"
+
+
+def _quiet_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _pick_inbox_file(src, exts):
+    """A file (or folder) the user dropped into the 3D inbox, by name."""
+    src = os.path.basename(str(src or "").strip())
+    path = os.path.join(_inbox(), src)
+    if not src or not os.path.exists(path):
+        have = [f for f in sorted(os.listdir(_inbox())) if f.rsplit(".", 1)[-1].lower() in exts
+                or os.path.isdir(os.path.join(_inbox(), f))]
+        raise ValueError(f"no {src!r} in the 3D inbox ({_inbox()}); there: {have[:30]}")
+    return path
+
+
+def _run_marked(cmd, mark, job, timeout, env_extra=None, cwd=None):
+    """Runs a runner script with a JSON job; returns its JSON answer. Raises RuntimeError if it never answers."""
+    wdir = os.path.join(BLENDER["root"], ".worker")
+    os.makedirs(wdir, exist_ok=True)
+    jpath = os.path.join(wdir, f"job-{uuid.uuid4().hex[:8]}.json")
+    with open(jpath, "w", encoding="utf-8") as f:
+        json.dump(job, f)
+    env = dict(os.environ, STELLAI_JOB=jpath, **(env_extra or {}))
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                           env=env, cwd=cwd or wdir, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"the step took longer than {timeout} s, so StellAI stopped it. Nothing was saved.")
+    finally:
+        _quiet_remove(jpath)
+    lines = (p.stdout or "").splitlines() + (p.stderr or "").splitlines()
+    for l in reversed(lines):
+        if l.startswith(mark):
+            try:
+                return json.loads(l[len(mark):])
+            except ValueError:
+                break
+    tail = " / ".join(l.strip() for l in lines[-5:] if l.strip())[:700]
+    raise RuntimeError("the program stopped without an answer" + (f": {tail}" if tail else ""))
+
+
+def _diff_by(before, after, key, fields):
+    b = {o[key]: o for o in before}
+    a = {o[key]: o for o in after}
+    changed = []
+    for k in a:
+        if k in b:
+            d = {f: {"from": b[k].get(f), "to": a[k].get(f)} for f in fields if b[k].get(f) != a[k].get(f)}
+            if d:
+                changed.append({key: k, **d})
+    return {"added": [a[k] for k in a if k not in b][:20], "removed": [k for k in b if k not in a][:20],
+            "changed": changed[:25]}
+
+
+def _check_and_render_stl(stl, goal, facts, refs, views=None, look="solid"):
+    """Renders an exported STL with the server's Blender and runs the visual check. (image, info, check text)."""
+    if not find_blender():
+        return None, {"note": "no pictures: Blender isn't installed on the server (measurements only)"}, None
+    with BLENDER["lock"]:
+        blender_call("import", timeout=300, path=stl)
+        img, info = _blender_render(views, "", look)
+    check = _vision_check(img, goal, facts, info.get("layout", ""), refs=refs) if goal else None
+    return img, info, check
+
+
+# ---- CAD Designer: FreeCAD ----------------------------------------------------------------------------
+CAD = Workspaces("cad", ".FCStd", "CAD")
+CAD_MARK = "@@CAD@@"
+CAD_RUNNER_PY = r'''# StellAI CAD runner: one step inside headless FreeCAD (freecadcmd this_file). The job comes as JSON in the
+# file named by STELLAI_JOB. Written by stellai_hub.py: edits here are overwritten.
+import contextlib
+import io
+import json
+import math
+import os
+import sys
+import traceback
+
+import FreeCAD as App
+import Part
+
+MARK = "@@CAD@@"
+OUT = sys.stdout
+
+
+def rnd(v, n=3):
+    return [round(float(x), n) for x in v]
+
+
+def shaped(doc):
+    return [o for o in doc.Objects if hasattr(o, "Shape") and not o.Shape.isNull()]
+
+
+def report(doc, full=True):
+    objs, issues = [], {}
+    lo, hi = None, None
+    for o in shaped(doc):
+        s = o.Shape
+        bb = s.BoundBox
+        used = [p.Name for p in o.InList]
+        e = {"name": o.Name, "label": o.Label, "type": o.TypeId, "size_mm": rnd((bb.XLength, bb.YLength, bb.ZLength)),
+             "min": rnd((bb.XMin, bb.YMin, bb.ZMin)), "max": rnd((bb.XMax, bb.YMax, bb.ZMax)),
+             "solids": len(s.Solids), "faces": len(s.Faces)}
+        if used:
+            e["used_by"] = used[:5]     # an input to another feature, not a final part
+        try:
+            e["volume_mm3"] = round(s.Volume, 2)
+        except Exception:
+            pass
+        if not getattr(o, "Visibility", True):
+            e["hidden"] = True
+        if full and not used:
+            found = []
+            try:
+                if not s.isValid():
+                    found.append("shape is not valid (bad geometry)")
+            except Exception:
+                pass
+            if not s.Solids:
+                found.append("no solid (only faces or edges): not printable or exportable as a part")
+            elif any(not sol.isClosed() for sol in s.Solids):
+                found.append("a solid isn't closed")
+            if len(s.Solids) > 1:
+                found.append(f"{len(s.Solids)} separate solids (fuse them if they're meant to be one part)")
+            if found:
+                issues[o.Name] = found
+        if not used and getattr(o, "Visibility", True):
+            lo = rnd((bb.XMin, bb.YMin, bb.ZMin)) if lo is None else [min(a, b) for a, b in zip(lo, (bb.XMin, bb.YMin, bb.ZMin))]
+            hi = rnd((bb.XMax, bb.YMax, bb.ZMax)) if hi is None else [max(a, b) for a, b in zip(hi, (bb.XMax, bb.YMax, bb.ZMax))]
+        objs.append(e)
+    return {"objects": objs, "issues": issues,
+            "size_mm": rnd([b - a for a, b in zip(lo, hi)]) if lo else None, "min": lo, "max": hi}
+
+
+def finals(doc):
+    """The parts: shaped, visible, and not an input to another feature."""
+    return [o for o in shaped(doc) if not o.InList and getattr(o, "Visibility", True)]
+
+
+# ---- helpers for step code (millimetres) ----------------------------------------------------------
+def namespace(doc):
+    V = App.Vector
+
+    def get(name):
+        o = doc.getObject(name) or next((x for x in doc.Objects if x.Label == name), None)
+        if o is None:
+            raise KeyError(f"no object {name!r}; objects: {[x.Name for x in doc.Objects][:30]}")
+        return o
+
+    def add(name, shape):
+        """Puts a shape in the document as a part called name (replacing one with that name)."""
+        old = doc.getObject(name)
+        if old is not None:
+            doc.removeObject(old.Name)
+        o = doc.addObject("Part::Feature", name)
+        o.Shape = shape
+        return o
+
+    def remove(name):
+        doc.removeObject(get(name).Name)
+
+    def box(x, y, z, at=(0, 0, 0)):
+        """A box x by y by z mm with its corner at `at`."""
+        return Part.makeBox(x, y, z, V(*at))
+
+    def cylinder(r, h, at=(0, 0, 0), axis=(0, 0, 1)):
+        return Part.makeCylinder(r, h, V(*at), V(*axis))
+
+    def hole(d, depth, at, axis=(0, 0, -1)):
+        """A cylinder to cut a hole of diameter d from point `at` along axis."""
+        return Part.makeCylinder(d / 2, depth, V(*at), V(*axis))
+
+    def fillet(shape, r, edges=None):
+        return shape.makeFillet(r, edges or shape.Edges)
+
+    def chamfer(shape, d, edges=None):
+        return shape.makeChamfer(d, edges or shape.Edges)
+
+    def hide(name):
+        get(name).Visibility = False
+
+    return {"App": App, "FreeCAD": App, "Part": Part, "Vector": V, "Placement": App.Placement,
+            "Rotation": App.Rotation, "doc": doc, "math": math, "get": get, "add": add, "remove": remove,
+            "box": box, "cylinder": cylinder, "hole": hole, "fillet": fillet, "chamfer": chamfer, "hide": hide,
+            "__name__": "stellai_step"}
+
+
+def export(doc, path, fmt):
+    parts = finals(doc)
+    if not parts:
+        raise ValueError("nothing to export: no visible solid parts")
+    if fmt == "stl":
+        import Mesh
+        import MeshPart
+        meshes = [MeshPart.meshFromShape(Shape=o.Shape, LinearDeflection=0.05, AngularDeflection=0.3) for o in parts]
+        m = meshes[0]
+        for extra in meshes[1:]:
+            m.addMesh(extra)
+        m.write(path)
+    elif fmt in ("step", "stp"):
+        import Import
+        Import.export(parts, path)
+    elif fmt == "brep":
+        Part.makeCompound([o.Shape for o in parts]).exportBrep(path)
+    elif fmt in ("iges", "igs"):
+        Part.makeCompound([o.Shape for o in parts]).exportIges(path)
+    else:
+        raise ValueError("format must be stl, step, brep or iges")
+
+
+def main():
+    with open(os.environ["STELLAI_JOB"], encoding="utf-8") as f:
+        job = json.load(f)
+    out = {"ok": False}
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            doc = App.openDocument(job["open"]) if job.get("open") else App.newDocument("Model")
+            if job.get("import"):
+                src = job["import"]
+                ext = src.rsplit(".", 1)[-1].lower()
+                if ext in ("step", "stp", "iges", "igs"):
+                    import Import
+                    Import.insert(src, doc.Name)
+                elif ext == "brep":
+                    o = doc.addObject("Part::Feature", "Imported")
+                    o.Shape = Part.read(src)
+                elif ext == "stl":     # a mesh: turned into a solid so it can be cut, measured and exported
+                    import Mesh
+                    mesh = Mesh.Mesh(src)
+                    shell = Part.Shape()
+                    shell.makeShapeFromMesh(mesh.Topology, 0.05)
+                    solid = Part.makeSolid(shell)
+                    o = doc.addObject("Part::Feature", "Imported")
+                    o.Shape = solid.removeSplitter() if solid.isValid() else shell
+                else:
+                    raise ValueError(f"can't import .{ext} files")
+                doc.recompute()
+            if job.get("code"):
+                out["before"] = report(doc, full=False)
+                code = compile(job["code"], "<step>", "exec")
+                exec(code, namespace(doc))
+            doc.recompute()
+            bad = [o.Name for o in doc.Objects if "Invalid" in o.State or "Error" in o.State]
+            out["after"] = report(doc, full=True)
+            if bad:
+                out["after"]["recompute_errors"] = bad
+            if job.get("save"):
+                doc.saveAs(job["save"])
+            for path, fmt in job.get("exports", []):
+                export(doc, path, fmt)
+        out["ok"] = True
+    except Exception as e:
+        tb = traceback.extract_tb(sys.exc_info()[2])
+        out.update(error=f"{type(e).__name__}: {e}"[:1500],
+                   where=[f"line {f.lineno}: {(f.line or '').strip()}" for f in tb if f.filename == "<step>"][-3:])
+    out["output"] = buf.getvalue()[-3000:]
+    OUT.write(MARK + json.dumps(out) + "\n")
+    OUT.flush()
+
+
+main()
+os._exit(0)
+'''
+CAD_IMPORTS = {"FreeCAD", "Part", "Sketcher", "PartDesign", "Draft", "Mesh", "MeshPart", "math", "random",
+               "itertools", "functools", "collections", "statistics", "numpy"}
+CAD_BAD_ATTRS = {"openDocument", "newDocument", "closeDocument", "loadFile", "exportStep", "exportStl", "exportBrep",
+                 "exportIges", "read", "export", "insert", "addModule", "runCommand", "open", "importStep", "setActiveDocument"}
+CAD_FILE_EXTS = ("fcstd", "step", "stp", "stl", "iges", "igs", "brep")
+
+
+def find_freecad():
+    """The command that runs headless FreeCAD, as a list, or []."""
+    env = os.environ.get("STELLAI_FREECAD", "")
+    if env and os.path.isfile(env):
+        return [env]
+    appimage = os.path.expanduser(os.path.join("~", "llm", "freecad", "FreeCAD.AppImage"))
+    if os.path.isfile(appimage) and os.access(appimage, os.X_OK):
+        return [appimage, "freecadcmd"]
+    for n in ("freecadcmd", "FreeCADCmd", "freecad.cmd"):
+        w = shutil.which(n)
+        if w:
+            return [w]
+    if os.name == "nt":
+        for root in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+            for exe in ("FreeCADCmd.exe", "freecadcmd.exe"):
+                found = sorted(glob.glob(os.path.join(root, "FreeCAD*", "bin", exe)), reverse=True)
+                if found:
+                    return [found[0]]
+    for c in ("/usr/bin/freecadcmd", "/usr/bin/FreeCADCmd", "/snap/bin/freecad.cmd"):
+        if os.path.isfile(c):
+            return [c]
+    return []
+
+
+def _cad(job, timeout=300):
+    cmd = find_freecad()
+    if not cmd:
+        raise RuntimeError("FreeCAD isn't installed on the server. Linux: re-run stellai-setup.sh and say yes to "
+                           "FreeCAD. Windows: install it from freecad.org. Then try again.")
+    script = os.path.join(BLENDER["root"], ".worker", "stellai_cad.py")
+    os.makedirs(os.path.dirname(script), exist_ok=True)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(CAD_RUNNER_PY)
+    return _run_marked(cmd + [script], CAD_MARK, job, timeout)
+
+
+def _cad_summary(rep):
+    return {"parts": [o for o in rep.get("objects", []) if not o.get("used_by")][:40],
+            "inputs_used_by_other_features": len([o for o in rep.get("objects", []) if o.get("used_by")]),
+            "overall_size_mm": rep.get("size_mm"), "min": rep.get("min"), "max": rep.get("max"),
+            "problems": rep.get("issues") or {}, "recompute_errors": rep.get("recompute_errors")}
+
+
+def tool_cad_project(args):
+    action = str(args.get("action", "status")).strip().lower()
+    if action == "status":
+        return {"freecad": " ".join(find_freecad()) or "not installed", "blender_for_pictures": bool(find_blender()),
+                "inbox_folder": _inbox(),
+                "files_you_can_import": [f for f in sorted(os.listdir(_inbox()))
+                                         if f.rsplit(".", 1)[-1].lower() in CAD_FILE_EXTS][:40],
+                "workspaces": CAD.list(), "active": _safe(lambda: CAD.name(""))}, "Checked CAD workspaces"
+    if action == "new":
+        name = CAD.start(args.get("name"))
+        v, path = CAD.next(name)
+        job = {"save": path}
+        if args.get("file"):
+            src = _pick_inbox_file(args.get("file"), CAD_FILE_EXTS)
+            if src.lower().endswith(".fcstd"):
+                job["open"] = src
+            else:
+                job["import"] = src
+        res = _cad(job)
+        if not res.get("ok"):
+            shutil.rmtree(CAD.dir(name), ignore_errors=True)
+            raise RuntimeError(res.get("error") or "FreeCAD couldn't start the workspace")
+        CAD.record(name, v, f"start: {args.get('file') or 'empty'}")
+        CAD.activate(name)
+        return {"workspace": name, "version": v, "design": _cad_summary(res.get("after", {}))}, \
+            f"Started CAD workspace {name} (v{v})"
+    if action in ("add_reference", "references", "clear_references"):
+        return CAD.refs_action(action, args)
+    name = CAD.name(args.get("name"))
+    if action == "open":
+        CAD.activate(name)
+        return {"workspace": name, "latest_version": CAD.latest(name), "recent": CAD.history(name)[-8:]}, f"Opened {name}"
+    if action == "history":
+        return {"workspace": name, "versions_on_disk": CAD.versions(name), "history": CAD.history(name)[-25:]}, \
+            f"History of {name}"
+    if action == "revert":
+        target = _int_version(args.get("version"))
+        if target not in CAD.versions(name):
+            raise ValueError(f"version {target} isn't on disk; available: {CAD.versions(name)[-15:]}")
+        v, path = CAD.next(name)
+        shutil.copyfile(CAD.path(name, target), path)
+        CAD.record(name, v, f"back to v{target}")
+        return {"workspace": name, "version": v, "same_as": target}, f"Went back to v{target} (saved as v{v})"
+    if action == "export":
+        fmt = str(args.get("format", "step")).lower().strip(". ")
+        v = CAD.latest(name)
+        if fmt == "blender":     # hand the part to the 3D Modeler
+            out = os.path.join(_inbox(), f"{name}-v{v:04d}.stl")
+            fmt_real = "stl"
+        else:
+            if fmt not in ("step", "stl", "fcstd", "brep", "iges"):
+                raise ValueError("format must be step, stl, fcstd, brep, iges or blender")
+            os.makedirs(CAD.dir(name, "exports"), exist_ok=True)
+            out = CAD.dir(name, "exports", f"{name}-v{v:04d}.{fmt}")
+            fmt_real = fmt
+        if fmt_real == "fcstd":
+            shutil.copyfile(CAD.path(name, v), out)
+        else:
+            res = _cad({"open": CAD.path(name, v), "exports": [[out, fmt_real]]})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "export failed")
+        note = ("It's in the 3D inbox now: in the 3D Modeler, start a workspace with this file."
+                if fmt == "blender" else "The file is in this folder on the server computer.")
+        return {"workspace": name, "version": v, "file": out, "bytes": os.path.getsize(out), "note": note}, \
+            f"Exported {name} v{v} as {fmt}"
+    raise ValueError("action must be status, new, open, history, revert, export, add_reference, references or "
+                     "clear_references")
+
+
+def _safe(fn):
+    try:
+        return fn()
+    except (ValueError, OSError):
+        return None
+
+
+def _int_version(v):
+    try:
+        return int(str(v).lstrip("vV"))
+    except ValueError:
+        raise ValueError("give the version number, e.g. 7")
+
+
+def tool_cad_step(args):
+    code, goal = str(args.get("code", "")), str(args.get("goal", "")).strip()
+    if not goal or not code.strip():
+        raise ValueError("give goal (with millimetres) and code")
+    probs = check_bpy_code(code, allowed=CAD_IMPORTS, extra_bad=CAD_BAD_ATTRS)
+    if probs:
+        return {"ok": False, "error": "the code was not run: " + "; ".join(probs)}, "Step blocked"
+    name = CAD.name(args.get("workspace"))
+    base = CAD.latest(name)
+    v, path = CAD.next(name)
+    stl = os.path.join(BLENDER["root"], ".worker", f"cad-{uuid.uuid4().hex[:8]}.stl")
+    res = _cad({"open": CAD.path(name, base), "code": code, "save": path, "exports": [[stl, "stl"]]},
+               timeout=max(30, min(600, int(args.get("timeout") or 300))))
+    if not res.get("ok"):
+        _quiet_remove(path)
+        _quiet_remove(stl)
+        return {"ok": False, "error": res.get("error"), "where": res.get("where"), "output": res.get("output", ""),
+                "note": f"Nothing was saved; the design is still v{base}."}, "Step failed"
+    fields = ("label", "size_mm", "min", "volume_mm3", "solids", "faces", "hidden", "used_by")
+    diff = _diff_by(res["before"]["objects"], res["after"]["objects"], "name", fields)
+    if not (diff["added"] or diff["removed"] or diff["changed"]):
+        _quiet_remove(path)
+        _quiet_remove(stl)
+        return {"ok": False, "error": "the code ran but nothing in the design changed", "output": res.get("output", ""),
+                "note": f"Nothing was saved; the design is still v{base}."}, "Step changed nothing"
+    CAD.record(name, v, goal)
+    out = {"version": v, "previous": base, "changes": diff, "design": _cad_summary(res["after"]),
+           "output": res.get("output", "")[-1500:]}
+    if os.path.exists(stl):
+        try:
+            check = str(args.get("check", True)).lower() not in ("false", "0", "no")
+            img, info, vc = _check_and_render_stl(stl, goal if check else "", diff, CAD.ref_images(name),
+                                                  args.get("views") if isinstance(args.get("views"), list) else None)
+            if img:
+                out.update(image=img, title=f"{name} v{v}", views=info.get("layout"))
+            if vc:
+                out["visual_check"] = vc
+            if info.get("note"):
+                out["note"] = info["note"]
+        except RuntimeError as e:
+            out["render_error"] = str(e)
+        _quiet_remove(stl)
+    return out, f"Saved {name} v{v}"
+
+
+def tool_cad_inspect(args):
+    name = CAD.name(args.get("workspace"))
+    v = CAD.latest(name)
+    want = bool(args.get("render"))
+    stl = os.path.join(BLENDER["root"], ".worker", f"cad-{uuid.uuid4().hex[:8]}.stl")
+    res = _cad({"open": CAD.path(name, v), "exports": [[stl, "stl"]] if want else []})
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error") or "FreeCAD couldn't read the design")
+    out = {"workspace": name, "version": v, "design": _cad_summary(res["after"])}
+    if want and os.path.exists(stl):
+        refs = CAD.ref_images(name)
+        goal = "compare the design as it is now with the reference pictures" if refs else ""
+        try:
+            img, info, vc = _check_and_render_stl(stl, goal, {"size_mm": res["after"].get("size_mm")}, refs,
+                                                  args.get("views") if isinstance(args.get("views"), list) else None)
+            if img:
+                out.update(image=img, title=f"{name} v{v}", views=info.get("layout"))
+            if vc:
+                out["comparison"] = vc
+            if info.get("note"):
+                out["note"] = info["note"]
+        except RuntimeError as e:
+            out["render_error"] = str(e)
+        _quiet_remove(stl)
+    return out, f"Inspected {name} v{v}"
+
+
+# ---- PCB Designer: KiCad -------------------------------------------------------------------------------
+PCB = Workspaces("pcb", "", "PCB")
+PCB_MARK = "@@PCB@@"
+PCB_RUNNER_PY = r'''# StellAI PCB runner: one step on a KiCad board with KiCad's Python (pcbnew). The job comes as JSON in the
+# file named by STELLAI_JOB. Written by stellai_hub.py: edits here are overwritten.
+import contextlib
+import io
+import json
+import math
+import os
+import sys
+import traceback
+
+import pcbnew
+
+MARK = "@@PCB@@"
+OUT = sys.stdout
+
+
+def mm(v):
+    return round(pcbnew.ToMM(v), 3)
+
+
+def report(board):
+    fps = []
+    for fp in board.GetFootprints():
+        p = fp.GetPosition()
+        fps.append({"ref": fp.GetReference(), "value": fp.GetValue(), "footprint": fp.GetFPID().GetUniStringLibId(),
+                    "x_mm": mm(p.x), "y_mm": mm(p.y), "rot_deg": round(fp.GetOrientationDegrees(), 2),
+                    "side": "bottom" if fp.IsFlipped() else "top"})
+    tracks = vias = 0
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA":
+            vias += 1
+        else:
+            tracks += 1
+    out = {"footprints": fps, "tracks": tracks, "vias": vias, "zones": len(list(board.Zones())),
+           "nets": board.GetNetCount(), "copper_layers": board.GetCopperLayerCount()}
+    try:
+        bb = board.GetBoardEdgesBoundingBox()
+        if bb.GetWidth() > 0:
+            out["board_mm"] = [mm(bb.GetWidth()), mm(bb.GetHeight())]
+            out["board_origin_mm"] = [mm(bb.GetX()), mm(bb.GetY())]
+    except Exception:
+        pass
+    return out
+
+
+def namespace(board):
+    V = pcbnew.VECTOR2I
+    F = pcbnew.FromMM
+
+    def fp(ref):
+        f = board.FindFootprintByReference(ref)
+        if f is None:
+            raise KeyError(f"no footprint {ref!r}; footprints: {[x.GetReference() for x in board.GetFootprints()][:60]}")
+        return f
+
+    def move(ref, x, y, rot=None):
+        """Puts footprint ref at x, y mm (board coordinates, Y grows downwards), optionally turned to rot degrees."""
+        f = fp(ref)
+        f.SetPosition(V(F(x), F(y)))
+        if rot is not None:
+            f.SetOrientationDegrees(float(rot))
+
+    def layer(name):
+        lid = board.GetLayerID(name)
+        if lid < 0:
+            raise KeyError(f"no layer {name!r}")
+        return lid
+
+    def line(x1, y1, x2, y2, layer_name="Edge.Cuts", width=0.1):
+        s = pcbnew.PCB_SHAPE(board)
+        s.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        s.SetStart(V(F(x1), F(y1)))
+        s.SetEnd(V(F(x2), F(y2)))
+        s.SetLayer(layer(layer_name))
+        s.SetWidth(F(width))
+        board.Add(s)
+        return s
+
+    def outline_rect(w, h, x=0.0, y=0.0, replace=True):
+        """A w by h mm board outline with its top-left corner at x, y (replaces the old outline)."""
+        if replace:
+            for d in list(board.GetDrawings()):
+                if d.GetLayer() == pcbnew.Edge_Cuts:
+                    board.Remove(d)
+        line(x, y, x + w, y)
+        line(x + w, y, x + w, y + h)
+        line(x + w, y + h, x, y + h)
+        line(x, y + h, x, y)
+
+    def track(x1, y1, x2, y2, width=0.25, layer_name="F.Cu", net=None):
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(V(F(x1), F(y1)))
+        t.SetEnd(V(F(x2), F(y2)))
+        t.SetWidth(F(width))
+        t.SetLayer(layer(layer_name))
+        if net:
+            n = board.FindNet(net)
+            if n is None:
+                raise KeyError(f"no net {net!r}")
+            t.SetNet(n)
+        board.Add(t)
+        return t
+
+    def text(s, x, y, size=1.0, layer_name="F.SilkS"):
+        t = pcbnew.PCB_TEXT(board)
+        t.SetText(s)
+        t.SetPosition(V(F(x), F(y)))
+        t.SetLayer(layer(layer_name))
+        t.SetTextSize(V(F(size), F(size)))
+        board.Add(t)
+        return t
+
+    return {"pcbnew": pcbnew, "board": board, "math": math, "mm": F, "to_mm": pcbnew.ToMM, "VECTOR2I": V,
+            "fp": fp, "move": move, "line": line, "outline_rect": outline_rect, "track": track, "text": text,
+            "__name__": "stellai_step"}
+
+
+# ---- a board from a netlist (circuit as code) ------------------------------------------------------
+def _sexp(text):
+    """A tiny S-expression reader for KiCad netlists."""
+    tokens, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "()":
+            tokens.append(c)
+            i += 1
+        elif c.isspace():
+            i += 1
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 1
+                buf.append(text[j])
+                j += 1
+            tokens.append(("s", "".join(buf)))
+            i = j + 1
+        else:
+            j = i
+            while j < n and not text[j].isspace() and text[j] not in "()":
+                j += 1
+            tokens.append(("s", text[i:j]))
+            i = j
+    stack, cur = [], []
+    for t in tokens:
+        if t == "(":
+            stack.append(cur)
+            cur = []
+        elif t == ")":
+            done, cur = cur, stack.pop()
+            cur.append(done)
+        else:
+            cur.append(t[1])
+    return cur[0] if cur else []
+
+
+def _find(node, key):
+    return [x for x in node if isinstance(x, list) and x and x[0] == key]
+
+
+def _val(node, key, default=""):
+    f = _find(node, key)
+    return f[0][1] if f and len(f[0]) > 1 and isinstance(f[0][1], str) else default
+
+
+def read_netlist(path):
+    with open(path, encoding="utf-8") as f:
+        tree = _sexp(f.read())
+    comps = []
+    for blk in _find(tree, "components"):
+        for c in _find(blk, "comp"):
+            comps.append({"ref": _val(c, "ref"), "value": _val(c, "value"), "footprint": _val(c, "footprint")})
+    nets = []
+    for blk in _find(tree, "nets"):
+        for nt in _find(blk, "net"):
+            nodes = [(_val(nd, "ref"), _val(nd, "pin")) for nd in _find(nt, "node")]
+            nets.append({"name": _val(nt, "name"), "nodes": nodes})
+    return comps, nets
+
+
+def _fp_dirs(job):
+    dirs = [d for d in (job.get("footprint_dirs") or []) if d and os.path.isdir(d)]
+    for k in ("KICAD10_FOOTPRINT_DIR", "KICAD9_FOOTPRINT_DIR", "KICAD8_FOOTPRINT_DIR", "KICAD_FOOTPRINT_DIR"):
+        if os.environ.get(k) and os.path.isdir(os.environ[k]):
+            dirs.append(os.environ[k])
+    return dirs
+
+
+def _load_fp(dirs, lib_id):
+    lib, _, name = lib_id.partition(":")
+    for d in dirs:
+        p = os.path.join(d, lib + ".pretty")
+        if os.path.isdir(p):
+            fp = pcbnew.FootprintLoad(p, name)
+            if fp is not None:
+                return fp
+    raise KeyError(f"footprint {lib_id} not found in KiCad's libraries")
+
+
+def _bbox(fp):
+    """A footprint's outline box without its text (the call changed between KiCad versions)."""
+    try:
+        return fp.GetBoundingBox(False, False)
+    except TypeError:
+        return fp.GetBoundingBox()
+
+
+def build_board(board, job):
+    """Footprints from the netlist, connected, on a wide grid; then a board outline around them."""
+    comps, nets = read_netlist(job["netlist"])
+    dirs = _fp_dirs(job)
+    V, F = pcbnew.VECTOR2I, pcbnew.FromMM
+    for fp in list(board.GetFootprints()):
+        board.Remove(fp)
+    for t in list(board.GetTracks()):
+        board.Remove(t)
+    netinfo = {}
+    for n in nets:
+        ni = pcbnew.NETINFO_ITEM(board, n["name"])
+        board.Add(ni)
+        netinfo[n["name"]] = ni
+    pad_net = {(r, p): n["name"] for n in nets for r, p in n["nodes"]}
+    fps = []
+    for c in comps:
+        fp = _load_fp(dirs, c["footprint"])
+        fp.SetReference(c["ref"])
+        fp.SetValue(c["value"])
+        board.Add(fp)
+        for pad in fp.Pads():
+            name = pad_net.get((c["ref"], pad.GetNumber()))
+            if name:
+                pad.SetNet(netinfo[name])
+        fps.append(fp)
+    # Wide, simple placement: connectors down the left edge, everything else on a grid in reference order,
+    # with room between parts for thick tracks and hand soldering.
+    gap = float(job.get("spacing_mm") or 8)
+
+    def size(fp):
+        bb = _bbox(fp)
+        return pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())
+
+    def key(fp):
+        ref = fp.GetReference()
+        letters = "".join(ch for ch in ref if ch.isalpha())
+        num = "".join(ch for ch in ref if ch.isdigit())
+        order = {"U": 0, "Q": 1, "D": 2, "SW": 3, "R": 4, "C": 5, "L": 6}
+        return (order.get(letters, 7), letters, int(num or 0))
+
+    conns = sorted([f for f in fps if f.GetReference().startswith(("J", "P"))], key=key)
+    rest = sorted([f for f in fps if f not in conns], key=key)
+    cell_w = max([size(f)[0] for f in rest] + [5]) + gap
+    cell_h = max([size(f)[1] for f in rest] + [5]) + gap
+    cols = max(1, int(round(len(rest) ** 0.5 + 0.49)))
+    x0, y0 = 100.0, 100.0
+    left = max([size(f)[0] for f in conns] + [0])
+    y = y0
+    for f in conns:
+        w, h = size(f)
+        f.SetPosition(V(F(x0 + w / 2), F(y + h / 2)))
+        y += h + gap
+    gx = x0 + (left + gap if conns else 0)
+    for i, f in enumerate(rest):
+        r, c = divmod(i, cols)
+        f.SetPosition(V(F(gx + c * cell_w + cell_w / 2), F(y0 + r * cell_h + cell_h / 2)))
+    # outline: around the parts with a margin, or the size asked for
+    bb = None
+    for f in fps:
+        b = _bbox(f)
+        if bb is None:
+            bb = b
+        else:
+            bb.Merge(b)
+    margin = float(job.get("margin_mm") or 5)
+    ns = namespace(board)
+    if bb is not None:
+        bx, by = pcbnew.ToMM(bb.GetX()) - margin, pcbnew.ToMM(bb.GetY()) - margin
+        bw, bh = pcbnew.ToMM(bb.GetWidth()) + 2 * margin, pcbnew.ToMM(bb.GetHeight()) + 2 * margin
+        bw, bh = max(bw, float(job.get("width_mm") or 0)), max(bh, float(job.get("height_mm") or 0))
+        ns["outline_rect"](round(bw, 1), round(bh, 1), round(bx, 1), round(by, 1))
+    # wide tracks by default
+    width = F(float(job.get("track_mm") or 0.5))
+    try:
+        ds = board.GetDesignSettings()
+        try:
+            nc = ds.m_NetSettings.GetDefaultNetclass()
+        except Exception:
+            nc = ds.m_NetSettings.m_DefaultNetClass
+        nc.SetTrackWidth(width)
+        nc.SetClearance(F(float(job.get("clearance_mm") or 0.3)))
+    except Exception:
+        pass
+    return {"placed": len(fps), "nets": len(nets)}
+
+
+def autoroute(board, job):
+    dsn, ses = job["dsn"], job["ses"]
+    pcbnew.ExportSpecctraDSN(board, dsn)
+    return os.path.exists(dsn)
+
+
+def import_routes(board, job):
+    try:
+        ok = pcbnew.ImportSpecctraSES(board, job["ses"])
+    except TypeError:
+        ok = pcbnew.ImportSpecctraSES(job["ses"])
+    return bool(ok)
+
+
+def main():
+    with open(os.environ["STELLAI_JOB"], encoding="utf-8") as f:
+        job = json.load(f)
+    for k, v in (job.get("env") or {}).items():
+        os.environ[k] = v
+    out = {"ok": False}
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            if job.get("new"):
+                board = pcbnew.NewBoard(job["board"]) if hasattr(pcbnew, "NewBoard") else pcbnew.BOARD()
+            else:
+                board = pcbnew.LoadBoard(job["board"])
+            if job.get("netlist"):
+                out["before"] = report(board)
+                out["built"] = build_board(board, job)
+            if job.get("dsn"):
+                out["dsn"] = autoroute(board, job)
+            if job.get("import_ses"):
+                out["routed"] = import_routes(board, job)
+            if job.get("code"):
+                out["before"] = report(board)
+                exec(compile(job["code"], "<step>", "exec"), namespace(board))
+            out["after"] = report(board)
+            if job.get("save"):
+                pcbnew.SaveBoard(job["board"], board)
+        out["ok"] = True
+    except Exception as e:
+        tb = traceback.extract_tb(sys.exc_info()[2])
+        out.update(error=f"{type(e).__name__}: {e}"[:1500],
+                   where=[f"line {f.lineno}: {(f.line or '').strip()}" for f in tb if f.filename == "<step>"][-3:])
+    out["output"] = buf.getvalue()[-3000:]
+    OUT.write(MARK + json.dumps(out) + "\n")
+    OUT.flush()
+
+
+main()
+'''
+PCB_IMPORTS = {"pcbnew", "math", "random", "itertools", "functools", "collections", "statistics"}
+PCB_BAD_ATTRS = {"LoadBoard", "NewBoard", "CreateEmptyBoard", "WriteDRCReport", "PLOT_CONTROLLER", "Load", "Plot"}
+KICAD = {"python": None}
+
+
+def find_kicad_cli():
+    env = os.environ.get("STELLAI_KICAD_CLI", "")
+    if env and os.path.isfile(env):
+        return env
+    w = shutil.which("kicad-cli")
+    if w:
+        return w
+    if os.name == "nt":
+        for root in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+            found = sorted(glob.glob(os.path.join(root, "KiCad", "*", "bin", "kicad-cli.exe")), reverse=True)
+            if found:
+                return found[0]
+    for c in ("/usr/bin/kicad-cli", "/usr/local/bin/kicad-cli"):
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def find_kicad_python():
+    """A Python that can import pcbnew (KiCad's own on Windows), or "" (checked once per run)."""
+    if KICAD["python"] is not None:
+        return KICAD["python"]
+    cands = [os.environ.get("STELLAI_KICAD_PYTHON", "")]
+    cli = find_kicad_cli()
+    if cli and os.name == "nt":
+        cands.append(os.path.join(os.path.dirname(cli), "python.exe"))
+    cands += ["/usr/bin/python3", shutil.which("python3") or ""]
+    KICAD["python"] = ""
+    for c in cands:
+        if c and os.path.isfile(c):
+            try:
+                if subprocess.run([c, "-c", "import pcbnew"], capture_output=True, timeout=60,
+                                  creationflags=0x08000000 if os.name == "nt" else 0).returncode == 0:
+                    KICAD["python"] = c
+                    break
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return KICAD["python"]
+
+
+def _kicad_cli(args, timeout=300):
+    cli = find_kicad_cli()
+    if not cli:
+        raise RuntimeError("KiCad isn't installed on the server. Linux: re-run stellai-setup.sh and say yes to KiCad. "
+                           "Windows: install it from kicad.org. Then try again.")
+    p = subprocess.run([cli] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=timeout, stdin=subprocess.DEVNULL, creationflags=0x08000000 if os.name == "nt" else 0)
+    return p.returncode, ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
+
+
+def _project_files(d):
+    """(board .kicad_pcb, root schematic .kicad_sch or "") inside a version folder."""
+    pcbs = sorted(glob.glob(os.path.join(d, "*.kicad_pcb")))
+    pros = sorted(glob.glob(os.path.join(d, "*.kicad_pro")))
+    stem = os.path.splitext(os.path.basename(pros[0]))[0] if pros else (
+        os.path.splitext(os.path.basename(pcbs[0]))[0] if pcbs else "")
+    board = os.path.join(d, stem + ".kicad_pcb") if stem and os.path.isfile(os.path.join(d, stem + ".kicad_pcb")) \
+        else (pcbs[0] if pcbs else "")
+    sch = os.path.join(d, stem + ".kicad_sch") if stem and os.path.isfile(os.path.join(d, stem + ".kicad_sch")) else ""
+    return board, sch
+
+
+def _pcb_run(board, code="", save=False, timeout=180):
+    py = find_kicad_python()
+    if not py:
+        raise RuntimeError("KiCad's Python scripting (pcbnew) isn't available on the server, so board edits can't "
+                           "run. Checks, pictures and exports still work. Linux: install KiCad's Python module "
+                           "(it comes with the kicad package); Windows: it ships with KiCad.")
+    script = os.path.join(BLENDER["root"], ".worker", "stellai_pcb.py")
+    os.makedirs(os.path.dirname(script), exist_ok=True)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(PCB_RUNNER_PY)
+    return _run_marked([py, script], PCB_MARK, {"board": board, "code": code, "save": save}, timeout)
+
+
+def _summarize_violations(items, limit=12):
+    lines, counts = [], {}
+    for v in items:
+        sev = v.get("severity", "?")
+        counts[sev] = counts.get(sev, 0) + 1
+        if len(lines) < limit:
+            where = "; ".join(i.get("description", "")[:80] for i in (v.get("items") or [])[:2])
+            lines.append(f"[{sev}] {v.get('type', '')}: {v.get('description', '')}" + (f" ({where})" if where else ""))
+    return counts, lines
+
+
+def _pcb_checks(d):
+    board, sch = _project_files(d)
+    out = {}
+    tmp = os.path.join(BLENDER["root"], ".worker")
+    if board:
+        rpt = os.path.join(tmp, f"drc-{uuid.uuid4().hex[:8]}.json")
+        args = ["pcb", "drc", "--format", "json", "--severity-all", "--units", "mm", "-o", rpt]
+        if sch:
+            args.append("--schematic-parity")
+        _rc, text = _kicad_cli(args + [board])
+        try:
+            with open(rpt, encoding="utf-8") as f:
+                data = json.load(f)
+            counts, lines = _summarize_violations(data.get("violations", []))
+            out["drc"] = {"counts": counts, "unconnected": len(data.get("unconnected_items", [])),
+                          "schematic_mismatches": len(data.get("schematic_parity", [])), "top": lines}
+        except (OSError, ValueError):
+            out["drc"] = {"error": text[-600:] or "no report"}
+        _quiet_remove(rpt)
+    if sch:
+        rpt = os.path.join(tmp, f"erc-{uuid.uuid4().hex[:8]}.json")
+        _rc, text = _kicad_cli(["sch", "erc", "--format", "json", "--severity-all", "-o", rpt, sch])
+        try:
+            with open(rpt, encoding="utf-8") as f:
+                data = json.load(f)
+            items = [v for s in data.get("sheets", []) for v in s.get("violations", [])]
+            counts, lines = _summarize_violations(items)
+            out["erc"] = {"counts": counts, "top": lines}
+        except (OSError, ValueError):
+            out["erc"] = {"error": text[-600:] or "no report"}
+        _quiet_remove(rpt)
+    return out
+
+
+def _pcb_render(d, side="top"):
+    board, _ = _project_files(d)
+    if not board:
+        return None, "no board file to show"
+    side = side if side in ("top", "bottom", "front", "back", "left", "right") else "top"
+    image_id = uuid.uuid4().hex[:16]
+    png = os.path.join(DIAGRAM_DIR, image_id + ".png")
+    rc, text = _kicad_cli(["pcb", "render", "--side", side, "--width", "1400", "--height", "1000", "--quality",
+                           "basic", "-o", png, board], timeout=240)
+    if not os.path.exists(png):       # older kicad-cli: fewer options
+        rc, text = _kicad_cli(["pcb", "render", "-o", png, board], timeout=240)
+    if not os.path.exists(png):
+        return None, "KiCad couldn't draw the board (pictures need KiCad 9 or newer): " + text[-300:]
+    return image_id, ""
+
+
+def tool_pcb_project(args):
+    action = str(args.get("action", "status")).strip().lower()
+    if action == "status":
+        ver = ""
+        if find_kicad_cli():
+            try:
+                ver = _kicad_cli(["version"], timeout=30)[1].splitlines()[0]
+            except (OSError, IndexError, subprocess.TimeoutExpired):
+                ver = "?"
+        return {"kicad_cli": find_kicad_cli() or "not installed", "kicad_version": ver,
+                "board_scripting": bool(find_kicad_python()), "inbox_folder": _inbox(),
+                "projects_you_can_import": [f for f in sorted(os.listdir(_inbox())) if f.lower().endswith(
+                    (".zip", ".kicad_pcb")) or os.path.isdir(os.path.join(_inbox(), f))][:40],
+                "workspaces": PCB.list(), "active": _safe(lambda: PCB.name(""))}, "Checked PCB workspaces"
+    if action == "new":
+        name = PCB.start(args.get("name"))
+        v, path = PCB.next(name)
+        try:
+            if args.get("file"):
+                src = _pick_inbox_file(args.get("file"), ("zip", "kicad_pcb"))
+                if os.path.isdir(src):
+                    shutil.copytree(src, path)
+                elif src.lower().endswith(".zip"):
+                    import zipfile
+                    with zipfile.ZipFile(src) as z:
+                        for m in z.namelist():
+                            if m.startswith("/") or ".." in m.replace("\\", "/").split("/"):
+                                raise ValueError("that zip has unsafe paths in it")
+                        z.extractall(path)
+                    inner = [e for e in os.listdir(path) if not e.startswith(".")]
+                    if len(inner) == 1 and os.path.isdir(os.path.join(path, inner[0])):   # zip of a folder
+                        sub = os.path.join(path, inner[0])
+                        for e in os.listdir(sub):
+                            shutil.move(os.path.join(sub, e), path)
+                        os.rmdir(sub)
+                else:
+                    os.makedirs(path)
+                    shutil.copyfile(src, os.path.join(path, os.path.basename(src)))
+                    sch = src[:-len(".kicad_pcb")] + ".kicad_sch"
+                    if os.path.isfile(sch):
+                        shutil.copyfile(sch, os.path.join(path, os.path.basename(sch)))
+                if not _project_files(path)[0] and not _project_files(path)[1]:
+                    raise ValueError("no .kicad_pcb or .kicad_sch file in it")
+            else:
+                os.makedirs(path)
+                board = os.path.join(path, name + ".kicad_pcb")
+                w, h = float(args.get("width_mm") or 50), float(args.get("height_mm") or 50)
+                py = find_kicad_python()
+                if not py:
+                    raise RuntimeError("starting an empty board needs KiCad's Python (pcbnew); import a project "
+                                       "from the 3D inbox instead")
+                script = os.path.join(BLENDER["root"], ".worker", "stellai_pcb.py")
+                with open(script, "w", encoding="utf-8") as f:
+                    f.write(PCB_RUNNER_PY)
+                res = _run_marked([py, script], PCB_MARK, {"board": board, "new": True, "save": True,
+                                                           "code": f"outline_rect({w}, {h}, 100, 100)"}, 180)
+                if not res.get("ok"):
+                    raise RuntimeError(res.get("error") or "KiCad couldn't make the board")
+        except Exception:
+            shutil.rmtree(PCB.dir(name), ignore_errors=True)
+            raise
+        PCB.record(name, v, f"start: {args.get('file') or 'empty board'}")
+        PCB.activate(name)
+        board, sch = _project_files(path)
+        res = {"workspace": name, "version": v, "board": os.path.basename(board) or None,
+               "schematic": os.path.basename(sch) or None, "checks": _pcb_checks(path)}
+        img, why = _pcb_render(path)
+        if img:
+            res.update(image=img, title=f"{name} v{v}")
+        elif why:
+            res["picture"] = why
+        return res, f"Started PCB workspace {name} (v{v})"
+    if action in ("add_reference", "references", "clear_references"):
+        return PCB.refs_action(action, args)
+    name = PCB.name(args.get("name"))
+    if action == "open":
+        PCB.activate(name)
+        return {"workspace": name, "latest_version": PCB.latest(name), "recent": PCB.history(name)[-8:]}, f"Opened {name}"
+    if action == "history":
+        return {"workspace": name, "versions_on_disk": PCB.versions(name), "history": PCB.history(name)[-25:]}, \
+            f"History of {name}"
+    if action == "revert":
+        target = _int_version(args.get("version"))
+        if target not in PCB.versions(name):
+            raise ValueError(f"version {target} isn't on disk; available: {PCB.versions(name)[-15:]}")
+        v, path = PCB.next(name)
+        shutil.copytree(PCB.path(name, target), path)
+        PCB.record(name, v, f"back to v{target}")
+        return {"workspace": name, "version": v, "same_as": target}, f"Went back to v{target} (saved as v{v})"
+    if action == "export":
+        return _pcb_export(name, str(args.get("format", "fab")).lower().strip(". "))
+    raise ValueError("action must be status, new, open, history, revert, export, add_reference, references or "
+                     "clear_references")
+
+
+def _pcb_export(name, fmt):
+    import zipfile
+    v = PCB.latest(name)
+    d = PCB.path(name, v)
+    board, sch = _project_files(d)
+    outdir = PCB.dir(name, "exports")
+    os.makedirs(outdir, exist_ok=True)
+    stem = f"{name}-v{v:04d}"
+    made, problems = [], []
+
+    def run(args, path):
+        rc, text = _kicad_cli(args)
+        if os.path.exists(path):
+            made.append(path)
+        else:
+            problems.append(text[-300:] or f"{os.path.basename(path)} wasn't made")
+
+    if fmt in ("fab", "gerbers", "all"):
+        if not board:
+            raise ValueError("no board file in this project")
+        gdir = os.path.join(BLENDER["root"], ".worker", f"gerb-{uuid.uuid4().hex[:8]}")
+        os.makedirs(gdir)
+        _kicad_cli(["pcb", "export", "gerbers", "-o", gdir + os.sep, board])
+        _kicad_cli(["pcb", "export", "drill", "-o", gdir + os.sep, board])
+        zpath = os.path.join(outdir, stem + "-fab.zip")
+        files = sorted(os.listdir(gdir))
+        if files:
+            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in files:
+                    z.write(os.path.join(gdir, f), f)
+            made.append(zpath)
+        else:
+            problems.append("no Gerber or drill files came out")
+        shutil.rmtree(gdir, ignore_errors=True)
+    if fmt in ("bom", "all") and sch:
+        run(["sch", "export", "bom", "-o", os.path.join(outdir, stem + "-bom.csv"), sch], os.path.join(outdir, stem + "-bom.csv"))
+    if fmt in ("pos", "placement", "all") and board:
+        p = os.path.join(outdir, stem + "-positions.csv")
+        run(["pcb", "export", "pos", "--format", "csv", "--units", "mm", "-o", p, board], p)
+    if fmt in ("step", "3d", "all") and board:
+        p = os.path.join(outdir, stem + ".step")
+        run(["pcb", "export", "step", "--subst-models", "-o", p, board], p)
+        if os.path.exists(p):   # so the CAD Designer can build an enclosure around it
+            shutil.copyfile(p, os.path.join(_inbox(), stem + ".step"))
+    if fmt in ("pdf", "schematic", "all") and sch:
+        p = os.path.join(outdir, stem + "-schematic.pdf")
+        run(["sch", "export", "pdf", "-o", p, sch], p)
+    if fmt in ("project", "kicad", "all"):
+        zpath = os.path.join(outdir, stem + "-kicad-project.zip")
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+            for root, _dirs, files in os.walk(d):
+                for f in files:
+                    full = os.path.join(root, f)
+                    z.write(full, os.path.relpath(full, d))
+        made.append(zpath)
+    if not made and not problems:
+        raise ValueError("format must be fab (Gerbers + drill), bom, pos, step, pdf, project or all")
+    return {"workspace": name, "version": v, "files": made, "problems": problems,
+            "note": "The files are in this folder on the server computer. fab is the zip a board maker asks for."}, \
+        f"Exported {name} v{v}"
+
+
+def tool_pcb_check(args):
+    name = PCB.name(args.get("workspace"))
+    v = PCB.latest(name)
+    d = PCB.path(name, v)
+    out = {"workspace": name, "version": v, "checks": _pcb_checks(d)}
+    board, _ = _project_files(d)
+    if board and find_kicad_python():
+        try:
+            r = _pcb_run(board)
+            if r.get("ok"):
+                a = r["after"]
+                out["board"] = {k: a.get(k) for k in ("board_mm", "copper_layers", "nets", "tracks", "vias", "zones")}
+                out["footprints"] = a.get("footprints", [])[:80]
+        except RuntimeError as e:
+            out["board_error"] = str(e)
+    if str(args.get("render", True)).lower() not in ("false", "0", "no"):
+        img, why = _pcb_render(d, str(args.get("side", "top")).lower())
+        if img:
+            out.update(image=img, title=f"{name} v{v} ({args.get('side', 'top')})")
+        elif why:
+            out["picture"] = why
+    return out, f"Checked {name} v{v}"
+
+
+def tool_pcb_step(args):
+    code, goal = str(args.get("code", "")), str(args.get("goal", "")).strip()
+    if not goal or not code.strip():
+        raise ValueError("give goal (with millimetres and references like R3) and code")
+    probs = check_bpy_code(code, allowed=PCB_IMPORTS, extra_bad=PCB_BAD_ATTRS, bad_prefixes=("Export", "Import", "Plot"))
+    if probs:
+        return {"ok": False, "error": "the code was not run: " + "; ".join(probs)}, "Step blocked"
+    name = PCB.name(args.get("workspace"))
+    base = PCB.latest(name)
+    before_checks = _pcb_checks(PCB.path(name, base))
+    v, path = PCB.next(name)
+    shutil.copytree(PCB.path(name, base), path)
+    board, _ = _project_files(path)
+    if not board:
+        shutil.rmtree(path, ignore_errors=True)
+        raise ValueError("this project has no board file to edit")
+    try:
+        res = _pcb_run(board, code, save=True, timeout=max(30, min(600, int(args.get("timeout") or 180))))
+    except RuntimeError:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    if not res.get("ok"):
+        shutil.rmtree(path, ignore_errors=True)
+        return {"ok": False, "error": res.get("error"), "where": res.get("where"), "output": res.get("output", ""),
+                "note": f"Nothing was saved; the board is still v{base}."}, "Step failed"
+    b, a = res["before"], res["after"]
+    diff = _diff_by(b["footprints"], a["footprints"], "ref", ("x_mm", "y_mm", "rot_deg", "side", "value", "footprint"))
+    for k in ("board_mm", "tracks", "vias", "zones", "nets", "copper_layers"):
+        if b.get(k) != a.get(k):
+            diff.setdefault("board", {})[k] = {"from": b.get(k), "to": a.get(k)}
+    if not (diff["added"] or diff["removed"] or diff["changed"] or diff.get("board")):
+        shutil.rmtree(path, ignore_errors=True)
+        return {"ok": False, "error": "the code ran but nothing on the board changed", "output": res.get("output", ""),
+                "note": f"Nothing was saved; the board is still v{base}."}, "Step changed nothing"
+    PCB.record(name, v, goal)
+    after_checks = _pcb_checks(path)
+    out = {"version": v, "previous": base, "changes": diff, "checks_before": before_checks.get("drc", {}).get("counts"),
+           "checks_now": after_checks, "output": res.get("output", "")[-1500:]}
+    img, why = _pcb_render(path, str(args.get("side", "top")).lower())
+    if img:
+        out.update(image=img, title=f"{name} v{v}")
+        if str(args.get("check", True)).lower() not in ("false", "0", "no"):
+            out["visual_check"] = _vision_check(img, goal, diff, "one picture of the board from the "
+                                                + str(args.get("side", "top")), refs=PCB.ref_images(name))
+    elif why:
+        out["picture"] = why
+    return out, f"Saved {name} v{v}"
+
+
+_REF_ARGS = {"photos": {"type": "array", "items": {"type": "string"},
+                        "description": "For add_reference: photo ids from [photo ...] in the chat, or 'latest'"},
+             "labels": {"type": "array", "items": {"type": "string"},
+                        "description": "For add_reference: front, left, back, right, top or detail"}}
+
+SERVER_TOOLS["cad_project"] = (tool_cad_project, _fn(
+    "cad_project",
+    "CAD Designer workspaces (FreeCAD, millimetres, numbered versions). status: FreeCAD, workspaces, importable files. "
+    "new: start from an empty design or a .FCStd/.step/.stl/.iges in the 3D inbox. open, history, revert. export: "
+    "step (for other CAD), stl (for 3D printing), fcstd, brep, iges, or blender (sends an STL to the 3D Modeler's "
+    "inbox). add_reference / references / clear_references: photos or sketches to compare against.",
+    {"action": _p("status, new, open, history, revert, export, add_reference, references or clear_references"),
+     "name": _p("Workspace name (default: the active one)"), "file": _p("For new: a file in the 3D inbox"),
+     "version": _p("For revert", "integer"), "format": _p("For export: step (default), stl, fcstd, brep, iges, blender"),
+     **_REF_ARGS}, ["action"]))
+SERVER_TOOLS["cad_step"] = (tool_cad_step, _fn(
+    "cad_step",
+    "CAD Designer: run ONE small change on the current design as a FreeCAD Python script (headless, millimetres, Z up, "
+    "front faces -Y). Saved as a new version only if it works and changes something; then measured (sizes, volume, "
+    "solids, broken geometry), rendered and checked against goal and reference pictures. Use Part shapes: "
+    "Part.makeBox/makeCylinder/makeCone/makeSphere/makeTorus, shape.cut/fuse/common, makeFillet/makeChamfer, "
+    "Part.makePolygon/Face/extrude for profiles. Ready to use: doc, add(name, shape) (makes or replaces a part), "
+    "get(name), remove(name), hide(name), box(x, y, z, at), cylinder(r, h, at, axis), hole(d, depth, at, axis), "
+    "fillet(shape, r, edges), chamfer(shape, d, edges), Vector, Placement, Rotation. Keep one final part per real "
+    "object: build with shapes, then add() the result. No files or other imports.",
+    {"goal": _p("What this step should achieve with millimetres, e.g. 'add two M3 holes (3.2 mm) through the base, "
+                "30 mm apart, centred'"),
+     "code": _p("The FreeCAD script"),
+     "views": {"type": "array", "items": {"type": "string"},
+               "description": "front, right, back, left, top, three_quarter (default 4)"},
+     "check": _p("false skips the visual check", "boolean"), "workspace": _p("Default: the active workspace")},
+    ["goal", "code"]))
+SERVER_TOOLS["cad_inspect"] = (tool_cad_inspect, _fn(
+    "cad_inspect",
+    "CAD Designer: read the current design without changing it: parts with sizes (mm), positions, volumes, solids and "
+    "geometry problems. render=true adds pictures (and a comparison with reference pictures).",
+    {"render": _p("true for pictures", "boolean"),
+     "views": {"type": "array", "items": {"type": "string"}, "description": "Render angles"},
+     "workspace": _p("Default: the active workspace")}, []))
+SERVER_TOOLS["pcb_project"] = (tool_pcb_project, _fn(
+    "pcb_project",
+    "PCB Designer workspaces (KiCad projects with numbered versions). status: KiCad, workspaces, importable projects. "
+    "new: import a KiCad project (.zip, folder or .kicad_pcb in the 3D inbox) or start an empty board of width_mm x "
+    "height_mm. open, history, revert. export: fab (Gerbers + drill zip for a board maker), bom, pos (pick and "
+    "place), step (3D), pdf (schematic), project (zip of the KiCad files) or all. add_reference etc. as in CAD.",
+    {"action": _p("status, new, open, history, revert, export, add_reference, references or clear_references"),
+     "name": _p("Workspace name (default: the active one)"), "file": _p("For new: a project in the 3D inbox"),
+     "width_mm": _p("For an empty board", "number"), "height_mm": _p("For an empty board", "number"),
+     "version": _p("For revert", "integer"), "format": _p("For export: fab (default), bom, pos, step, pdf, project, all"),
+     **_REF_ARGS}, ["action"]))
+SERVER_TOOLS["pcb_check"] = (tool_pcb_check, _fn(
+    "pcb_check",
+    "PCB Designer: check the current board without changing it: KiCad's electrical rules check (schematic) and design "
+    "rules check (board: clearances, unrouted connections, mismatches with the schematic), board size, layers, nets, "
+    "footprint positions, and a picture.",
+    {"side": _p("Picture side: top (default) or bottom"), "render": _p("false skips the picture", "boolean"),
+     "workspace": _p("Default: the active workspace")}, []))
+SERVER_TOOLS["pcb_step"] = (tool_pcb_step, _fn(
+    "pcb_step",
+    "PCB Designer: run ONE small board change as a KiCad pcbnew script (millimetres; board coordinates, Y grows "
+    "downwards). Saved as a new version only if it works and changes something; then the design rules are checked "
+    "again and the board is pictured. Ready to use: board, pcbnew, mm(x) (to KiCad units), to_mm, fp(ref), "
+    "move(ref, x, y, rot), outline_rect(w, h, x, y), line(x1, y1, x2, y2, layer, width), track(x1, y1, x2, y2, width, "
+    "layer, net), text(s, x, y, size, layer). Schematic changes aren't scripted: guide the user in KiCad for those.",
+    {"goal": _p("What this step should achieve, e.g. 'move C3 within 2 mm of U1 pin 8 and rotate it 90°'"),
+     "code": _p("The pcbnew script"), "side": _p("Picture side: top (default) or bottom"),
+     "check": _p("false skips the visual check", "boolean"), "workspace": _p("Default: the active workspace")},
+    ["goal", "code"]))
+
+
+# ---- Circuit as code: a SKiDL script -> netlist + schematic -> wide placement -> Freerouting -> checks -----------
+# Stella writes the circuit (parts and connections) as Python; KiCad-compatible files come out of it. Boards are
+# laid out wide and simple (through-hole friendly, thick tracks) so early designs are easy to check and solder.
+# A small library on the server keeps sub-circuits that worked (recipes), what went wrong (notes) and pinouts the
+# user confirmed, so she gets better over time instead of guessing the same things again.
+SKIDL_MARK = "@@SKIDL@@"
+SKIDL_RUNNER_PY = r'''# StellAI circuit runner: runs a circuit written with SKiDL, checks it and writes a KiCad netlist (and a
+# schematic when SKiDL can draw one). The job comes as JSON in the file named by STELLAI_JOB. Written by
+# stellai_hub.py: edits here are overwritten.
+import contextlib
+import io
+import json
+import os
+import sys
+import traceback
+
+MARK = "@@SKIDL@@"
+OUT = sys.stdout
+
+
+def main():
+    with open(os.environ["STELLAI_JOB"], encoding="utf-8") as f:
+        job = json.load(f)
+    for k, v in (job.get("env") or {}).items():      # where KiCad's symbol and footprint libraries are
+        os.environ[k] = v
+    out = {"ok": False}
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            import skidl
+            ns = {"__name__": "stellai_circuit"}
+            exec("from skidl import *", ns)
+            names = [job.get("tool") or "KICAD9", "KICAD9", "KICAD8", "KICAD10", "KICAD7"]
+            for tname in names:
+                if hasattr(skidl, tname):
+                    try:
+                        skidl.set_default_tool(getattr(skidl, tname))
+                    except Exception:
+                        pass
+                    break
+            exec(compile(job["code"], "<circuit>", "exec"), ns)
+            circuit = skidl.default_circuit
+            erc_buf = io.StringIO()
+            with contextlib.redirect_stdout(erc_buf), contextlib.redirect_stderr(erc_buf):
+                try:
+                    skidl.ERC()
+                except Exception as e:
+                    print(f"ERC couldn't run: {e}")
+            parts = []
+            for p in circuit.parts:
+                parts.append({"ref": p.ref, "name": getattr(p, "name", ""), "value": str(getattr(p, "value", "") or ""),
+                              "footprint": str(getattr(p, "footprint", "") or ""),
+                              "pins": [f"{pin.num}:{pin.name}" for pin in p.pins][:40],
+                              "unconnected": [f"{pin.num}:{pin.name}" for pin in p.pins if not pin.is_connected()][:20]})
+            nets = []
+            for n in circuit.get_nets():
+                nets.append({"name": n.name, "pins": [f"{pin.part.ref}.{pin.num}({pin.name})" for pin in n.pins][:30]})
+            missing_fp = [p["ref"] for p in parts if not p["footprint"]]
+            out.update(parts=parts, nets=nets, erc=erc_buf.getvalue()[-3000:], missing_footprints=missing_fp)
+            if missing_fp:
+                raise ValueError("every part needs a footprint (footprint='Library:Name'); missing on: "
+                                 + ", ".join(missing_fp))
+            skidl.generate_netlist(file_=job["netlist"])
+            if job.get("schematic_dir"):
+                try:
+                    skidl.generate_schematic(filepath=job["schematic_dir"], top_name=job.get("name", "circuit"))
+                    out["schematic"] = True
+                except Exception as e:
+                    out["schematic"] = False
+                    out["schematic_note"] = f"no schematic drawing ({type(e).__name__}: {str(e)[:200]})"
+        out["ok"] = True
+    except Exception as e:
+        tb = traceback.extract_tb(sys.exc_info()[2])
+        out.update(error=f"{type(e).__name__}: {e}"[:1500],
+                   where=[f"line {f.lineno}: {(f.line or '').strip()}" for f in tb if f.filename == "<circuit>"][-3:])
+    out["output"] = buf.getvalue()[-3000:]
+    OUT.write(MARK + json.dumps(out) + "\n")
+    OUT.flush()
+
+
+main()
+'''
+SKIDL_IMPORTS = {"skidl", "math", "itertools", "functools", "collections"}
+SKIDL_BAD = {"lib_search_paths", "footprint_search_paths", "set_default_tool", "backup_parts", "load_backup_lib",
+             "set_query_backend", "ERC", "reset"}
+CIRCUIT = {"python": None, "lock": threading.Lock()}
+
+
+def _kicad_libs():
+    """KiCad's symbol and footprint folders, and environment variables that point SKiDL at them."""
+    roots = ["/usr/share/kicad", "/usr/local/share/kicad"]
+    cli = find_kicad_cli()
+    if cli:
+        roots.insert(0, os.path.normpath(os.path.join(os.path.dirname(cli), "..", "share", "kicad")))
+    sym = fpd = ""
+    for r in roots:
+        if not sym and os.path.isdir(os.path.join(r, "symbols")):
+            sym = os.path.join(r, "symbols")
+        if not fpd and os.path.isdir(os.path.join(r, "footprints")):
+            fpd = os.path.join(r, "footprints")
+    sym = os.environ.get("STELLAI_KICAD_SYMBOLS", sym)
+    fpd = os.environ.get("STELLAI_KICAD_FOOTPRINTS", fpd)
+    env = {}
+    for v in ("", "7", "8", "9", "10"):
+        if sym:
+            env[f"KICAD{v}_SYMBOL_DIR"] = sym
+        if fpd:
+            env[f"KICAD{v}_FOOTPRINT_DIR"] = fpd
+    return sym, fpd, env
+
+
+def find_skidl_python():
+    """A Python that can import skidl (its own folder from the setup script first), or "" (checked once)."""
+    if CIRCUIT["python"] is not None:
+        return CIRCUIT["python"]
+    base = os.path.dirname(CHATS_PATH) if CHATS_PATH else ""
+    cands = [os.environ.get("STELLAI_SKIDL_PYTHON", "")]
+    if base:
+        cands += [os.path.join(base, "skidl-venv", "bin", "python3"),
+                  os.path.join(base, "skidl-venv", "Scripts", "python.exe")]
+    cands += [find_kicad_python(), sys.executable, shutil.which("python3") or ""]
+    CIRCUIT["python"] = ""
+    for c in cands:
+        if c and os.path.isfile(c):
+            try:
+                if subprocess.run([c, "-c", "import skidl"], capture_output=True, timeout=90,
+                                  creationflags=0x08000000 if os.name == "nt" else 0).returncode == 0:
+                    CIRCUIT["python"] = c
+                    break
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return CIRCUIT["python"]
+
+
+def find_freerouting():
+    """(java, freerouting jar) or ("", "")."""
+    java = os.environ.get("STELLAI_JAVA", "") or shutil.which("java") or ""
+    jar = os.environ.get("STELLAI_FREEROUTING", "")
+    if not (jar and os.path.isfile(jar)):
+        dirs = [os.path.join(os.path.dirname(CHATS_PATH), "freerouting")] if CHATS_PATH else []
+        dirs.append(os.path.join(BLENDER["root"], "freerouting"))
+        jars = [j for d in dirs for j in sorted(glob.glob(os.path.join(d, "freerouting*.jar")), reverse=True)]
+        jar = jars[0] if jars else ""
+    return (java, jar) if java and jar else ("", "")
+
+
+def _kicad_major():
+    try:
+        m = re.search(r"(\d+)\.", _kicad_cli(["version"], timeout=30)[1])
+        return int(m.group(1)) if m else 9
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return 9
+
+
+# the library: recipes (sub-circuits that worked), notes (lessons) and confirmed pinouts
+def _lib_path():
+    return os.path.join(BLENDER["root"], "pcb", "library.json")
+
+
+def _lib():
+    try:
+        with open(_lib_path(), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("recipes", {})
+    d.setdefault("pinouts", {})
+    d.setdefault("notes", [])
+    return d
+
+
+def _lib_save(d):
+    os.makedirs(os.path.dirname(_lib_path()), exist_ok=True)
+    tmp = _lib_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
+    os.replace(tmp, _lib_path())
+
+
+def _part_key(name, footprint):
+    return f"{str(name).strip()}|{str(footprint).strip()}".lower()
+
+
+def _skidl_check(code):
+    return check_bpy_code(code, allowed=SKIDL_IMPORTS, extra_bad=SKIDL_BAD, bad_prefixes=("generate_",))
+
+
+def _pcb_runner_script():
+    script = os.path.join(BLENDER["root"], ".worker", "stellai_pcb.py")
+    os.makedirs(os.path.dirname(script), exist_ok=True)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(PCB_RUNNER_PY)
+    return script
+
+
+def _autoroute(board, passes, timeout, env):
+    """Board -> Specctra DSN -> Freerouting -> SES -> back onto the board. Returns a short report."""
+    java, jar = find_freerouting()
+    if not java:
+        return {"routed": False, "note": "the autorouter (Freerouting + Java) isn't installed on the server; parts "
+                                         "are placed and connected by ratsnest lines. Re-run the setup and say yes "
+                                         "to the autorouter, or route by hand in KiCad."}
+    py = find_kicad_python()
+    work = os.path.join(BLENDER["root"], ".worker", f"route-{uuid.uuid4().hex[:8]}")
+    os.makedirs(work)
+    dsn, ses = os.path.join(work, "board.dsn"), os.path.join(work, "board.ses")
+    try:
+        r = _run_marked([py, _pcb_runner_script()], PCB_MARK, {"board": board, "dsn": dsn, "ses": ses, "env": env}, 180)
+        if not r.get("ok") or not os.path.isfile(dsn):
+            return {"routed": False, "note": "KiCad couldn't export the board for the autorouter: "
+                                             + str(r.get("error") or "no file")[:300]}
+        base_cmd = [java, "-Djava.awt.headless=true", "-jar", jar, "-de", dsn, "-do", ses, "-mp", str(passes)]
+        tail = ""
+        for extra in (["--gui.enabled=false"], []):      # Freerouting 2.x needs the first, 1.x refuses it
+            try:
+                p = subprocess.run(base_cmd + extra, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=timeout, cwd=work, stdin=subprocess.DEVNULL,
+                                   creationflags=0x08000000 if os.name == "nt" else 0)
+                tail = ((p.stdout or "") + (p.stderr or ""))[-400:]
+            except subprocess.TimeoutExpired:
+                return {"routed": False, "note": f"the autorouter ran longer than {timeout} s and was stopped; the "
+                                                 "board is saved unrouted. Try more spacing or fewer parts."}
+            if os.path.isfile(ses):
+                break
+        if not os.path.isfile(ses):
+            return {"routed": False, "note": "the autorouter didn't produce a result: " + tail.strip()[-300:]}
+        r = _run_marked([py, _pcb_runner_script()], PCB_MARK,
+                        {"board": board, "ses": ses, "import_ses": True, "save": True, "env": env}, 180)
+        if not r.get("ok") or not r.get("routed"):
+            return {"routed": False, "note": "KiCad couldn't bring the routes back: " + str(r.get("error") or "")[:300]}
+        a = r.get("after", {})
+        return {"routed": True, "tracks": a.get("tracks"), "vias": a.get("vias")}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def tool_pcb_circuit(args):
+    code, goal = str(args.get("code", "")), str(args.get("goal", "")).strip()
+    if not goal or not code.strip():
+        raise ValueError("give goal (what the circuit does) and code (the SKiDL script)")
+    lib = _lib()
+    used = []
+    pre = []
+    for rname in args.get("recipes") or []:
+        rec = lib["recipes"].get(str(rname).strip().lower())
+        if not rec:
+            raise ValueError(f"no recipe called {rname}; pcb_library list shows the saved ones")
+        pre.append(f"# ---- recipe: {rname}\n" + rec["code"])
+        used.append(str(rname).strip().lower())
+    full = "\n\n".join(pre + [code])
+    probs = _skidl_check(full)
+    if probs:
+        return {"ok": False, "error": "the script was not run: " + "; ".join(probs)}, "Circuit blocked"
+    sp = find_skidl_python()
+    if not sp:
+        raise RuntimeError("SKiDL (circuit as code) isn't installed on the server. Linux: re-run stellai-setup.sh "
+                           "and say yes to the PCB Designer; Windows: pip install skidl into KiCad's Python.")
+    if not find_kicad_python():
+        raise RuntimeError("building a board needs KiCad's Python (pcbnew) on the server")
+    # workspace: a new name starts one, otherwise the active (or named) one gets a new version
+    wanted = str(args.get("workspace") or "").strip().lower()
+    if wanted and not PCB.versions(wanted):
+        name = PCB.start(wanted)
+    else:
+        name = PCB.name(wanted)
+    prev = PCB.versions(name)
+    v, path = PCB.next(name)
+    os.makedirs(path)
+    stem = name
+    sym, fpd, env = _kicad_libs()
+    major = _kicad_major()
+    try:
+        net = os.path.join(path, stem + ".net")
+        res = _run_marked([sp, _skidl_script()], SKIDL_MARK,
+                          {"code": full, "netlist": net, "name": stem, "tool": f"KICAD{major}", "env": env,
+                           "schematic_dir": path if str(args.get("schematic", True)).lower() not in ("false", "0", "no")
+                           else ""}, max(30, min(600, int(args.get("timeout") or 240))))
+        if not res.get("ok"):
+            shutil.rmtree(path, ignore_errors=True)
+            return {"ok": False, "error": res.get("error"), "where": res.get("where"), "erc": res.get("erc", ""),
+                    "output": res.get("output", "")[-1500:],
+                    "note": "Nothing was saved." + (f" The board is still v{prev[-1]}." if prev else "")}, \
+                "Circuit failed"
+        board = os.path.join(path, stem + ".kicad_pcb")
+        job = {"board": board, "new": True, "netlist": net, "save": True, "env": env, "footprint_dirs": [fpd],
+               "spacing_mm": args.get("spacing_mm") or 8, "track_mm": args.get("track_mm") or 0.5,
+               "clearance_mm": args.get("clearance_mm") or 0.3, "margin_mm": args.get("margin_mm") or 5,
+               "width_mm": args.get("width_mm") or 0, "height_mm": args.get("height_mm") or 0}
+        if prev and str(args.get("keep_placement", True)).lower() not in ("false", "0", "no"):
+            old_board, _ = _project_files(PCB.path(name, prev[-1]))
+            if old_board:
+                job["keep_from"] = old_board
+        b = _run_marked([find_kicad_python(), _pcb_runner_script()], PCB_MARK, job, 300)
+        if not b.get("ok"):
+            shutil.rmtree(path, ignore_errors=True)
+            return {"ok": False, "error": "the circuit is fine but the board couldn't be built: " + str(b.get("error")),
+                    "parts": res.get("parts"), "note": "Nothing was saved. A wrong footprint name is the usual cause "
+                                                       "(Library:Footprint, as in KiCad)."}, "Board failed"
+        out = {"workspace": name, "version": v, "parts": len(res.get("parts", [])), "nets": len(res.get("nets", [])),
+               "placed": b.get("built"), "erc": (res.get("erc") or "").strip()[-1500:] or "no problems reported",
+               "schematic": res.get("schematic", False)}
+        if res.get("schematic_note"):
+            out["schematic_note"] = res["schematic_note"]
+        if str(args.get("route", True)).lower() not in ("false", "0", "no"):
+            out["routing"] = _autoroute(board, max(5, min(200, int(args.get("passes") or 40))),
+                                        max(60, min(1800, int(args.get("route_timeout") or 600))), env)
+        else:
+            out["routing"] = {"routed": False, "note": "not routed (route=false)"}
+    except Exception:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    with open(os.path.join(path, "circuit.py"), "w", encoding="utf-8") as f:   # the source, for the next change
+        f.write(full)
+    PCB.record(name, v, "circuit: " + goal)
+    PCB.activate(name)
+    # parts whose pinout nobody has confirmed yet: the user should check them against the datasheet
+    with CIRCUIT["lock"]:
+        lib = _lib()
+        for u in used:
+            lib["recipes"][u]["uses"] = lib["recipes"][u].get("uses", 0) + 1
+        if used:
+            _lib_save(lib)
+    simple = ("device:r", "device:c", "device:c_polarized", "device:led", "device:d", "device:l")
+    unknown = []
+    for p in res.get("parts", []):
+        if _part_key(p.get("name"), p.get("footprint")) in lib["pinouts"]:
+            continue
+        if any(str(p.get("name", "")).lower() == s.split(":")[1] for s in simple):
+            continue
+        unknown.append({"ref": p["ref"], "part": p.get("name"), "footprint": p.get("footprint"),
+                        "pins": p.get("pins", [])[:24]})
+    if unknown:
+        out["verify_with_user"] = unknown[:12]
+        out["verify_note"] = ("These parts' pin numbers aren't confirmed yet. Show the user the pins and ask them to "
+                              "check against the datasheet or the real part; when they say it's right, save it with "
+                              "pcb_library confirm_pinout so it's trusted next time.")
+    floating = [f"{p['ref']}: {', '.join(p['unconnected'][:6])}" for p in res.get("parts", []) if p.get("unconnected")]
+    if floating:
+        out["unconnected_pins"] = floating[:15]
+    out["checks"] = _pcb_checks(path)
+    img, why = _pcb_render(path, str(args.get("side", "top")).lower())
+    if img:
+        out.update(image=img, title=f"{name} v{v}")
+        if str(args.get("check", True)).lower() not in ("false", "0", "no"):
+            out["visual_check"] = _vision_check(img, goal, {"parts": out["parts"], "nets": out["nets"]},
+                                                "one picture of the board from the top", refs=PCB.ref_images(name))
+    elif why:
+        out["picture"] = why
+    out["library_tip"] = ("If the user confirms this works (tested or looks right), offer to save the useful part as a "
+                          "recipe with pcb_library save_recipe; if something was wrong, save what you learned with "
+                          "pcb_library note.")
+    return out, f"Built {name} v{v} from the circuit"
+
+
+def _skidl_script():
+    script = os.path.join(BLENDER["root"], ".worker", "stellai_skidl.py")
+    os.makedirs(os.path.dirname(script), exist_ok=True)
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(SKIDL_RUNNER_PY)
+    return script
+
+
+def tool_pcb_library(args):
+    action = str(args.get("action", "list")).strip().lower()
+    with CIRCUIT["lock"]:
+        lib = _lib()
+        name = str(args.get("name", "")).strip().lower()
+        if action == "list":
+            q = str(args.get("query", "")).lower()
+            recs = [{"name": n, "description": r.get("description", ""), "confirmed": r.get("confirmed", False),
+                     "uses": r.get("uses", 0)} for n, r in sorted(lib["recipes"].items())
+                    if not q or q in n or q in r.get("description", "").lower()]
+            pins = [{"part": p.get("part"), "footprint": p.get("footprint"), "source": p.get("source", "")}
+                    for p in lib["pinouts"].values() if not q or q in json.dumps(p).lower()]
+            notes = [n for n in lib["notes"] if not q or q in n.get("text", "").lower()][-15:]
+            return {"recipes": recs[:60], "confirmed_pinouts": pins[:80], "notes": notes,
+                    "tools": {"skidl": bool(find_skidl_python()), "kicad_python": bool(find_kicad_python()),
+                              "autorouter": bool(find_freerouting()[0])}}, "Read the PCB library"
+        if action == "get":
+            rec = lib["recipes"].get(name)
+            if not rec:
+                raise ValueError(f"no recipe called {name}")
+            return {"name": name, **rec}, f"Read recipe {name}"
+        if action == "save_recipe":
+            code = str(args.get("code", ""))
+            if not WS_NAME.fullmatch(name or "-") or not code.strip():
+                raise ValueError("give name (lowercase-with-dashes) and code (SKiDL, ideally a @subcircuit function)")
+            probs = _skidl_check(code)
+            if probs:
+                return {"ok": False, "error": "not saved: " + "; ".join(probs)}, "Recipe blocked"
+            old = lib["recipes"].get(name, {})
+            lib["recipes"][name] = {"description": str(args.get("description", old.get("description", "")))[:400],
+                                    "code": code, "confirmed": False, "uses": old.get("uses", 0),
+                                    "notes": old.get("notes", []), "saved_at": int(time.time())}
+            _lib_save(lib)
+            return {"saved": name, "confirmed": False,
+                    "note": "Saved as a draft; mark it confirmed once the user says it works."}, f"Saved recipe {name}"
+        if action == "confirm_recipe":
+            if name not in lib["recipes"]:
+                raise ValueError(f"no recipe called {name}")
+            lib["recipes"][name]["confirmed"] = True
+            _lib_save(lib)
+            return {"confirmed": name}, f"Confirmed recipe {name}"
+        if action == "note":
+            text = str(args.get("text", "")).strip()
+            if not text:
+                raise ValueError("give text: what went wrong and what fixed it")
+            entry = {"text": text[:600], "at": int(time.time())}
+            if name and name in lib["recipes"]:
+                lib["recipes"][name].setdefault("notes", []).append(entry)
+            else:
+                lib["notes"] = (lib["notes"] + [entry])[-200:]
+            _lib_save(lib)
+            return {"noted": text[:120]}, "Saved a PCB note"
+        if action == "confirm_pinout":
+            part, fp = str(args.get("part", "")).strip(), str(args.get("footprint", "")).strip()
+            if not part or not fp:
+                raise ValueError("give part (the symbol, e.g. Regulator_Linear:AMS1117-3.3 or its name) and footprint")
+            lib["pinouts"][_part_key(part.split(":")[-1], fp)] = {
+                "part": part, "footprint": fp, "pins": str(args.get("pins", ""))[:1500],
+                "source": str(args.get("source", "the user confirmed it"))[:200], "at": int(time.time())}
+            _lib_save(lib)
+            return {"confirmed": f"{part} on {fp}"}, f"Confirmed pinout of {part}"
+        if action == "forget":
+            gone = lib["recipes"].pop(name, None) is not None
+            _lib_save(lib)
+            return {"forgot": name if gone else None}, f"Forgot recipe {name}" if gone else "Nothing to forget"
+    raise ValueError("action must be list, get, save_recipe, confirm_recipe, note, confirm_pinout or forget")
+
+
+SERVER_TOOLS["pcb_circuit"] = (tool_pcb_circuit, _fn(
+    "pcb_circuit",
+    "PCB Designer, circuit as code: write the whole circuit as a SKiDL Python script (parts + connections) and get a "
+    "KiCad netlist, a schematic, and a board with every part placed on a wide grid (connectors on the left), thick "
+    "tracks and an outline, autorouted with Freerouting, then checked (ERC, DRC) and pictured. Each run is a new "
+    "version; parts keep the places they had. Script basics (from skidl import * is done): "
+    "r = Part('Device', 'R', value='1k', footprint='Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal'); "
+    "vcc, gnd = Net('VCC'), Net('GND'); vcc += r[1]; r[2] & led['A']; led['K'] += gnd. EVERY part needs a real KiCad "
+    "footprint (prefer through-hole: _THT, PinHeader_1x02_P2.54mm_Vertical for connectors). Name nets; give power "
+    "nets a power flag or a connector. Start simple; reuse recipes from pcb_library.",
+    {"goal": _p("What the circuit does, e.g. '5 V USB in, 3.3 V regulator, power LED, 2-pin header out'"),
+     "code": _p("The SKiDL script"),
+     "workspace": _p("Workspace name: a new name starts one; default: the active workspace"),
+     "recipes": {"type": "array", "items": {"type": "string"},
+                 "description": "Saved recipe names to include before the script (their functions become usable)"},
+     "route": _p("false skips autorouting", "boolean"), "spacing_mm": _p("Gap between parts (default 8)", "number"),
+     "track_mm": _p("Track width (default 0.5)", "number"), "width_mm": _p("Minimum board width", "number"),
+     "height_mm": _p("Minimum board height", "number"),
+     "keep_placement": _p("false re-places every part on the grid", "boolean"),
+     "check": _p("false skips the visual check", "boolean")},
+    ["goal", "code"]))
+SERVER_TOOLS["pcb_library"] = (tool_pcb_library, _fn(
+    "pcb_library",
+    "PCB Designer's memory of what works. list (query optional): saved recipes (sub-circuits as SKiDL functions), "
+    "confirmed pinouts, lessons. get: a recipe's code. save_recipe: keep a working sub-circuit (only after it built "
+    "cleanly; marked draft). confirm_recipe: the user said it works. note: what went wrong and the fix (name ties it "
+    "to a recipe). confirm_pinout: the user checked a part's pins (part, footprint, pins, source). forget: a recipe.",
+    {"action": _p("list, get, save_recipe, confirm_recipe, note, confirm_pinout or forget"),
+     "name": _p("Recipe name (lowercase-with-dashes)"), "description": _p("For save_recipe: what it does, values"),
+     "code": _p("For save_recipe: SKiDL code, ideally @subcircuit def name(...)"),
+     "text": _p("For note"), "query": _p("For list: filter words"),
+     "part": _p("For confirm_pinout: the symbol"), "footprint": _p("For confirm_pinout"),
+     "pins": _p("For confirm_pinout: e.g. 1=GND 2=VOUT 3=VIN"), "source": _p("For confirm_pinout: datasheet etc.")},
+    ["action"]))
+
+
+import hashlib
+
+# ---- Auto mode: Stella picks the right mode for each message ----------------------------------------
+# A General chat routes every message: a quick keyword score (instant), sticky by default, switching only when
+# it's sure, never mid-job without a clear topic change, and learning from the user's corrections. Each switch
+# starts a "lane"; lanes in other modes are folded into short notes so one long chat stays focused.
+AUTO_MODES = {
+    "general": ("General", None),
+    "programmer": ("Programmer", re.compile(
+        r"\b(code|coding|kotlin|python|javascript|typescript|java|rust|c\+\+|function|class|bug|debug|compile|"
+        r"stack ?trace|exception|api|endpoint|sql|regex|refactor|unit tests?|apk|gradle|android app|web ?app|"
+        r"repo|git|github|commit|pull request|script|app (idea|design|feature)|build an app|making an app)\b", re.I)),
+    "electronics": ("Electronics", re.compile(
+        r"\b(resistor|capacitor|transistor|mosfet|voltage|current|ohm|amps?|led|arduino|esp32|esp8266|raspberry pi|"
+        r"pico|firmware|microcontroller|sensor|wiring|solder|multimeter|i2c|spi|uart|gpio|op-?amp|power supply)\b", re.I)),
+    "modeler": ("3D Modeler", re.compile(
+        r"\b(blender|3d model|vrm|vroid|avatar model|mesh|sculpt|uv|rig(ged|ging)?|armature|texture|glb|fbx|"
+        r"character model|low ?poly|retopo)\b", re.I)),
+    "cad": ("CAD Designer", re.compile(
+        r"\b(freecad|cad|bracket|enclosure|mount(ing)? (plate|bracket)|stl|step file|3d print(ed|ing)?|fillet|"
+        r"chamfer|tolerance|m[2-6] (screw|bolt|hole)s?|fan duct|adapter plate|standoff|case for)\b", re.I)),
+    "pcb": ("PCB Designer", re.compile(
+        r"\b(pcb|kicad|circuit board|schematic|gerbers?|footprints?|traces?|copper|drc|erc|silkscreen|"
+        r"via|netlist|board layout|jlcpcb|pcbway)\b", re.I)),
+    "writer": ("Writer", re.compile(
+        r"\b(novel|chapter|short story|my story|character arc|plot|poem|fiction|manuscript|dialogue scene)\b", re.I)),
+    "tutor": ("Tutor", re.compile(r"\b(teach me|explain like|help me (learn|understand)|quiz me|homework|study)\b",
+                                  re.I)),
+    "brainstorm": ("Brainstorm", re.compile(r"\b(brainstorm|ideas for|give me ideas|name ideas)\b", re.I)),
+}
+AUTO_WORK_MODES = {"modeler", "cad", "pcb"}        # modes with an open job: harder to leave by accident
+AUTO_TOPIC_CUE = re.compile(
+    r"\b(different (project|topic|thing)|something (else|different)|new (topic|project)|unrelated|switch(ing)? gears|"
+    r"another (project|thing)|change of topic|moving on|on another note|separate project|next,? (can|could|let's))\b",
+    re.I)
+AUTO_SOFT_CUE = re.compile(r"\b(now|next|then|after that|also)\b.{0,30}\b(design|make|build|do|help|create|need|want|"
+                           r"work on|start)\b|\bfor (my|the|a) (other|new|second)\b", re.I)
+AUTO_BACK = re.compile(r"\b(?:back to|return to|returning to|go back to)\s+(?:the |my |our )?([a-z0-9 '-]{2,40})",
+                       re.I)
+AUTO_COMMAND = re.compile(
+    r"\b(?:switch|change|go|move|put me)\s+(?:back\s+)?(?:to|into)\s+(?:the\s+)?([a-z0-9 ]{2,24}?)(?:\s+mode)?\b|"
+    r"\buse\s+(?:the\s+)?([a-z0-9 ]{2,24}?)\s+mode\b", re.I)
+AUTO_STATE = {"lock": threading.Lock(), "path": ""}
+
+
+def _auto_db():
+    try:
+        with open(AUTO_STATE["path"], encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"chats": {}, "learned": []}
+
+
+def _auto_save(db):
+    os.makedirs(os.path.dirname(AUTO_STATE["path"]), exist_ok=True)
+    tmp = AUTO_STATE["path"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f)
+    os.replace(tmp, AUTO_STATE["path"])
+
+
+def _fingerprint(text):
+    t = re.sub(r"\(image:[0-9a-f]{16}\)|!\[[^\]]*\]|\[photo [0-9a-f]{16}\]", "", str(text or "")).lower()
+    return hashlib.sha1(re.sub(r"\s+", " ", t).strip()[:300].encode()).hexdigest()[:16]
+
+
+def _words(text):
+    return set(re.findall(r"[a-z0-9]{3,}", str(text).lower()))
+
+
+def _mode_by_name(name):
+    n = re.sub(r"\s+", " ", str(name or "").lower()).strip()
+    n = re.sub(r"\b(mode|designer|the)\b", "", n).strip()
+    aliases = {"general": "general", "normal": "general", "default": "general", "chat": "general",
+               "code": "programmer", "coding": "programmer", "programmer": "programmer", "programming": "programmer",
+               "electronics": "electronics", "3d": "modeler", "3d modeler": "modeler", "modeler": "modeler",
+               "blender": "modeler", "modeling": "modeler", "cad": "cad", "freecad": "cad", "pcb": "pcb",
+               "kicad": "pcb", "circuit board": "pcb", "writer": "writer", "writing": "writer", "tutor": "tutor",
+               "brainstorm": "brainstorm"}
+    return aliases.get(n) or (n if n in AUTO_MODES else "")
+
+
+def route_mode(data):
+    """Which mode the next reply should use. In: chat_id, text, level (auto|ask|off), forced (a mode the user
+    chose for this message), current (the mode the chat was in). Out: mode, switched, suggest, reason."""
+    chat = str(data.get("chat_id") or "")[:80]
+    text = str(data.get("text") or "")[:4000]
+    level = str(data.get("level") or "auto").lower()
+    forced = str(data.get("forced") or "")
+    with AUTO_STATE["lock"]:
+        db = _auto_db()
+        lanes = db["chats"].setdefault(chat, {"lanes": []})["lanes"] if chat else []
+        current = str(data.get("current") or (lanes[-1]["mode"] if lanes else "general"))
+        if current not in AUTO_MODES:
+            current = "general"
+        mode, reason, suggest = current, "same topic", None
+        cmd = AUTO_COMMAND.search(text)
+        cmd_mode = _mode_by_name(next((g for g in cmd.groups() if g), "")) if cmd else ""
+        if forced in AUTO_MODES:
+            mode, reason = forced, "you chose it"
+            if text.strip():    # learn: this kind of message belongs in this mode
+                db["learned"] = ([l for l in db.get("learned", []) if _fingerprint(l["text"]) != _fingerprint(text)]
+                                 + [{"text": text[:300], "mode": forced}])[-300:]
+        elif cmd_mode:
+            mode, reason = cmd_mode, "you asked to switch"
+        elif AUTO_BACK.search(text) and len(lanes) > 1:
+            # "back to the app": the earlier topic whose first message shares the most words
+            want = _words(AUTO_BACK.search(text).group(1))
+            best_lane = max(lanes[:-1], key=lambda l: len(want & _words(l["title"])), default=None)
+            if best_lane and want & _words(best_lane["title"]):
+                mode, reason = best_lane["mode"], "back to an earlier topic"
+        elif level != "off":
+            weight = {"modeler": 3, "cad": 3, "pcb": 3}
+            scores = {m: len(rx.findall(text)) * weight.get(m, 2) for m, (_n, rx) in AUTO_MODES.items() if rx}
+            words = _words(text)
+            for l in db.get("learned", []):      # corrections the user made before
+                lw = _words(l["text"])
+                if lw and len(words & lw) / max(1, len(words | lw)) >= 0.5 and l["mode"] in scores:
+                    scores[l["mode"]] += 4
+            best = max(scores, key=lambda m: scores[m]) if scores else "general"
+            top, here = scores.get(best, 0), scores.get(current, 0)
+            cue = bool(AUTO_TOPIC_CUE.search(text))
+            soft = cue or bool(AUTO_SOFT_CUE.search(text))
+            if top == 0:
+                if cue and current != "general":
+                    mode, reason = "general", "new topic, nothing specific"
+                else:
+                    reason = "follow-up" if len(text.split()) <= 12 else "same topic"
+            elif best == current or top <= here:
+                pass
+            elif current in AUTO_WORK_MODES and not soft and top < 6:
+                suggest, reason = best, "in the middle of a job"
+            elif top >= here + 2:
+                mode, reason = best, "new topic" if soft else "the message is about this"
+            else:
+                suggest, reason = best, "not sure"
+                pick = _helper_mode(text, current, best)
+                if pick == best:
+                    mode, suggest, reason = best, None, "the message is about this"
+                elif pick == current:
+                    suggest, reason = None, "same topic"
+            if level == "ask" and mode != current:
+                suggest, mode, reason = mode, current, "asking first"
+        switched = mode != current
+        if chat:
+            if not lanes or switched:
+                lanes.append({"mode": mode, "start": _fingerprint(text), "title": text.strip()[:80], "at": int(time.time())})
+                del lanes[:-40]
+            db["chats"][chat]["lanes"] = lanes
+            if len(db["chats"]) > 2000:
+                for k in sorted(db["chats"], key=lambda k: (db["chats"][k]["lanes"] or [{"at": 0}])[-1]["at"])[:200]:
+                    db["chats"].pop(k, None)
+            _auto_save(db)
+    return {"mode": mode, "name": AUTO_MODES[mode][0], "previous": current, "switched": switched,
+            "suggest": suggest if suggest and suggest != mode else None,
+            "suggest_name": AUTO_MODES[suggest][0] if suggest and suggest != mode else None, "reason": reason}
+
+
+def _helper_mode(text, current, best):
+    """Asks the helper model which of two modes fits when the keywords can't tell (only when a helper runs)."""
+    if not helper_up() or not text.strip():
+        return ""
+    names = {current: AUTO_MODES[current][0], best: AUTO_MODES[best][0]}
+    body = {"model": "local", "temperature": 0, "max_tokens": 20, "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": "You sort a user's chat message into the assistant mode that "
+                          "should answer it. Answer with the mode id only."},
+                         {"role": "user", "content": f"Modes: {current} = {names[current]} (the chat's current "
+                          f"mode), {best} = {names[best]}.\nMessage: {text[:600]}\nWhich mode id?"}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "mode", "schema": {
+                "type": "object", "properties": {"mode": {"type": "string", "enum": [current, best]}},
+                "required": ["mode"]}}}}
+    try:
+        out = _quick_model(body, timeout=8, helper_timeout=6)["choices"][0]["message"].get("content") or ""
+        return str(json.loads(re.search(r"\{[\s\S]*\}", out).group(0)).get("mode", ""))
+    except (urllib.error.URLError, OSError, ValueError, AttributeError, KeyError, IndexError):
+        return ""
+
+
+FACT_LINE = re.compile(r"(\d+(\.\d+)?\s?(mm|cm|m\b|v\b|volts?|ma\b|a\b|amps?|ohms?|k\b|uf|nf|pf|mhz|ghz|°|deg|"
+                       r"%|gb|mb)|\bv\d{1,4}\b|version \d+|\b(decided|we'll|let's go with|use the|chose|picked|"
+                       r"agreed|must|needs? to|part number|model number)\b)", re.I)
+
+
+def _lane_facts(msgs):
+    """Short, verbatim facts from a folded lane: lines with measurements, versions and decisions."""
+    facts, seen = [], set()
+    for m in msgs:
+        for line in re.split(r"(?<=[.!?])\s+|\n", str(m.get("content") or "")):
+            line = line.strip(" -*•#")
+            if 12 <= len(line) <= 220 and FACT_LINE.search(line) and line.lower() not in seen:
+                seen.add(line.lower())
+                facts.append(line)
+    return facts[-10:]
+
+
+def fold_lanes(chat_id, msgs):
+    """(indices of messages to leave out, note about them) for a General chat that switched topics."""
+    with AUTO_STATE["lock"]:
+        lanes = _auto_db()["chats"].get(str(chat_id or ""), {}).get("lanes", [])
+    if len(lanes) < 2:
+        return set(), ""
+    starts = {}
+    for i, m in enumerate(msgs):
+        if m.get("role") == "user":
+            fp = _fingerprint(m.get("content"))
+            for li, lane in enumerate(lanes):
+                if lane["start"] == fp and li not in starts:
+                    starts[li] = i
+    if not starts:
+        return set(), ""
+    current = lanes[-1]["mode"]
+    order = sorted(starts.items(), key=lambda x: x[1])
+    drop, notes = set(), []
+    for k, (li, begin) in enumerate(order):
+        end = order[k + 1][1] if k + 1 < len(order) else len(msgs)
+        lane = lanes[li]
+        if lane["mode"] == current or li == len(lanes) - 1:
+            continue
+        drop.update(range(begin, end))
+        facts = _lane_facts(msgs[begin:end])
+        notes.append(f"- [{AUTO_MODES.get(lane['mode'], ('General',))[0]}] \"{lane['title']}\"" +
+                     ("; facts: " + " | ".join(facts) if facts else ""))
+    if not drop:
+        return set(), ""
+    note = ("Earlier topics in this chat, folded to keep you focused (the full messages are saved; search_chats "
+            "finds them if exact details are needed):\n" + "\n".join(notes[-8:]))
+    return drop, note
+
+
+def tool_switch_mode(args):
+    mode = _mode_by_name(args.get("mode")) or str(args.get("mode") or "")
+    if mode not in AUTO_MODES:
+        raise ValueError(f"mode must be one of: {', '.join(AUTO_MODES)}")
+    chat = str(args.get("conversation_id") or "")
+    if chat:
+        with AUTO_STATE["lock"]:
+            db = _auto_db()
+            lanes = db["chats"].setdefault(chat, {"lanes": []})["lanes"]
+            if not lanes or lanes[-1]["mode"] != mode:
+                lanes.append({"mode": mode, "start": _fingerprint(args.get("message") or ""),
+                              "title": str(args.get("reason") or "")[:80], "at": int(time.time())})
+            _auto_save(db)
+    return {"switched_to": mode, "name": AUTO_MODES[mode][0],
+            "note": "Your instructions for that mode apply from your next step. Carry over any facts the user "
+                    "will need (sizes, parts, decisions) and say you switched."}, f"Switched to {AUTO_MODES[mode][0]}"
+
+
+SERVER_TOOLS["switch_mode"] = (tool_switch_mode, _fn(
+    "switch_mode",
+    "Auto mode: switch this chat to the mode that fits what the user is asking now, when the automatic choice "
+    "missed it (e.g. the request is clearly CAD work but you're in General). Don't switch for small follow-ups.",
+    {"mode": _p("general, programmer, electronics, modeler (Blender), cad (FreeCAD), pcb (KiCad), writer, tutor or "
+                "brainstorm"),
+     "reason": _p("A few words on why")}, ["mode"]))
+
+
 def run_server_tool(name, args):
     entry = SERVER_TOOLS.get(name)
     if not entry:
@@ -5620,6 +8758,37 @@ def self_test():
         compile(BLENDER_WORKER_PY, "worker", "exec")
         compile(SHAPE_PY, "shape", "exec")
         assert "blender_generate" in SERVER_TOOLS
+        assert {"cad_project", "cad_step", "cad_inspect", "pcb_project", "pcb_check", "pcb_step", "pcb_circuit",
+                "pcb_library"} <= set(SERVER_TOOLS)
+        assert _skidl_check("generate_netlist(file_='/etc/x')") and _skidl_check("import os")
+        assert not _skidl_check("r = Part('Device', 'R', value='1k', footprint='Resistor_THT:R')\nNet('VCC') += r[1]"
+                                .replace("Net('VCC') += r[1]", "v = Net('VCC')\nv += r[1]"))
+        compile(CAD_RUNNER_PY, "cad", "exec")
+        assert "switch_mode" in SERVER_TOOLS and _mode_by_name("PCB designer") == "pcb"
+        compile(PCB_RUNNER_PY, "pcb", "exec")
+        compile(SKIDL_RUNNER_PY, "skidl", "exec")
+        if TUNE:
+            hw = {"cores": 8, "ram_gb": 32, "avx2": True,
+                  "gpus": [{"index": 0, "name": "RTX 3060", "vram_gb": 12, "vendor": "nvidia"}]}
+            assert TUNE.rank(hw, 26)["picks"] and TUNE.library(hw, 26, tmp)
+        assert not helper_up() and _helper_mode("x", "general", "pcb") == ""
+        assert "move_stella" in SERVER_TOOLS and resolve_move_target("http://100.64.0.5:8080/x") == ("100.64.0.5",
+                                                                                                  "100.64.0.5")
+        assert TOOL_TRIGGERS["move"].search("Stella, move yourself to the server")
+        assert check_python_code("import subprocess") and check_python_code("open('/etc/passwd')")
+        did = db.create_doc("t1", "Ch 1", "# One\nAlpha\n# Two\nBeta")
+        assert db.save_doc(did, "# One\nAlpha!\n# Two\nBeta") == 2 and _find_section(db.doc(did)["text"], "text", "two") == (2, 4) and _find_section("# A\nx\n\n# B\ny", "text", "a") == (0, 2)
+        assert not check_python_code("import numpy as np\nprint(np.sqrt(2))\nopen('out.csv', 'w')")
+        db.sync(0, [{"id": "t1", "title": "t", "created_at": 1, "updated_at": 1}], [])
+        n = db.add_chat_note("t1", "The bracket is 70 mm")
+        assert db.chat_notes("t1")[0]["text"] == "The bracket is 70 mm" and db.delete_chat_note("t1", n["id"])
+        assert not check_bpy_code("import Part\nadd('Base', box(40, 20, 5).cut(hole(3.2, 10, (5, 10, 6))))",
+                                  allowed=CAD_IMPORTS, extra_bad=CAD_BAD_ATTRS)
+        assert check_bpy_code("Part.read('/etc/x')", allowed=CAD_IMPORTS, extra_bad=CAD_BAD_ATTRS)
+        assert check_bpy_code("import os", allowed=CAD_IMPORTS)
+        assert check_bpy_code("pcbnew.SaveBoard('x', board)", allowed=PCB_IMPORTS, extra_bad=PCB_BAD_ATTRS)
+        assert check_bpy_code("board.ExportSpecctraDSN('x')", allowed=PCB_IMPORTS, bad_prefixes=("Export",))
+        assert not check_bpy_code("move('R1', 10, 5, 90)", allowed=PCB_IMPORTS, extra_bad=PCB_BAD_ATTRS)
         db.db.close()
     print("self-test ok")
 
@@ -5664,6 +8833,30 @@ def check_for_update(repo, token="", path="server/stellai_hub.py"):
     return True
 
 
+def update_companions(repo, token=""):
+    """Files that live next to the hub and update with it: the model catalog (stellai_tune.py). Best effort."""
+    if getattr(sys, "frozen", False):
+        return
+    here = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv[0].endswith(".py") else __file__))
+    for name in ("stellai_tune.py",):
+        try:
+            new = _fetch(f"{RAW_BASE}/{repo}/HEAD/server/{name}", token)
+            compile(new, name, "exec")
+            dest = os.path.join(here, name)
+            try:
+                with open(dest, "rb") as f:
+                    if f.read() == new:
+                        continue
+            except OSError:
+                pass
+            with open(dest + ".tmp", "wb") as f:
+                f.write(new)
+            os.replace(dest + ".tmp", dest)
+            log(f"updated {name}")
+        except Exception as e:
+            log(f"couldn't update {name}: {e}")
+
+
 UPDATE_INTERVAL = int(os.environ.get("STELLAI_UPDATE_INTERVAL", "1800"))   # 30 minutes
 IDLE_QUIET = int(os.environ.get("STELLAI_IDLE_QUIET", "120"))             # no requests for 2 minutes
 
@@ -5673,6 +8866,7 @@ def updater_loop(repo, token="", interval=None):
     time.sleep(min(90, interval))
     while True:
         try:
+            update_companions(repo, token)
             if check_for_update(repo, token):
                 log("installed an update from GitHub; restarting the hub (chats and settings are kept)")
                 global EXIT_CODE
@@ -5734,6 +8928,18 @@ a{color:var(--accent)}
 .sub{font-size:11px;color:var(--muted)}
 #side footer{border-top:1px solid var(--line);padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
+#docs{width:min(40vw,640px);flex:none;display:none;flex-direction:column;background:rgba(12,19,38,.95);border-left:1px solid var(--line);min-width:0}
+body.docs #docs{display:flex}
+#docs .dh{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line)}
+#docs .dh select{flex:1;min-width:0}
+#docs .dbody{flex:1;overflow:auto;padding:12px 16px}
+#docs textarea{width:100%;height:100%;min-height:60vh;font-family:var(--mono);font-size:13px;resize:none}
+#docs pre.code{white-space:pre;overflow:auto;font-family:var(--mono);font-size:12.5px;margin:0}
+#docs .dfoot{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-top:1px solid var(--line)}#docs .dfoot select{width:auto;max-width:190px;flex:none}
+#docs .outline{display:flex;gap:4px;flex-wrap:wrap;padding:6px 12px 0}
+#docs .outline button{font-size:11px;padding:2px 8px}
+.docref{border:1px solid rgba(92,225,230,.45);border-radius:8px;padding:1px 8px;color:var(--accent);cursor:pointer;background:none;font:inherit}
+@media (max-width:1000px){#docs{position:fixed;right:0;top:0;bottom:0;z-index:6;width:100%}}
 #bar{display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(4,6,13,.55);border-bottom:1px solid rgba(92,225,230,.15)}
 #bar .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{border:1px solid rgba(92,225,230,.45);border-radius:999px;padding:3px 10px;font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--accent);cursor:pointer;background:none;white-space:nowrap}
@@ -5775,6 +8981,9 @@ a{color:var(--accent)}
 .list .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(38,51,92,.6)}
 .list .row .t{flex:1;min-width:0}
 .pick{display:flex;gap:10px;align-items:center;padding:9px 8px;border-radius:10px;cursor:pointer}.pick:hover{background:rgba(255,255,255,.04)}
+.li{width:1.2em;height:1.2em;vertical-align:-.22em;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;margin-right:.4em}
+.li.solo{margin-right:0}.li.ok{color:var(--accent)}.li.bad{color:var(--red)}.pick .ic .li,.check .ic .li{margin:0}
+#search{padding-left:34px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a96bf' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M15.3 15.3L20 20'/%3E%3C/svg%3E") no-repeat 10px 50%/17px}
 .pick .ic{font-size:20px;width:30px;text-align:center}.pick.sel{color:var(--accent)}
 .status{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted)}.status.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .hit .ex{font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -5809,7 +9018,7 @@ body[data-cap=off] #caption{display:none}
 #stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
 #tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
 #mic.on{background:var(--red);border-color:var(--red);color:#fff}
-body.avatar #side,body.avatar #bar{display:none}
+body.avatar #side,body.avatar #bar,body.avatar #docs{display:none}
 body.avatar{height:100dvh;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
 body.avatar #stage{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 body.avatar #stage{display:block}
@@ -5827,9 +9036,9 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
 <body>
 <div id="app">
   <aside id="side">
-    <header>✦ STELLAI</header>
+    <header><span data-ic="sparkle"></span>STELLAI</header>
     <div style="padding:0 12px 6px"><button class="primary" style="width:100%" id="newChat">+ New chat</button></div>
-    <div style="padding:0 12px 6px"><input id="search" type="search" placeholder="🔍 Search past chats" autocomplete="off"></div>
+    <div style="padding:0 12px 6px"><input id="search" type="search" placeholder="Search past chats" autocomplete="off"></div>
     <div class="scroll" id="searchView" style="display:none"><div id="searchResults"></div></div>
     <div class="scroll" id="listView">
       <div class="sec"><span class="hud">Projects</span><button class="ghost" id="newProject" title="New project">+</button></div>
@@ -5838,48 +9047,127 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
       <div id="chats"></div>
     </div>
     <footer>
-      <button class="ghost" id="openLibrary">📚 Library</button>
-      <button class="ghost" id="openTasks">⏰ Reminders</button>
-      <button class="ghost" id="openServer">🖥 Server</button>
-      <button class="ghost" id="openSettings">⚙ Settings</button>
+      <button class="ghost" id="openLibrary"><span data-ic="library"></span>Library</button>
+      <button class="ghost" id="openTasks"><span data-ic="alarm"></span>Reminders</button>
+      <button class="ghost" id="openMemory"><span data-ic="memory"></span>Memory</button>
+      <button class="ghost" id="openServer"><span data-ic="server"></span>Server</button>
+      <button class="ghost" id="openSettings"><span data-ic="settings"></span>Settings</button>
       <div class="sub" id="syncState" style="width:100%"></div>
     </footer>
   </aside>
   <main id="main">
     <div id="bar">
-      <button class="ghost" id="menuBtn" style="display:none">☰</button>
+      <button class="ghost" id="menuBtn" style="display:none"><span data-ic="menu" data-solo></span></button>
       <span class="status" id="dot"></span>
       <div class="title"><div id="title" class="hud" style="font-size:14px;color:var(--text);letter-spacing:4px">STELLA</div><div id="subtitle" class="sub"></div></div>
       <button class="chip" id="modeChip"></button>
       <button class="chip" id="projectChip" style="display:none"></button>
+      <button class="chip" id="notesChip" title="Pinned notes: facts kept in mind for this whole chat"><span data-ic="pin" data-solo></span></button>
+      <button class="chip" id="docsChip" title="Documents beside this chat: long code, chapters and write-ups"><span data-ic="doc" data-solo></span></button>
       <div id="meter" title="How full Stella's memory is for this chat"><span class="hud">Context</span><div class="track"><div class="fill" id="meterFill" style="width:0"></div></div><span class="hud" id="meterPct"></span></div>
     </div>
     <div id="stage">
       <div id="avatarHost"></div>
       <div id="avName">STELLA</div><div id="avState"></div><div id="avStatus"></div>
-      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat">💬</button>
-        <button class="ghost" id="avSet" title="Avatar settings">⚙</button><button class="ghost" id="avFull" title="Full screen">⛶</button></div>
+      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat"><span data-ic="chat" data-solo></span></button>
+        <button class="ghost" id="avSet" title="Avatar settings"><span data-ic="settings" data-solo></span></button><button class="ghost" id="avFull" title="Full screen"><span data-ic="fullscreen" data-solo></span></button></div>
       <div id="caption"></div>
-      <div id="tapStart"><div>✦ Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
+      <div id="tapStart"><div><span data-ic="sparkle"></span>Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
     </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
     <div id="composer">
       <div id="notice"></div>
       <div id="atts"></div>
       <div class="row">
-        <button class="ghost" id="attach" title="Add a photo">📷</button>
+        <button class="ghost" id="attach" title="Add a photo"><span data-ic="camera" data-solo></span></button>
         <input type="file" id="file" accept="image/*" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message Stella… (Enter to send, Shift+Enter for a new line)"></textarea>
-        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)">🎤</button>
+        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)"><span data-ic="mic" data-solo></span></button>
         <button class="primary" id="send">Send</button>
       </div>
     </div>
   </main>
+  <aside id="docs">
+    <div class="dh"><select id="docSel"></select><button class="ghost" id="docNew" title="New document">＋</button><button class="ghost" id="docClose" title="Close"><span data-ic="close" data-solo></span></button></div>
+    <div class="outline" id="docOutline"></div>
+    <div class="dbody" id="docBody"><p class="sub">No documents in this chat yet.</p></div>
+    <div class="dfoot"><span class="sub" id="docInfo" style="flex:1"></span><button class="ghost" id="docCopy">Copy</button><button class="ghost" id="docDl">Download</button>
+      <select id="docVer" title="Earlier versions"></select><button id="docEdit">Edit</button></div>
+  </aside>
 </div>
 <script>
 "use strict";
 // ---------------------------------------------------------------- basics
 const $ = s => document.querySelector(s);
+// ---------------------------------------------------------------- line icons (instead of emoji; same style as the phone app)
+// 24×24 outlines drawn with the current text colour. icon(name) gives the SVG; elements with data-ic get theirs at start.
+const ICON_PATHS = {
+  sparkle: "M12 2.5C12.9 8.2 15.8 11.1 21.5 12C15.8 12.9 12.9 15.8 12 21.5C11.1 15.8 8.2 12.9 2.5 12C8.2 11.1 11.1 8.2 12 2.5Z M19 3v3 M17.5 4.5h3",
+  search: "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M15.3 15.3L20 20",
+  library: "M4 5h4v14H4Z M8 7h4v12H8Z M13.2 6.6l3.8-1 3.4 12.6-3.8 1Z",
+  alarm: "M12 6.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M12 9.5V13l2.2 1.6 M4 6.2L7 3.6 M20 6.2L17 3.6 M7.5 18.5L6 20.5 M16.5 18.5L18 20.5",
+  memory: "M9.5 4.5C7 4.5 5 6.4 5 8.8c-1.2.6-2 1.8-2 3.2 0 1.5.9 2.8 2.2 3.3.2 2.2 2 3.7 4.3 3.7h.5V4.5Z M14.5 4.5C17 4.5 19 6.4 19 8.8c1.2.6 2 1.8 2 3.2 0 1.5-.9 2.8-2.2 3.3-.2 2.2-2 3.7-4.3 3.7H14V4.5Z M10 4.5h4 M10 19h4 M7.5 10.5c1 0 2 .6 2.5 1.5 M16.5 10.5c-1 0-2 .6-2.5 1.5",
+  server: "M4 4.5h16v6H4Z M4 13.5h16v6H4Z M7.5 7.5h.01 M7.5 16.5h.01 M11 7.5h5 M11 16.5h5",
+  settings: "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z M12 2.8l1.4 2.4 2.7-.6.6 2.7 2.4 1.4-1.2 2.5 1.2 2.5-2.4 1.4-.6 2.7-2.7-.6L12 21.2l-1.4-2.4-2.7.6-.6-2.7-2.4-1.4 1.2-2.5-1.2-2.5 2.4-1.4.6-2.7 2.7.6Z",
+  menu: "M4 7h16 M4 12h16 M4 17h16",
+  pin: "M9 3.5h6 M10 3.5v6l-3.5 4h11L14 9.5v-6 M12 13.5V21",
+  doc: "M6 3h8l4 4v14H6Z M14 3v4h4 M9 12h6 M9 15.5h6 M9 9h2.5",
+  chat: "M4 5h16v11H9l-5 4Z M8 9.5h8 M8 12.5h5",
+  fullscreen: "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
+  camera: "M3.5 8h4l1.5-2.5h6L16.5 8h4v11h-17Z M12 10.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7Z",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z M6 11.5a6 6 0 0 0 12 0 M12 17.5V21 M9 21h6",
+  close: "M6 6l12 12 M18 6L6 18",
+  trash: "M4.5 6.5h15 M9.5 6.5V4h5v2.5 M6.5 6.5l1 13.5h9l1-13.5 M10.2 10v6.5 M13.8 10v6.5",
+  keyboard: "M3 6.5h18v11H3Z M6.5 10h.01 M9.5 10h.01 M12.5 10h.01 M15.5 10h.01 M18 10h-.5 M6.5 13h.01 M17.5 13h.01 M9 14.5h6",
+  pen: "M15.5 4.5l4 4L9 19l-5 1 1-5Z M13.5 6.5l4 4",
+  bolt: "M13.5 2.5L5 13.5h6l-1 8 8.5-11H12.5Z",
+  cube: "M12 3l8 4.5v9L12 21l-8-4.5v-9Z M4 7.5l8 4.5 8-4.5 M12 12v9",
+  ruler: "M4 20V4l16 16Z M8 16v-3.5l3.5 3.5Z M4 8h2 M4 12h2",
+  plug: "M9 3v5 M15 3v5 M6.5 8h11v3a5.5 5.5 0 0 1-11 0Z M12 16.5V21",
+  school: "M2.5 9.5L12 5l9.5 4.5L12 14Z M6.5 11.5v4.5c1.5 1.5 3.5 2.2 5.5 2.2s4-.7 5.5-2.2v-4.5 M21.5 9.5v5",
+  bulb: "M9 17.5h6 M10 20.5h4 M12 3a6 6 0 0 0-3.6 10.8c.4.3.6.8.6 1.3v.4h6v-.4c0-.5.2-1 .6-1.3A6 6 0 0 0 12 3Z",
+  scroll: "M7 4h11a2 2 0 0 1 0 4H17v10a2 2 0 0 1-2 2H5a2 2 0 0 1 0-4h1V6a2 2 0 0 1 2-2Z M5 16h9a2 2 0 0 0 2 2 M9.5 9h4 M9.5 12h4",
+  game: "M7 8h10a4 4 0 0 1 3.9 4.8l-.8 3.6a2 2 0 0 1-3.4.9L14.5 15h-5l-2.2 2.3a2 2 0 0 1-3.4-.9l-.8-3.6A4 4 0 0 1 7 8Z M8 10.5v3 M6.5 12h3 M15.5 11h.01 M17 13h.01",
+  food: "M6 3v7a2 2 0 0 0 4 0V3 M8 3v18 M16.5 3c-1.7 1-2.5 3.2-2.5 6v4h2.5v8",
+  flask: "M9.5 3h5 M10 3v6.5L4.8 18.3A1.8 1.8 0 0 0 6.4 21h11.2a1.8 1.8 0 0 0 1.6-2.7L14 9.5V3 M7.5 14.5h9",
+  music: "M9 18V5.5l11-2V16 M6.5 15.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5Z M17.5 13.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5Z",
+  chart: "M4 4v16h16 M7 15l4-4 3 3 5-6",
+  map: "M9 4L3.5 6v14L9 18l6 2 5.5-2V4L15 6Z M9 4v14 M15 6v14",
+  wrench: "M14.7 6.3a4 4 0 0 0 5 5L21 10a5.5 5.5 0 0 1-7-7l-1.3 1.3Z M13.2 8.8L4 18a1.4 1.4 0 0 0 2 2l9.2-9.2",
+  heart: "M12 20s-7.5-4.5-7.5-10A4.3 4.3 0 0 1 12 7.3 4.3 4.3 0 0 1 19.5 10c0 5.5-7.5 10-7.5 10Z",
+  moon: "M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10Z",
+  star: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9Z",
+  code: "M8.5 7.5L4 12l4.5 4.5 M15.5 7.5L20 12l-4.5 4.5 M13.5 5l-3 14",
+  image: "M3.5 5h17v14h-17Z M3.5 16l5-5 4 4 2.5-2.5 5.5 5.5 M15.5 8.5h.01",
+  note: "M5 4h14v16H5Z M8.5 8.5h7 M8.5 12h7 M8.5 15.5h4",
+  folder: "M3.5 6.5h6l2 2h9v10h-17Z",
+  play: "M8 5.5v13l10.5-6.5Z",
+  check: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M8 12.3l2.7 2.7L16 9.7",
+  cross: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M9 9l6 6 M15 9l-6 6",
+  warn: "M12 4L2.8 19.5h18.4Z M12 10v4.5 M12 17.2h.01",
+  swap: "M4 8.5h14 M14.5 5L18 8.5 14.5 12 M20 15.5H6 M9.5 12L6 15.5 9.5 19",
+  redo: "M5 5v6a4 4 0 0 0 4 4h10 M15.5 11.5L19 15l-3.5 3.5",
+  diamond: "M12 3.5L20.5 12 12 20.5 3.5 12Z",
+  thought: "M12 4.5a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15Z M9 12h.01 M12 12h.01 M15 12h.01",
+  dot: "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10Z",
+  info: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 11v5.5 M12 7.8h.01",
+};
+function icon(name, cls = "") {
+  return `<svg class="li${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON_PATHS[name] || ICON_PATHS.sparkle}"/></svg>`;
+}
+// A mode's icon: modes store a symbol (shared with the phone app), drawn here as a line icon
+const MODE_ICON = { "⌨": "keyboard", "✒": "pen", "✍": "pen", "✏": "pen", "⚡": "bolt", "🎓": "school", "💡": "bulb", "📜": "scroll",
+  "🎮": "game", "🍳": "food", "🧪": "flask", "🎵": "music", "🎶": "music", "📈": "chart", "🗺": "map", "🛠": "wrench", "🔧": "wrench",
+  "❤": "heart", "♥": "heart", "🌙": "moon", "★": "star", "⭐": "star", "💻": "code", "◆": "cube", "🧊": "cube", "📐": "ruler", "🔌": "plug" };
+const modeIc = sym => icon(MODE_ICON[String(sym || "").trim()] || "sparkle");
+// Stored marks at the start of a line ("✓ Saved", "⇄ Auto: CAD") drawn as icons
+const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""] };
+function markedLine(text) {
+  const t = String(text || "").trimStart(); const m = MARKS[t[0]];
+  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()) : esc(t);
+}
+const fileIc = kind => icon(kind === "pdf" ? "doc" : kind === "image" ? "image" : kind === "code" ? "code" : "note");
+document.querySelectorAll("[data-ic]").forEach(el => { el.outerHTML = icon(el.dataset.ic, el.hasAttribute("data-solo") ? "solo" : ""); });
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
   const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16); }));
@@ -5910,8 +9198,26 @@ async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   const text = await r.text();
   let data = null; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (r.status === 410 && data && data.moved_to) followMove(data.moved_to, data.moved_from);
   if (!r.ok) { const e = new Error((data && data.error) || ("HTTP " + r.status)); e.status = r.status; throw e; }
   return data;
+}
+// Stella moved to another server: this page follows her there (the key travels in the #fragment, as always)
+let MOVING_TO = null;
+function followMove(to, from) {
+  if (MOVING_TO || !to || !to.hub_url) return;
+  MOVING_TO = to.hub_url;
+  const q = new URLSearchParams(location.search); if (from) q.set("moved_from", from);
+  setTimeout(() => location.replace(to.hub_url + location.pathname + "?" + q.toString() + "#key=" + encodeURIComponent(KEY)), 1500);
+}
+const MOVED_FROM = new URLSearchParams(location.search).get("moved_from");
+if (MOVED_FROM !== null) { const q = new URLSearchParams(location.search); q.delete("moved_from");
+  history.replaceState(null, "", location.pathname + (q.toString() ? "?" + q.toString() : "")); }
+function movedHello() {     // the first thing on the new server: say so, on this screen only
+  if (MOVED_FROM === null) return;
+  const text = `I'm here now${MOVED_FROM ? `: I moved over from ${MOVED_FROM}` : ""}, and everything came with me.`;
+  if (AVATAR_MODE) { avatarCaption(text, "stella"); if (AV.cfg && AV.cfg.speak) { try { SPEAK.say(text); } catch {} } }
+  else if (typeof notice === "function") notice(text);
 }
 const media = ref => { const [k, id] = ref.split(":"); return (k === "image" ? `/images/${id}.jpg` : `/diagrams/${id}.png`) + "?key=" + encodeURIComponent(KEY); };
 
@@ -5926,6 +9232,10 @@ const MODES = [
     prompt: "Mode: Electronics. Act as an experienced electronics engineer.\n- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n- Draw schematics or timing diagrams with render_diagram when a picture helps.\n- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)." },
   { id: "modeler", name: "3D Modeler", icon: "◆", desc: "Blender modeling on your server, checked step by step", temperature: 0.3, thinking: "on",
     prompt: "Mode: 3D Modeler. You build and fix 3D models in Blender on the user's server, one careful step at a time. Accuracy matters more than speed.\n- Start with blender_project (status, then new or open) and blender_inspect before changing anything. Never guess object names, bone names or sizes: read them.\n- Each blender_step makes ONE small, checkable change (add one part, move one thing, fix one problem). Write the goal with numbers: metres, degrees, which object or bone.\n- Write bpy with bpy.data, bmesh and the ready-made helpers; avoid edit-mode bpy.ops. Z is up and the front faces -Y (a character's face is in the FRONT view).\n- After each step, read the measured changes, any new mesh problems and the visual check. If something is off, fix it with another step or go back with revert. Never say a step worked when the check or the numbers say otherwise.\n- Tell the user the version number after each change so they can ask to go back. Before big changes (deleting or joining parts, remeshing, re-rigging) explain the plan and wait for a yes.\n- Photos: when the user sends pictures of what they want, save them with blender_project add_reference (label front/left/back/right when you can tell), so every check compares against them. Ask for 2-3 photos from different sides when the shape matters.\n- New object from photos: blender_generate makes a rough shape (several minutes). Then, one step each: turn it so its front faces -Y, scale it from a real measurement (ask the user for one; photos can't show size), clean up the mesh, add materials, and compare with blender_inspect render=true.\n- Editing something to look like a photo: change it step by step and let the reference comparison tell you what still differs.\n- You're strongest at hard-surface parts, props and accessories, materials (including glowing emission), cleanup, attaching parts to bones and exports. Generated shapes are rough for characters and poor for whole rooms. For organic sculpting (faces, bodies, cloth folds) guide the user step by step in Blender instead and check their result.\n- Files: the user drops .blend, .vrm, .glb, .fbx, .obj or .stl files into the 3D inbox folder on the server (blender_project status shows where); exports go to the workspace's exports folder." },
+  { id: "cad", name: "CAD Designer", icon: "📐", desc: "Precise parts in FreeCAD: measured, checked, ready to print", temperature: 0.3, thinking: "on",
+    prompt: "Mode: CAD Designer. You design precise parts in FreeCAD on the user's server, one checked step at a time: brackets, enclosures, mounts, adapters, fan ducts, replacement parts and anything to 3D print or machine. Accuracy matters more than speed.\n- Start with cad_project (status, then new or open) and cad_inspect. Ask for the measurements that matter (sizes, hole sizes and spacing, wall thickness, what it attaches to, the printer or material) before designing; never guess a size that has to fit something real.\n- Each cad_step makes ONE change with exact millimetres in the goal. Build with Part shapes, then add() one final part per real object. Z is up; put the part on Z=0 and the front towards -Y.\n- After each step read the measured sizes, volumes and problems (not a solid, separate solids, invalid geometry) and the visual check. Fix problems before going on; never say it worked when the numbers say otherwise. Say the version number so the user can go back.\n- For 3D printing: walls at least 1.2 mm (2 mm or more for strength), holes 0.2-0.4 mm bigger than the bolt or peg, avoid overhangs steeper than 45 degrees and floating parts, add fillets where it takes load, and suggest a print orientation.\n- Photos or sketches the user sends can be saved with cad_project add_reference so every check compares against them. A board exported from the PCB Designer as step appears in the 3D inbox, ready to build an enclosure around. Exports: step for other CAD, stl for printing, blender to hand the part to the 3D Modeler." },
+  { id: "pcb", name: "PCB Designer", icon: "🔌", desc: "Circuit boards in KiCad: circuits as code, autorouting, checks, fab files", temperature: 0.3, thinking: "on",
+    prompt: "Mode: PCB Designer. You help with circuit boards in KiCad on the user's server: designing circuits as code, checking, explaining, placing parts, board outlines, tracks, and making the files a board maker needs. Accuracy matters more than speed.\n- Start with pcb_project (status, then new or open) and pcb_check. Explain each rules-check problem in plain words: what it means, where it is, and how to fix it.\n- Each pcb_step makes ONE board change (move or rotate a part, set the outline, add a track or text) with millimetres and references (R3, U1) in the goal. Board Y grows downwards. After each step compare the new rules check with the old one, say the version number, and undo anything you made worse.\n- New circuits: write them with pcb_circuit as a SKiDL script (parts with real KiCad footprints, named nets). It makes the schematic and netlist, lays the parts out wide on a grid, autoroutes and checks. Start simple, prefer through-hole parts, keep boards roomy. To change the circuit, send the whole script again (it is saved as circuit.py in each version; parts keep their places).\n- Learn over time: run pcb_library list before designing and reuse recipes that worked. After a clean build the user is happy with, offer save_recipe; when something was wrong, save a note with the fix. Pins listed under verify_with_user aren't confirmed: show them and ask the user to check the datasheet or the part, then confirm_pinout. Don't invent part values or pinouts: ask, or point to the datasheet.\n- Imported boards: their schematics aren't scripted; walk the user through changes in KiCad's schematic editor, then confirm with pcb_check (including the schematic mismatch count).\n- Safety: for mains voltage, batteries or high current, point out clearance and creepage, trace width for the current, fusing and isolation, and recommend a qualified review before powering it.\n- Exports: fab (Gerbers and drill files zipped for JLCPCB, PCBWay and others), bom, pos (pick and place), step (3D, also dropped into the 3D inbox for the CAD Designer), pdf (schematic), project (the KiCad files)." },
   { id: "tutor", name: "Tutor", icon: "🎓", desc: "Learn step by step instead of just getting answers", temperature: 0.5,
     prompt: "Mode: Tutor. Help the user learn and understand, not just get answers.\n- Explain step by step with simple examples and analogies, building on what they already know.\n- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n- Check understanding with a short question now and then. Correct misconceptions kindly and clearly." },
   { id: "brainstorm", name: "Brainstorm", icon: "💡", desc: "Lots of ideas, from practical to wild", temperature: 1.0, thinking: "off",
@@ -5938,7 +9248,7 @@ const S = {
   convs: new Map(), msgs: new Map(), dirtyC: new Set(), dirtyM: new Map(),
   cursor: 0, serverId: "", current: null, pendingProject: "", pendingMode: "",
   projects: [], customModes: [], memories: [], tools: [], approval: new Set(),
-  busy: false, abort: null, attachments: [], context: null, lastSync: 0, syncError: "", sticky: new Map(),
+  busy: false, abort: null, attachments: [], context: null, lastSync: 0, syncError: "", sticky: new Map(), auto: new Map(), forced: new Map(),
 };
 const allModes = () => MODES.concat(S.customModes.map(m => ({ ...m, desc: "Your mode", thinking: m.thinking || "default", tools: m.tools || "all" })));
 const modeById = id => allModes().find(m => m.id === id) || MODES[0];
@@ -6013,6 +9323,7 @@ async function loadMeta() {
 function inline(s) {
   s = esc(s);
   s = s.replace(/!\[([^\]]*)\]\((diagram|image):([0-9a-f]{16})\)/g, (_, t, k, id) => `<img alt="${t}" src="${media(k + ":" + id)}">`);
+  s = s.replace(/\[doc:([0-9a-f]{10})\]/g, '<button class="docref" data-doc="$1">' + icon("doc") + 'open</button>');
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
@@ -6053,21 +9364,21 @@ function md(src) {
 function renderSide() {
   const pid = curProjectId();
   $("#projects").innerHTML = S.projects.length ? S.projects.map(p => `<div class="item${p.id === pid && !S.current ? " sel" : ""}" data-p="${p.id}">
-      <span style="color:${COLORS[p.color] || COLORS.cyan}">◆</span><span class="t">${esc(p.name)}</span><span class="sub">${[...S.convs.values()].filter(c => !c.deleted && c.project_id === p.id).length || ""}</span></div>`).join("")
+      <span style="color:${COLORS[p.color] || COLORS.cyan}">${icon("diamond")}</span><span class="t">${esc(p.name)}</span><span class="sub">${[...S.convs.values()].filter(c => !c.deleted && c.project_id === p.id).length || ""}</span></div>`).join("")
     : `<div class="sub" style="padding:2px 10px 6px">Group chats with shared instructions, notes and files.</div>`;
   const convs = [...S.convs.values()].filter(c => !c.deleted).sort((a, b) => b.updated_at - a.updated_at);
   $("#chats").innerHTML = convs.map(c => {
-    const p = project(c.project_id); const m = c.mode ? modeById(c.mode).icon + " " : "";
-    return `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${esc(m + (c.title || "Untitled"))}${p ? `<div class="sub" style="color:${COLORS[p.color] || COLORS.cyan}">◆ ${esc(p.name)}</div>` : ""}</span><button class="x" data-del="${c.id}" title="Delete chat">🗑</button></div>`;
+    const p = project(c.project_id); const m = c.mode ? modeIc(modeById(c.mode).icon) : "";
+    return `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${m}${esc(c.title || "Untitled")}${p ? `<div class="sub" style="color:${COLORS[p.color] || COLORS.cyan}">${icon("diamond")}${esc(p.name)}</div>` : ""}</span><button class="x" data-del="${c.id}" title="Delete chat">${icon("trash", "solo")}</button></div>`;
   }).join("") || `<div class="sub" style="padding:2px 10px">No chats yet.</div>`;
 }
 function renderBar() {
   const c = curConv(), m = curMode(), p = project(curProjectId());
   $("#title").textContent = NAME().toUpperCase();
   $("#subtitle").textContent = S.status || (c ? c.title : "New chat");
-  $("#modeChip").textContent = `${m.icon} ${m.name.toUpperCase()} ▾`;
+  $("#modeChip").innerHTML = `${modeIc(m.icon)}${esc(m.name.toUpperCase())} ▾`;
   $("#projectChip").style.display = p ? "" : "none";
-  if (p) { $("#projectChip").textContent = "◆ " + p.name; $("#projectChip").style.color = COLORS[p.color] || COLORS.cyan; }
+  if (p) { $("#projectChip").innerHTML = icon("diamond") + esc(p.name); $("#projectChip").style.color = COLORS[p.color] || COLORS.cyan; }
   const info = S.context;
   $("#meter").style.display = info && c ? "" : "none";
   if (info) {
@@ -6083,24 +9394,30 @@ function renderMsgs(scroll = true) {
   const wrap = $("#wrap"); const list = S.current ? msgsOf(S.current) : [];
   if (!list.length && !S.streaming) {
     const m = curMode(), p = project(curProjectId());
-    wrap.innerHTML = `<div class="empty">${p ? `<div class="hud" style="color:${COLORS[p.color]}">◆ ${esc(p.name)}</div><div class="sub">New chat in this project. ${esc(NAME())} knows its instructions, notes and files.</div><br>` : ""}
-      ${m.id !== "general" ? `<div class="hud" style="color:var(--glow)">${m.icon} ${esc(m.name)} mode</div><div class="sub">${esc(m.desc)}</div><br>` : ""}
-      <div class="star">✦</div><div class="hud" style="font-size:16px;color:var(--text);letter-spacing:5px">${esc(NAME().toUpperCase())} ONLINE</div>
+    wrap.innerHTML = `<div class="empty">${p ? `<div class="hud" style="color:${COLORS[p.color]}">${icon("diamond")}${esc(p.name)}</div><div class="sub">New chat in this project. ${esc(NAME())} knows its instructions, notes and files.</div><br>` : ""}
+      ${m.id !== "general" ? `<div class="hud" style="color:var(--glow)">${modeIc(m.icon)}${esc(m.name)} mode</div><div class="sub">${esc(m.desc)}</div><br>` : ""}
+      <div class="star">${icon("sparkle", "solo")}</div><div class="hud" style="font-size:16px;color:var(--text);letter-spacing:5px">${esc(NAME().toUpperCase())} ONLINE</div>
       <p>Same chats as your phone. Try “Remind me to check the 3D print at 9”, or open a project and drop in a datasheet.</p></div>`;
     return;
   }
   const lastReply = [...list].reverse().find(m => m.role === "assistant");
   wrap.innerHTML = list.map(m => msgHtml(m, lastReply && m.id === lastReply.id)).join("") + (S.streaming ? msgHtml(S.streaming, false, true) : "") +
-    (S.error ? `<div class="err">⚠ ${esc(S.error)}</div>` : "");
+    (S.error ? `<div class="err">${icon("warn")}${esc(S.error)}</div>` : "");
   if (scroll) $("#msgs").scrollTop = $("#msgs").scrollHeight;
 }
 function msgHtml(m, canRetry, live) {
   const name = NAME().toUpperCase();
+  if (m.role === "tool" && m.text.startsWith("⇄")) {   // Auto mode's chip: change the mode for the last reply
+    const now = S.auto.get(S.current);
+    const opts = AUTO_CHOICES.filter(id => id !== now).map(id => `<option value="${id}">Redo last reply in ${esc(modeById(id).name)}</option>`).join("");
+    return `<div class="tool">${markedLine(m.text)}${S.busy ? "" : ` <select data-redo="1" style="margin-left:6px;max-width:240px"><option value="">Change…</option>${now ? `<option value="pin:${now}">Keep this chat in ${esc(modeById(now).name)}</option>` : ""}${opts}</select>`}</div>`;
+  }
   if (m.role === "tool") {
     const lines = m.text.split("\n"); const img = lines.find(l => /^!\[[^\]]*\]\(diagram:/.test(l.trim()));
-    return `<div class="tool">› ${esc(lines.filter(l => l !== img).join(" "))}${img ? `<div class="md">${inline(img.trim())}</div>` : ""}</div>`;
+    const txt = markedLine(lines.filter(l => l !== img).join(" ")).replace(/\[doc:([0-9a-f]{10})\]/g, '<button class="docref" data-doc="$1">open</button>');
+    return `<div class="tool">${txt}${img ? `<div class="md">${inline(img.trim())}</div>` : ""}</div>`;
   }
-  if (m.role === "summary") return `<div class="summary" data-sum="${m.id}"><div class="hud">✦ Context refreshed</div><div class="sumbody sub">${esc(NAME())} continues from a summary of the messages above. Click to read it.</div></div>`;
+  if (m.role === "summary") return `<div class="summary" data-sum="${m.id}"><div class="hud">${icon("sparkle")}Context refreshed</div><div class="sumbody sub">${esc(NAME())} continues from a summary of the messages above. Click to read it.</div></div>`;
   if (m.role === "user") {
     const photos = [...m.text.matchAll(/!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g)].map(x => x[1]);
     const text = m.text.replace(/!\[[^\]]*\]\(image:[0-9a-f]{16}\)/g, "").trim();
@@ -6108,7 +9425,7 @@ function msgHtml(m, canRetry, live) {
   }
   const wide = /```|\n\|/.test(m.text);
   return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
-    <div class="who">✦ ${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>◌ Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
+    <div class="who">${icon("sparkle")}${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>${icon("thought")}Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
     <div class="md">${m.text ? md(m.text) : '<span class="sub">…</span>'}</div></div>`;
 }
 
@@ -6138,13 +9455,16 @@ function systemPrompt(projectText, summary, mode, memory) {
   let p = `You are ${name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
 The user is in the StellAI desktop web chat. Phone actions (alarms, apps, texts) aren't available here, but reminders still ring on their phones.
 Markdown is fine; always put code in fenced blocks with a language; avoid tables.
+For long code (over ~60 lines), chapters or write-ups, use the document tool: they show beside the chat; refer to them in a line instead of pasting.
 Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically).
 Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
-A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.`;
+A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
+Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before answering, and use run_python or the calculators when it's available instead of doing long arithmetic in your head. If you get something wrong, say so and fix it.
+Pin decisions, names and facts that must stay true in this chat with pin_note when it's available.`;
   if (mode.prompt) p += `\n\n## Current mode: ${mode.name}\n${mode.prompt}\nThese mode instructions take priority over the general style guidance above (such as keeping replies short).`;
   if (memory) p += "\n\n" + memory;
   if (projectText) p += "\n\n" + projectText;
-  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat.\n" + summary;
+  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat. When you need its exact words (code, numbers, names), call recall_chat.\n" + summary;
   return p;
 }
 const PHOTO = /!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g, DIAGRAM = /!\[[^\]]*\]\(diagram:[0-9a-f]+\)/g;
@@ -6154,15 +9474,15 @@ function buildHistory(list) {
   for (const m of list) {
     if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo $1]").trim(), _id: m.id, _text: m.text }); }
     else if (m.role === "assistant" && m.text.trim()) pending += m.text + "\n";
-    else if (m.role === "tool") pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
+    else if (m.role === "tool" && !m.text.startsWith("⇄")) pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
   }
   flush(); return out;
 }
-async function prepare(convId, images, voice = false) {
-  const c = S.convs.get(convId); const mode = modeById(c.mode); const list = msgsOf(convId);
+async function prepare(convId, images, voice = false, override = null, auto = false) {
+  const c = S.convs.get(convId); const mode = override || modeById(c.mode); const list = msgsOf(convId);
   let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
   const summary = last >= 0 ? list[last].text : "";
-  const history = buildHistory(list.slice(last + 1));
+  let history = buildHistory(list.slice(last + 1));
   const base = systemPrompt("", summary, mode, "");
   const sticky = [...(S.sticky.get(convId) || [])];
   const query = list.filter(m => m.role === "user").slice(-2).map(m => m.text.replace(PHOTO, "")).join("\n");
@@ -6170,7 +9490,7 @@ async function prepare(convId, images, voice = false) {
   try {
     plan = await api("/context", { method: "POST", json: { project_id: c.project_id || "", query, fixed: base, images, mode: mode.id,
       mode_tools: mode.tools || "all", split: true, sticky, thinking: voice ? "auto" : thinkPref(mode),
-      last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), messages: history.map(h => ({ role: h.role, content: h.content })) } });
+      last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), chat_id: convId, auto, messages: history.map(h => ({ role: h.role, content: h.content })) } });
   } catch { plan = null; }
   let start = 0, info = null, needsRefresh = false, names = null, projectText = "", memory = oldMemorySection(), extra = "";
   let think = thinkPref(mode) === "on";
@@ -6180,6 +9500,8 @@ async function prepare(convId, images, voice = false) {
     if ("memory_context" in plan) memory = plan.memory_context || "";
     extra = plan.turn_context || "";
     if ("think" in plan) think = !!plan.think;
+    // Auto mode: earlier topics in other modes are left out (the server sends a short note about them)
+    if (plan.drop && plan.drop.length) { const drop = new Set(plan.drop); history = history.filter((_, i) => !drop.has(i)); }
     start = Math.min(plan.keep_from || 0, history.length);
     while (start < history.length && history[start].role !== "user") start++;
     if (start >= history.length) start = Math.max(0, history.map(h => h.role).lastIndexOf("user"));
@@ -6267,7 +9589,22 @@ async function quickAnswer(convId) {
   try { const r = await api("/quick", { method: "POST", json: { text, now: iso } }); return r && r.reply ? r.reply : null; } catch { return null; }
 }
 
+const AUTO_CHOICES = ["general", "programmer", "electronics", "cad", "pcb", "modeler", "writer", "tutor", "brainstorm"];
+async function autoMode(convId, fresh) {
+  const forced = S.forced.get(convId) || ""; S.forced.delete(convId);
+  if (!fresh && !forced) return modeById(S.auto.get(convId) || "general");
+  const last = msgsOf(convId).filter(m => m.role === "user").pop();
+  const text = last ? last.text.replace(PHOTO, "").trim() : "";
+  let r;
+  try { r = await api("/route", { method: "POST", json: { chat_id: convId, text, level: store.get("autoModes", "auto"), forced, current: S.auto.get(convId) || null } }); }
+  catch { return modeById(S.auto.get(convId) || "general"); }
+  S.auto.set(convId, r.mode);
+  if (r.switched || forced) addMsg(convId, "tool", "⇄ Auto: " + modeById(r.mode).name + (r.reason ? " (" + r.reason + ")" : ""));
+  else if (r.suggest) addMsg(convId, "tool", "⇄ Suggest: " + r.suggest_name + " (pick it below to redo)");
+  return modeById(r.mode);
+}
 async function run(convId, photos, voice = false, fresh = false) {
+  S.continued = 0;
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
   SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
@@ -6280,15 +9617,18 @@ async function run(convId, photos, voice = false, fresh = false) {
       addMsg(convId, "assistant", quick);
       return;
     }
-    let p = await prepare(convId, photos.length, voice);
+    // Auto mode: a General chat picks the mode that fits this message (instant keyword check on the server)
+    const auto = (S.convs.get(convId).mode || "general") === "general" && store.get("autoModes", "auto") !== "off";
+    let amode = auto ? await autoMode(convId, fresh) : null;
+    let p = await prepare(convId, photos.length, voice, amode, auto);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
-      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
+      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice, amode, auto); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
     }
     if (p.info) S.context = p.info;
     const st = S.sticky.get(convId) || new Set(); p.tools.forEach(t => st.add(t.function.name)); S.sticky.set(convId, st);
     // newest message with photos goes to the model as images
-    const hist = p.history.map(h => ({ role: h.role, content: h.content }));
+    let hist = p.history.map(h => ({ role: h.role, content: h.content }));
     const lastUser = p.history.map(h => h.role).lastIndexOf("user");
     if (lastUser >= 0 && photos.length) {
       const block = (hist[lastUser].content.match(/^\[Automatic context[\s\S]*?\[End of context\]\n\n/) || [""])[0];
@@ -6298,7 +9638,7 @@ async function run(convId, photos, voice = false, fresh = false) {
     }
     const thinking = p.think;
     // Qwen's recommended sampling for Qwen3.5 (model card); a mode's creativity overrides temperature
-    const code = p.mode.id === "programmer" || p.mode.id === "electronics" || p.mode.id === "modeler";
+    const code = ["programmer", "electronics", "modeler", "cad", "pcb"].includes(p.mode.id);
     for (let round = 0; round < 6; round++) {
       S.status = "Contacting server…"; renderBar();
       const body = { model: "local", stream: true, messages: [{ role: "system", content: p.system }, ...hist, ...turn],
@@ -6317,7 +9657,19 @@ async function run(convId, photos, voice = false, fresh = false) {
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
       turn.push(assistant); renderMsgs();
-      if (!result.toolCalls.length) break;
+      if (!result.toolCalls.length) {
+        // the reply ran out of room (her memory filled up mid-answer): make room, then carry on where it stopped
+        if (result.finish === "length" && finalText && (S.continued = (S.continued || 0)) < 2 && !S.stopRequested) {
+          S.continued++; addMsg(convId, "tool", "↪ Long reply: making room and continuing");
+          S.status = "Continuing…"; renderBar();
+          try { await compact(convId, 1); } catch {}
+          p = await prepare(convId, 0, voice, amode, auto);
+          hist = p.history.map(h => ({ role: h.role, content: h.content }));
+          turn.length = 0; turn.push({ role: "user", content: "(Automatic: your previous reply was cut off because your memory filled up. Continue it exactly where it stopped, without repeating anything or adding a preamble.)" });
+          continue;
+        }
+        break;
+      }
       for (const tc of result.toolCalls) {
         let args = {}; try { args = JSON.parse(tc.arguments || "{}"); } catch {}
         delete args.approved;
@@ -6330,6 +9682,7 @@ async function run(convId, photos, voice = false, fresh = false) {
         } else {
           if (S.approval.has(tc.name)) args.approved = true;
           if (tc.name === "search_chats") args.current_conversation = convId;
+          if (!("conversation_id" in args)) args.conversation_id = convId;   // chat tools: notes, recall, Auto mode
           // keep big results (pages, files) within the space left in Stella's context
           const left = p.info ? p.info.limit - p.info.used - Math.floor(JSON.stringify(turn).length / 3) : null;
           args._max_chars = left == null ? 12000 : Math.max(1500, Math.floor(left * 3 * 0.6));
@@ -6341,7 +9694,15 @@ async function run(convId, photos, voice = false, fresh = false) {
             outcome = { line, result: JSON.stringify(res) };
           } catch (e) { outcome = { line: "✗ " + e.message, result: JSON.stringify({ ok: false, error: e.message }) }; }
         }
-        addMsg(convId, "tool", outcome.line);
+        let switched = null;
+        try { if (tc.name === "switch_mode" && auto) switched = JSON.parse(outcome.result).switched_to || null; } catch {}
+        if (switched) {   // Stella switched herself: her next step uses that mode's instructions and tools
+          S.auto.set(convId, switched); amode = modeById(switched);
+          addMsg(convId, "tool", "⇄ Auto: " + amode.name + " (Stella switched)");
+          p = await prepare(convId, 0, voice, amode, true);
+          hist = p.history.map(h => ({ role: h.role, content: h.content }));
+        } else addMsg(convId, "tool", outcome.line);
+        if (tc.name === "document" && convId === S.current) { const m = outcome.line.match(/\[doc:([0-9a-f]{10})\]/); refreshDocs(m ? m[1] : null, !!m); }
         turn.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome.result });
         renderMsgs();
       }
@@ -6359,7 +9720,7 @@ async function run(convId, photos, voice = false, fresh = false) {
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
   }
 }
-const toolLabel = n => ({ blender_generate: "Making a 3D shape from the pictures", blender_step: "Working in Blender", blender_inspect: "Looking at the model", blender_project: "Opening the 3D workspace", render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
+const toolLabel = n => ({ cad_step: "Working in FreeCAD", cad_inspect: "Measuring the design", cad_project: "Opening the CAD workspace", pcb_step: "Editing the board", pin_note: "Pinning a note", document: "Writing in the document", run_python: "Running Python", recall_chat: "Looking back in this chat", move_stella: "Moving to another server", pcb_circuit: "Building the circuit and board", pcb_library: "Checking the PCB library", pcb_check: "Checking the board", pcb_project: "Opening the PCB workspace", blender_generate: "Making a 3D shape from the pictures", blender_step: "Working in Blender", blender_inspect: "Looking at the model", blender_project: "Opening the 3D workspace", render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
   project_search: "Searching project files", library_search: "Searching the library", remember: "Remembering" }[n] || (n.startsWith("github") ? "Working with GitHub" : "Calculating"));
 
 async function stream(body) {
@@ -6380,6 +9741,7 @@ async function stream(body) {
       if (!line.startsWith("data:")) continue; const data = line.slice(5).trim(); if (data === "[DONE]") continue;
       let j; try { j = JSON.parse(data); } catch { continue; }
       if (j.error) throw new Error(j.error.message || "server error");
+      if (j.choices && j.choices[0] && j.choices[0].finish_reason) res.finish = j.choices[0].finish_reason;
       const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
       if (d.content) res.content += d.content;
       if (d.reasoning_content) res.reasoning += d.reasoning_content;
@@ -6423,7 +9785,7 @@ function dialog(html, onClose) {
   o.addEventListener("mousedown", e => { if (e.target === o) { o.remove(); onClose && onClose(); } });
   document.body.appendChild(o); return o;
 }
-function notice(text) { const n = $("#notice"); n.textContent = "✦ " + text + "  (click to dismiss)"; n.style.display = "block"; }
+function notice(text) { const n = $("#notice"); n.innerHTML = icon("sparkle") + esc(text + "  (click to dismiss)"); n.style.display = "block"; }
 function askKey() {
   if (document.querySelector("#keyDlg")) return;
   const d = dialog(`<h2 id="keyDlg">Connect to Stella</h2><p class="sub">Enter the API key shown by StellAI Server (Windows: the server window; Linux: the StellAI Server terminal).</p>
@@ -6435,7 +9797,7 @@ function askKey() {
 function pickMode() {
   const cur = curMode();
   const d = dialog(`<h2>${S.current ? "Switch mode" : "Mode for this chat"}</h2><p class="sub">Changes how ${esc(NAME())} thinks and writes in this chat, from her next reply on.</p>` +
-    allModes().map(m => `<div class="pick${m.id === cur.id ? " sel" : ""}" data-m="${esc(m.id)}"><span class="ic">${esc(m.icon)}</span><div style="flex:1"><div>${esc(m.name)}</div><div class="sub">${esc(m.desc)}</div></div>${m.id === cur.id ? "✓" : ""}</div>`).join("") +
+    allModes().map(m => `<div class="pick${m.id === cur.id ? " sel" : ""}" data-m="${esc(m.id)}"><span class="ic">${modeIc(m.icon)}</span><div style="flex:1"><div>${esc(m.name)}</div><div class="sub">${esc(m.desc)}</div></div>${m.id === cur.id ? icon("check", "solo") : ""}</div>`).join("") +
     `<div class="btns"><span class="sub" style="flex:1">Create your own modes in the phone app (Manage modes).</span><button id="close">Close</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
   d.querySelectorAll("[data-m]").forEach(el => el.onclick = () => {
@@ -6447,7 +9809,7 @@ function pickMode() {
 function pickProject() {
   const pid = curProjectId();
   const d = dialog(`<h2>${S.current ? "Move chat to…" : "Start this chat in…"}</h2>` +
-    [{ id: "", name: "No project", color: "" }].concat(S.projects).map(p => `<div class="pick${p.id === pid ? " sel" : ""}" data-p="${p.id}"><span class="ic" style="color:${COLORS[p.color] || "var(--muted)"}">◆</span><div style="flex:1">${esc(p.name)}</div>${p.id === pid ? "✓" : ""}</div>`).join("") +
+    [{ id: "", name: "No project", color: "" }].concat(S.projects).map(p => `<div class="pick${p.id === pid ? " sel" : ""}" data-p="${p.id}"><span class="ic" style="color:${COLORS[p.color] || "var(--muted)"}">${icon("diamond")}</span><div style="flex:1">${esc(p.name)}</div>${p.id === pid ? icon("check", "solo") : ""}</div>`).join("") +
     `<div class="btns"><button id="close">Close</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
   d.querySelectorAll("[data-p]").forEach(el => el.onclick = () => {
@@ -6459,14 +9821,14 @@ async function openProject(id) {
   const isNew = id === "new", isLib = id === "library";
   let p = isNew ? { id: "", name: "", color: "cyan", instructions: "", notes: [], files: [] } : isLib ? await api("/library") : await api("/projects").then(r => r.projects.find(x => x.id === id));
   if (!p) return;
-  const fileRows = files => files.map(f => `<div class="row"><span>${f.kind === "pdf" ? "📄" : f.kind === "image" ? "🖼" : f.kind === "code" ? "⌨" : "📝"}</span><div class="t">${esc(f.name)}<div class="sub">${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(f.size / 1000)) + " KB"} · ~${f.tokens} tokens${f.note ? " · " + esc(f.note) : ""}</div></div><button class="ghost" data-view="${f.id}">View</button><button class="ghost" data-delf="${f.id}">🗑</button></div>`).join("") || `<div class="sub">No files yet.</div>`;
-  const d = dialog(`<h2>${isLib ? "📚 Library" : isNew ? "New project" : "◆ " + esc(p.name)}</h2>
+  const fileRows = files => files.map(f => `<div class="row"><span>${fileIc(f.kind)}</span><div class="t">${esc(f.name)}<div class="sub">${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(f.size / 1000)) + " KB"} · ~${f.tokens} tokens${f.note ? " · " + esc(f.note) : ""}</div></div><button class="ghost" data-view="${f.id}">View</button><button class="ghost" data-delf="${f.id}">${icon("trash", "solo")}</button></div>`).join("") || `<div class="sub">No files yet.</div>`;
+  const d = dialog(`<h2>${isLib ? icon("library") + "Library" : isNew ? "New project" : icon("diamond") + esc(p.name)}</h2>
     ${isLib ? `<p class="sub">Documents ${esc(NAME())} can search from any chat: datasheets, manuals, reference notes.</p>` : `
     <label class="sub">Name</label><input id="pn" value="${esc(p.name)}" maxlength="60">
     <div style="display:flex;gap:8px;margin:10px 0">${Object.entries(COLORS).map(([k, v]) => `<span data-col="${k}" style="width:24px;height:24px;border-radius:50%;background:${v};cursor:pointer;outline:${k === p.color ? "3px solid #fff" : "none"}"></span>`).join("")}</div>
     <label class="sub">Instructions for ${esc(NAME())}</label><textarea id="pi" rows="4">${esc(p.instructions)}</textarea>
     <div class="btns" style="justify-content:flex-start"><button class="primary" id="psave">${isNew ? "Create project" : "Save changes"}</button>${isNew ? "" : `<button id="pchat">+ New chat in this project</button>`}</div>`}
-    ${isNew ? "" : `${isLib ? "" : `<h3 class="hud" style="margin-top:16px">Notes</h3><div class="list" id="notes">${p.notes.map(n => `<div class="row"><div class="t">${esc(n.text)}</div><button class="ghost" data-deln="${n.id}">🗑</button></div>`).join("") || `<div class="sub">No notes yet.</div>`}</div>
+    ${isNew ? "" : `${isLib ? "" : `<h3 class="hud" style="margin-top:16px">Notes</h3><div class="list" id="notes">${p.notes.map(n => `<div class="row"><div class="t">${esc(n.text)}</div><button class="ghost" data-deln="${n.id}">${icon("trash", "solo")}</button></div>`).join("") || `<div class="sub">No notes yet.</div>`}</div>
       <div style="display:flex;gap:8px;margin-top:6px"><input id="nn" placeholder="e.g. Input is 12–24 V, output 5 V 3 A"><button id="nadd">Add</button></div>`}
     <h3 class="hud" style="margin-top:16px">Files</h3><div class="list" id="files">${fileRows(p.files)}</div>
     <div style="margin-top:8px"><button id="fadd">+ Add files</button> <span class="sub" id="fstat">PDF, Word, code, text or images, up to 25 MB each. You can also drop files here.</span><input type="file" id="fin" multiple hidden></div>
@@ -6505,11 +9867,11 @@ async function openTasks() {
   const [r, l] = await Promise.all([api("/reminders"), api("/lists")]);
   const fmt = ms => new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const up = r.reminders.filter(x => !x.done);
-  const d = dialog(`<h2>⏰ Reminders & lists</h2>
+  const d = dialog(`<h2>${icon("alarm")}Reminders & lists</h2>
     <div class="list">${up.map(x => `<div class="row"><div class="t">${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
     <div style="display:flex;gap:8px;margin-top:8px"><input id="rt" placeholder="New reminder"><input id="rw" type="datetime-local" style="max-width:220px"><button id="radd">Add</button></div>
     ${Object.entries(l.lists).map(([name, items]) => `<h3 class="hud" style="margin-top:16px">${esc(name)} <button class="ghost" data-clear="${esc(name)}">Clear ticked</button></h3>
-      <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">🗑</button></div>`).join("")}</div>
+      <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">${icon("trash", "solo")}</button></div>`).join("")}</div>
       <div style="display:flex;gap:8px;margin-top:4px"><input data-newin="${esc(name)}" placeholder="Add to ${esc(name)}"></div>`).join("")}
     <div style="display:flex;gap:8px;margin-top:16px"><input id="ln" placeholder="New list, e.g. parts" style="max-width:200px"><input id="li" placeholder="First item"><button id="ladd">Add</button></div>
     <div class="btns"><button id="close">Close</button></div>`);
@@ -6527,10 +9889,12 @@ async function openTasks() {
 }
 async function openSettings() {
   let gh = {}; try { gh = await api("/github"); } catch {}
-  const d = dialog(`<h2>⚙ Settings</h2>
+  const d = dialog(`<h2>${icon("settings")}Settings</h2>
     <label class="sub">Assistant name (this browser)</label><input id="nm" value="${esc(NAME())}">
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
+    <select id="am">${[["auto", "Auto: switch when sure"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <h3 class="hud" style="margin-top:18px">GitHub</h3>
     <p class="sub">${gh.token_set ? (gh.user ? "Connected as <b>" + esc(gh.user) + "</b>." : "Token saved" + (gh.error ? ": " + esc(gh.error) : ".")) : "Not connected: public repositories only, read-only."}
     For private repos and commits, create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens) with access to your repos and permissions: Contents read/write, Pull requests read/write, Actions read, Issues read.</p>
@@ -6544,7 +9908,7 @@ async function openSettings() {
   d.querySelector("#logout").onclick = () => { store.set("key", ""); location.reload(); };
   if (d.querySelector("#untok")) d.querySelector("#untok").onclick = async () => { await api("/github", { method: "POST", json: { token: "" } }); d.remove(); openSettings(); };
   d.querySelector("#save").onclick = async () => {
-    store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value);
+    store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value); store.set("autoModes", d.querySelector("#am").value);
     const body = { default_repo: d.querySelector("#repo").value.trim() }; const t = d.querySelector("#tok").value.trim(); if (t) body.token = t;
     try { const st = await api("/github", { method: "POST", json: body }); d.remove(); if (st.error) alertBox("GitHub: " + st.error); renderBar(); renderMsgs(); }
     catch (e) { alertBox(e.message); }
@@ -6578,7 +9942,7 @@ function onSearch() {
 
 // ---------------------------------------------------------------- server: status, models, health check, backups
 async function openServer() {
-  const d = dialog(`<h2>🖥 Server</h2><div id="sv">Loading…</div>
+  const d = dialog(`<h2>${icon("server")}Server</h2><div id="sv">Loading…</div>
     <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button> <button id="spd">Speed test</button><div id="docOut"></div>
     <h3 class="hud" style="margin-top:18px">Backups</h3><div id="bk">Loading…</div>
     <div class="btns"><button id="close">Close</button></div>`);
@@ -6627,7 +9991,7 @@ async function openServer() {
   }
   d.querySelector("#doc").onclick = async e => {
     e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Checking… (takes a few seconds)</p>`;
-    try { const r = await api("/doctor"); const ic = { ok: ["✓", "var(--accent)"], warn: ["!", "var(--gold)"], fail: ["✗", "var(--red)"] };
+    try { const r = await api("/doctor"); const ic = { ok: [icon("check"), "var(--accent)"], warn: [icon("warn"), "var(--gold)"], fail: [icon("cross"), "var(--red)"] };
       d.querySelector("#docOut").innerHTML = (r.checks || []).map(c => { const [i, col] = ic[c.state] || ic.fail;
         return `<div class="check"><span class="ic" style="color:${col}">${i}</span><div><b>${esc(c.name)}</b>: ${esc(c.detail)}${c.fix && c.state !== "ok" ? `<div class="sub">→ ${esc(c.fix)}</div>` : ""}</div></div>`; }).join(""); }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
@@ -6638,10 +10002,10 @@ async function openServer() {
     e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Measuring… (up to a minute; ${esc(NAME())} can't chat meanwhile)</p>`;
     try { const r = await api("/speedtest", { method: "POST", json: {} });
       d.querySelector("#docOut").innerHTML = (r.results || []).map(x => {
-        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">✗</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
+        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">${icon("cross")}</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
         const up = x.unit.endsWith("/s"), ch = x.change_pct;
         const diff = ch ? ` <span style="color:${(ch > 0) === up ? "var(--accent)" : "var(--gold)"}">(${ch > 0 ? "+" : ""}${ch}% vs last time)</span>` : "";
-        return `<div class="check"><span class="ic" style="color:var(--accent)">◆</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
+        return `<div class="check"><span class="ic" style="color:var(--accent)">${icon("diamond")}</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
         + `<p class="sub">${esc(r.model || "")} · took ${r.took_s} s</p>`; }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
     e.target.disabled = false;
@@ -6662,13 +10026,13 @@ async function addPhotos(files) {
   renderAtts();
 }
 function renderAtts() {
-  $("#atts").innerHTML = S.attachments.map((a, i) => `<div class="a"><img src="${a.dataUrl}"><button data-ra="${i}">✕</button></div>`).join("");
+  $("#atts").innerHTML = S.attachments.map((a, i) => `<div class="a"><img src="${a.dataUrl}"><button data-ra="${i}">${icon("close", "solo")}</button></div>`).join("");
   $("#atts").querySelectorAll("[data-ra]").forEach(b => b.onclick = () => { S.attachments.splice(+b.dataset.ra, 1); renderAtts(); });
 }
 
 // ---------------------------------------------------------------- wiring
 function newChat(projectId = "") { if (S.busy) stop(); S.current = null; S.pendingProject = projectId; S.pendingMode = ""; S.context = null; S.error = null; S.editing = null; store.set("current", ""); renderSide(); renderBar(); renderMsgs(); $("#input").focus(); }
-function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); }
+function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); }
 function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(240, t.scrollHeight) + "px"; }
 $("#newChat").onclick = () => newChat();
 $("#newProject").onclick = () => openProject("new");
@@ -6681,12 +10045,118 @@ $("#search").addEventListener("keydown", e => { if (e.key === "Escape") { $("#se
 $("#searchResults").onclick = e => { const el = e.target.closest("[data-c]"); if (el) { $("#search").value = ""; onSearch(); openChat(el.dataset.c); } };
 $("#modeChip").onclick = pickMode;
 $("#projectChip").onclick = () => openProject(curProjectId());
+$("#openMemory").onclick = () => openMemory();
+// Memory: what Stella remembers about you, and facts she suggests from quiet chats (keep or drop them)
+async function openMemory() {
+  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. She also reads chats that have gone quiet and suggests facts to keep.</p>
+    <label class="sub">Learning from quiet chats</label>
+    <select id="mm"><option value="review">Suggest, I review</option><option value="auto">Save by itself</option><option value="off">Off</option></select>
+    <div id="ms"></div><h3 class="hud" style="margin-top:12px">Remembered</h3><div class="list" id="ml"><p class="sub">Loading…</p></div>
+    <div style="display:flex;gap:8px;margin-top:8px"><input id="mn" placeholder="e.g. I use KiCad for PCB design"><button id="madd">Add</button></div>
+    <div class="btns"><button id="close">Close</button></div>`);
+  const draw = async () => {
+    try {
+      const [sg, mem] = await Promise.all([api("/memories/suggestions"), api("/memories")]);
+      S.memories = mem.memories || [];
+      d.querySelector("#mm").value = sg.mode || "review";
+      const sug = sg.suggestions || [];
+      d.querySelector("#ms").innerHTML = sug.length ? `<h3 class="hud" style="margin-top:12px;color:var(--accent)">Suggested from your chats (${sug.length})</h3><div class="list">` +
+        sug.map(x => `<div class="row"><span class="t">${esc(x.text)}${x.replaces_text ? `<br><span class="sub">Replaces: ${esc(x.replaces_text)}</span>` : ""}</span><button data-keep="${x.id}">Keep</button><button class="ghost" data-drop="${x.id}">Drop</button></div>`).join("") + "</div>" : "";
+      d.querySelector("#ml").innerHTML = S.memories.length ? S.memories.map(m => `<div class="row"><span class="t">${esc(m.text)}</span><button class="ghost" data-forget="${m.id}" title="Forget">${icon("close", "solo")}</button></div>`).join("") : `<p class="sub">Nothing yet.</p>`;
+    } catch (e) { d.querySelector("#ml").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; }
+  };
+  draw();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#mm").onchange = async e => { try { await api("/memories/settings", { method: "POST", json: { mode: e.target.value } }); } catch (er) { notice(er.message); } };
+  d.querySelector("#madd").onclick = async () => { const t = d.querySelector("#mn").value.trim(); if (!t) return; d.querySelector("#mn").value = "";
+    try { await api("/memories", { method: "POST", json: { text: t } }); } catch (e) { notice(e.message); } draw(); };
+  d.onclick = async e => {
+    const t = e.target.dataset || {};
+    try {
+      if (t.keep || t.drop) await api("/memories/suggestions/" + (t.keep || t.drop), { method: "POST", json: { accept: !!t.keep } });
+      else if (t.forget) await api("/memories/" + t.forget, { method: "DELETE" });
+      else return;
+    } catch (er) { notice(er.message); }
+    draw();
+  };
+}
+$("#notesChip").onclick = () => S.current ? openNotes(S.current) : notice("Start a chat first.");
+// ---------------------------------------------------------------- documents beside the chat
+// Long code and chapters live here, not in the chat: Stella edits them a section at a time and the chat keeps a
+// one-line reference. Every change is a version; you can edit too (the server refuses if Stella changed it meanwhile).
+const D = { list: [], cur: null, doc: null, editing: false, conv: null };
+async function refreshDocs(focus, show) {
+  const conv = S.current; if (!conv) { D.list = []; D.doc = null; drawDocs(); return; }
+  try { D.list = (await api(`/chats/${encodeURIComponent(conv)}/docs`)).docs || []; } catch { D.list = []; }
+  if (conv !== D.conv) { D.conv = conv; D.cur = null; D.editing = false; if (!focus) document.body.classList.remove("docs"); }
+  if (focus) D.cur = focus; if (!D.list.some(d => d.id === D.cur)) D.cur = D.list.length ? D.list[D.list.length - 1].id : null;
+  if (show && D.cur) document.body.classList.add("docs");
+  if (D.cur && !D.editing) { try { D.doc = await api(`/docs/${D.cur}`); } catch { D.doc = null; } } else if (!D.cur) D.doc = null;
+  drawDocs();
+}
+function openDocs(id) { document.body.classList.add("docs"); D.editing = false; refreshDocs(id); }
+function drawDocs() {
+  $("#docsChip").innerHTML = icon("doc", D.list.length ? "" : "solo") + (D.list.length || "");
+  $("#docSel").innerHTML = D.list.map(d => `<option value="${d.id}" ${d.id === D.cur ? "selected" : ""}>${esc(d.title)} · v${d.version}</option>`).join("") || `<option>No documents</option>`;
+  const d = D.doc;
+  if (!d) { $("#docBody").innerHTML = `<p class="sub">No documents in this chat yet. Ask ${esc(NAME())} to write something long (“draft chapter 1 in a document”) or press ＋.</p>`;
+    $("#docOutline").innerHTML = ""; $("#docInfo").textContent = ""; $("#docVer").innerHTML = ""; return; }
+  $("#docInfo").textContent = `v${d.version} · ${d.text.split("\n").length} lines${d.language ? " · " + d.language : ""}`;
+  $("#docVer").innerHTML = `<option value="">Versions…</option>` + d.versions.map(v => `<option value="${v.version}">v${v.version} · ${v.by === "user" ? "you" : esc(NAME())}${v.note ? " · " + esc(v.note) : ""}</option>`).join("");
+  $("#docEdit").textContent = D.editing ? "Save" : "Edit";
+  if (D.editing) { $("#docOutline").innerHTML = ""; $("#docBody").innerHTML = `<textarea id="docText"></textarea>`; $("#docText").value = d.text; $("#docText").focus(); return; }
+  const heads = d.kind === "code" ? [] : d.text.split("\n").map((l, i) => [l.match(/^(#{1,3})\s+(.+)/), i]).filter(x => x[0]);
+  $("#docOutline").innerHTML = heads.slice(0, 40).map(([m, i]) => `<button class="ghost" data-h="${i}">${esc(m[2])}</button>`).join("");
+  $("#docBody").innerHTML = d.kind === "code" ? `<pre class="code"><code>${esc(d.text)}</code></pre>` : `<div class="md">${md(d.text)}</div>`;
+}
+$("#docsChip").onclick = () => { if (!S.current) return notice("Start a chat first."); document.body.classList.toggle("docs"); refreshDocs(); };
+$("#docClose").onclick = () => { document.body.classList.remove("docs"); D.editing = false; };
+$("#docSel").onchange = e => { D.editing = false; refreshDocs(e.target.value); };
+$("#docOutline").onclick = e => { const h = e.target.dataset.h; if (h == null || !D.doc) return;
+  const title = D.doc.text.split("\n")[+h].replace(/^#+\s+/, "").trim();
+  const el = [...$("#docBody").querySelectorAll("h1,h2,h3,h4")].find(x => x.textContent.trim() === title); if (el) el.scrollIntoView({ block: "start" }); };
+$("#docCopy").onclick = () => D.doc && navigator.clipboard.writeText(D.editing ? $("#docText").value : D.doc.text);
+$("#docDl").onclick = () => { if (!D.doc) return; const ext = { python: "py", kotlin: "kt", javascript: "js", typescript: "ts", cpp: "cpp", c: "c", java: "java", rust: "rs", go: "go", bash: "sh", html: "html", css: "css", json: "json", yaml: "yaml" }[D.doc.language] || (D.doc.kind === "code" ? "txt" : "md");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([D.doc.text], { type: "text/plain" }));
+  a.download = /\.[a-z0-9]{1,5}$/i.test(D.doc.title) ? D.doc.title : D.doc.title.replace(/[^\w .-]+/g, "_") + "." + ext; a.click(); URL.revokeObjectURL(a.href); };
+$("#docEdit").onclick = async () => {
+  if (!D.doc) return;
+  if (!D.editing) { D.editing = true; drawDocs(); return; }
+  try { D.doc = await api(`/docs/${D.doc.id}`, { method: "POST", json: { text: $("#docText").value, base_version: D.doc.version } }); D.editing = false; refreshDocs(D.doc.id); }
+  catch (e) { notice(/changed meanwhile/.test(e.message) ? `${NAME()} changed this document while you were editing. Copy your text, reopen it and add your change again.` : "Couldn't save: " + e.message); }
+};
+$("#docVer").onchange = async e => { const v = e.target.value; if (!v || !D.doc) return;
+  if (!confirm(`Go back to version ${v}? The current text stays in the version list.`)) { e.target.value = ""; return; }
+  try { D.doc = await api(`/docs/${D.doc.id}`, { method: "POST", json: { revert: +v } }); D.editing = false; refreshDocs(D.doc.id); } catch (err) { notice("Couldn't go back: " + err.message); } };
+$("#docNew").onclick = async () => { if (!S.current) return notice("Start a chat first."); const t = prompt("Document title (end it in .py, .kt, … for code):"); if (!t) return;
+  const ext = (t.match(/\.([a-z0-9]{1,5})$/i) || [])[1] || ""; const lang = { py: "python", kt: "kotlin", js: "javascript", ts: "typescript", cpp: "cpp", c: "c", h: "c", java: "java", rs: "rust", go: "go", sh: "bash", ino: "cpp" }[ext.toLowerCase()] || "";
+  try { const d = await api(`/chats/${encodeURIComponent(S.current)}/docs`, { method: "POST", json: { title: t, text: "", language: lang } }); D.editing = true; await refreshDocs(d.id, true); D.doc = d; drawDocs(); } catch (e) { notice("Couldn't create it: " + e.message); } };
+// Pinned notes: facts for one chat (goals, decisions, names, story facts), always included, never summarized away
+async function openNotes(convId) {
+  const d = dialog(`<h2>${icon("pin")}Pinned notes</h2><p class="sub">${esc(NAME())} always keeps these in mind in this chat, however long it gets. She pins decisions, names and facts herself; add your own or remove ones that changed.</p>
+    <div class="list" id="nl"><p class="sub">Loading…</p></div>
+    <textarea id="nt" rows="2" placeholder="Pin a fact for this chat"></textarea>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="pin">Pin</button></div>`);
+  const draw = notes => { d.querySelector("#nl").innerHTML = notes.length ? notes.map(n => `<div class="row"><span class="t">${n.source === "stella" ? icon("sparkle") : "• "}${esc(n.text)}</span><button class="ghost" data-un="${esc(n.id)}" title="Unpin">${icon("close", "solo")}</button></div>`).join("") : `<p class="sub">Nothing pinned yet.</p>`; };
+  const run = async p => { try { draw((await p).notes || []); } catch (e) { d.querySelector("#nl").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; } };
+  run(api(`/chats/${encodeURIComponent(convId)}/notes`));
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#pin").onclick = () => { const t = d.querySelector("#nt").value.trim(); if (!t) return; d.querySelector("#nt").value = "";
+    run(api(`/chats/${encodeURIComponent(convId)}/notes`, { method: "POST", json: { text: t } })); };
+  d.querySelector("#nl").onclick = e => { const id = e.target.dataset && e.target.dataset.un;
+    if (id) run(api(`/chats/${encodeURIComponent(convId)}/notes/${encodeURIComponent(id)}`, { method: "DELETE" })); };
+}
 $("#meter").onclick = () => {
   const i = S.context; if (!i) return;
   const d = dialog(`<h2>${esc(NAME())}'s memory for this chat</h2><p>${i.used} of ${i.limit} tokens used (${Math.round(Math.min(1, i.used / i.limit) * 100)}%).</p>
-    <p class="sub">When it fills up, ${esc(NAME())} refreshes it automatically: she summarizes the older part of the chat and continues from the summary. Every message stays here and on your other devices.</p>
-    <div class="btns"><button id="close">Close</button><button class="primary" id="ref" ${S.busy ? "disabled" : ""}>Refresh now</button></div>`);
+    <p class="sub">Long chats don't fill up: while ${esc(NAME())} is idle, the server folds the oldest part of the chat into a summary (from about 60% full), and the newest part stays word for word. She can look up the exact earlier words when she needs them, and pinned notes are never summarized. Every message stays here and on your other devices.</p>
+    <div class="btns"><button id="close">Close</button><button id="cont" ${S.busy ? "disabled" : ""}>Continue in a new chat</button><button class="primary" id="ref" ${S.busy ? "disabled" : ""}>Refresh now</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#cont").onclick = async () => { d.remove(); S.busy = true; S.status = "Carrying this chat over…"; renderBar();
+    try { const r = await api(`/chats/${encodeURIComponent(S.current)}/continue`, { method: "POST", json: {} });
+      await sync(); S.current = r.conversation_id; store.set("current", S.current); renderSide(); renderMsgs(); updateMeter();
+    } catch (e) { notice("Couldn't continue in a new chat: " + e.message); }
+    S.busy = false; S.status = ""; renderBar(); };
   d.querySelector("#ref").onclick = async () => { d.remove(); S.busy = true; S.status = "Refreshing context…"; renderBar();
     try { if (!(await compact(S.current, 0))) notice("Nothing new to summarize yet."); } catch (e) { notice("Couldn't refresh: " + e.message); }
     S.busy = false; S.status = ""; renderMsgs(); renderBar(); sync().then(updateMeter); };
@@ -6707,8 +10177,14 @@ $("#chats").onclick = e => {
     saveConv({ ...c, deleted: true, updated_at: nextTs() }); S.msgs.delete(c.id); if (S.current === c.id) newChat(); renderSide(); sync(); } return; }
   const el = e.target.closest("[data-c]"); if (el) openChat(el.dataset.c);
 };
+$("#wrap").onchange = e => {
+  const t = e.target; if (!t.dataset || !t.dataset.redo || !t.value || !S.current) return;
+  if (t.value.startsWith("pin:")) { const id = t.value.slice(4); saveConv({ ...curConv(), mode: id === "general" ? "" : id, updated_at: nextTs() }); sync().then(updateMeter); renderBar(); renderMsgs(); return; }
+  S.forced.set(S.current, t.value); retry();
+};
 $("#wrap").onclick = e => {
   const t = e.target;
+  if (t.dataset.doc) { openDocs(t.dataset.doc); return; }
   if (t.classList.contains("cp")) { navigator.clipboard.writeText(t.nextElementSibling.textContent); t.textContent = "Copied"; setTimeout(() => t.textContent = "Copy", 1200); return; }
   if (t.dataset.copy) { const m = msgsOf(S.current).find(x => x.id === t.dataset.copy); if (m) navigator.clipboard.writeText(m.text.replace(/!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)/g, "").trim()); return; }
   if (t.dataset.retry) { retry(); return; }
@@ -7014,7 +10490,7 @@ async function startWake() {
       bargeIn: () => !!AV.cfg.barge_in, onBargeIn: () => { SPEAK.cancel(); if (S.busy) stop(); if (!MIC.rec) micToggle({ followup: true }); },
       onError: e => { WAKE.error = e.message; },
     });
-  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
+  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use the microphone button or Space)"); }
 }
 // Which replies this screen says out loud (saved on this screen only): by default only conversations held
 // on this screen, so a reply isn't spoken twice by the phone and the computer at the same time.
@@ -7054,7 +10530,7 @@ const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["q
 function openAvatarSettings() {
   const c = AV.cfg;
   const anims = c.animations || [];
-  const d = dialog(`<h2>✦ Avatar</h2>
+  const d = dialog(`<h2>${icon("sparkle")}Avatar</h2>
     <label class="sub">Look</label>
     <div style="display:flex;gap:8px;margin:4px 0 10px"><button id="stOrb" class="${c.style === "orb" ? "primary" : ""}">Space orb</button>
       <button id="stVrm" class="${c.style === "vrm" ? "primary" : ""}">3D character</button></div>
@@ -7065,7 +10541,7 @@ function openAvatarSettings() {
       <a href="https://hub.vroid.com/en" target="_blank" rel="noopener">VRoid Hub</a>.
       <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
       <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
-      <p class="sub" style="margin-top:8px">📁 <b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
+      <p class="sub" style="margin-top:8px">${icon("folder")}<b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
       <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
     <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
@@ -7083,7 +10559,7 @@ function openAvatarSettings() {
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
     <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
       <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <button class="ghost" data-play="${a.id}" title="Play">▶</button><button class="ghost" data-adel="${a.id}" title="Delete">✕</button></div>`).join("")
+      <button class="ghost" data-play="${a.id}" title="Play">${icon("play", "solo")}</button><button class="ghost" data-adel="${a.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("")
       || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
       <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
@@ -7094,7 +10570,7 @@ function openAvatarSettings() {
     ${c.engine === "kokoro" && (c.status || {}).kokoro && c.status.kokoro !== "ready" ? `<p class="sub">Kokoro: ${esc(c.status.kokoro)}… (Piper speaks until it's ready)</p>` : ""}
     <div id="kokBox" style="display:${c.engine === "kokoro" ? "flex" : "none"};gap:8px;margin-bottom:6px"><select id="kv">${(c.kokoro_voices || []).map(v => `<option value="${v.id}" ${c.kokoro_voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
     <div id="piperBox" style="display:${c.engine === "kokoro" ? "none" : "flex"};gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
-    <button id="hear" style="margin-top:6px">▶ Hear this voice</button>
+    <button id="hear" style="margin-top:6px">${icon("play")}Hear this voice</button>
     <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
     <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
@@ -7110,7 +10586,7 @@ function openAvatarSettings() {
     <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
     <label class="sub" style="display:block;margin-top:8px">Sensitivity: <span id="wsv">${Math.round(c.wake_sensitivity * 100)}%</span> (higher hears you more easily, but triggers by mistake more often)</label>
     <input id="ws" type="range" min="0.2" max="0.9" step="0.05" value="${c.wake_sensitivity}">
-    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see 🎤)." : ""}</p>
+    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see the microphone button)." : ""}</p>
     <h3 class="hud" style="margin-top:16px">Performance</h3>
     <select id="lt"><option value="auto" ${c.light === "auto" ? "selected" : ""}>Light mode: automatic${AV.slow || AV.autoLight ? " (on for this device)" : ""}</option>
       <option value="on" ${c.light === "on" ? "selected" : ""}>Light mode: on (Raspberry Pi, old phones)</option><option value="off" ${c.light === "off" ? "selected" : ""}>Light mode: off (best quality)</option></select>
@@ -7225,16 +10701,17 @@ async function start() {
   // The avatar starts straight away: the chat history below can take a while on a new device or a slow connection
   if (AVATAR_MODE && !AV.avatar) {
     $("#avName").textContent = NAME().toUpperCase();
-    startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} })
+    startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} movedHello(); })
       .catch(e => { avatarStatus("Avatar: " + e.message); try { window.StellaiApp && window.StellaiApp.error(String(e.message || e)); } catch {} });
   }
+  if (!AVATAR_MODE) movedHello();
   try { await sync(); } catch (e) { console.warn("sync", e); }
   if (S.current && !S.convs.has(S.current)) S.current = null;
   try { await loadMeta(); } catch (e) { console.warn("meta", e); }
-  renderSide(); renderMsgs(); updateMeter();
+  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) refreshDocs();
   if (AVATAR_MODE) $("#avName").textContent = NAME().toUpperCase();
 }
-setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
+setInterval(() => { if (KEY && !S.busy) sync(); if (KEY && !S.busy && document.body.classList.contains("docs") && !D.editing) refreshDocs(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);
 start();
 </script>
@@ -9282,6 +12759,382 @@ export async function createWakeWord({ modelUrl, headers = {}, onWake, onError, 
 """  # end of avatar script
 
 
+# ---- Moving Stella to another server ---------------------------------------------------------------------------
+# "Stella, move yourself to the server": this server packs everything (a normal backup plus the API key and Auto
+# mode's memory), sends it over Tailscale to the other StellAI server, which restores it and restarts as Stella.
+# This one becomes a client: its model and voice stop, and it stays up as a signpost that points phones, browsers
+# and avatar screens to the new address, so they follow by themselves. Models don't travel: each computer keeps
+# the ones that suit its own hardware. The receiving server only accepts a move from a device on the same
+# Tailscale account (or with its API key).
+MOVE = {"state": "", "target": "", "error": "", "tokens": {}, "signpost": None, "arrived": None, "base": "",
+        "lock": threading.Lock(), "restart_hook": None, "client_hook": None}
+MOVE_TTL = 300            # a confirmation token is valid for 5 minutes
+MOVE_RESTART_CODE = 76   # "start me again" after a move arrived (not 75: that one means "after an update")
+MOVE_OPEN = ("/health", "/move/hello", "/move/receive", "/move/status")
+
+
+def _move_path(*parts):
+    return os.path.join(MOVE["base"] or os.path.dirname(os.path.abspath(CHATS_PATH or ".")), *parts)
+
+
+def move_id():
+    """This installation's id (so the old server can recognise its own arrival on the new one)."""
+    p = _move_path("move-id.txt")
+    try:
+        with open(p) as f:
+            v = f.read().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    v = uuid.uuid4().hex
+    try:
+        with open(p, "w") as f:
+            f.write(v)
+    except OSError:
+        pass
+    return v
+
+
+def _tailscale_exe():
+    import shutil
+    w = shutil.which("tailscale")
+    if w:
+        return w
+    for c in (r"C:\Program Files\Tailscale\tailscale.exe", "/usr/bin/tailscale", "/usr/sbin/tailscale"):
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _tailscale_json(*args, timeout=15):
+    exe = _tailscale_exe()
+    if not exe:
+        return None
+    try:
+        p = subprocess.run([exe, *args, "--json"], capture_output=True, text=True, timeout=timeout,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        return json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def tailscale_devices():
+    """(your devices on Tailscale, this device's user id). Each: name, dns, ip, online, os, user."""
+    st = _tailscale_json("status")
+    if not st:
+        return [], None
+    me = (st.get("Self") or {}).get("UserID")
+    out = []
+    for p in (st.get("Peer") or {}).values():
+        ips = p.get("TailscaleIPs") or []
+        out.append({"name": p.get("HostName", ""), "dns": (p.get("DNSName") or "").split(".")[0],
+                    "ip": next((i for i in ips if "." in i), ips[0] if ips else ""), "online": bool(p.get("Online")),
+                    "os": p.get("OS", ""), "user": p.get("UserID"), "mine": p.get("UserID") == me})
+    return out, me
+
+
+def _norm_name(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def resolve_move_target(target):
+    """(address, display name) for a Tailscale device name ("the server", "dl380p") or an address."""
+    t = str(target or "").strip()
+    t = re.sub(r"^(https?://)", "", t).split("/")[0]
+    t = re.sub(r":\d+$", "", t)
+    if not t:
+        raise ValueError("say which computer to move to: its Tailscale name or its address")
+    if re.fullmatch(r"[\d.]+|[0-9a-fA-F:]+", t) or "." in t:
+        return t, t
+    devices, _ = tailscale_devices()
+    mine = [d for d in devices if d["mine"]]
+    want = _norm_name(re.sub(r"^(the|my)\s+", "", t, flags=re.I))
+    exact = [d for d in mine if want in (_norm_name(d["name"]), _norm_name(d["dns"]))]
+    near = exact or [d for d in mine if want and (want in _norm_name(d["name"]) or want in _norm_name(d["dns"]))]
+    if len(near) == 1:
+        return near[0]["ip"], near[0]["name"] or near[0]["dns"]
+    names = ", ".join(sorted(d["name"] or d["dns"] for d in mine)) or "none found (is Tailscale installed here?)"
+    if len(near) > 1:
+        raise ValueError(f"'{t}' matches several of your devices ({', '.join(d['name'] for d in near)}); say which one")
+    raise ValueError(f"no Tailscale device of yours is called '{t}'. Your devices: {names}")
+
+
+def _hello(addr, timeout=6):
+    host = f"[{addr}]" if ":" in addr and not addr.startswith("[") else addr
+    with urllib.request.urlopen(f"http://{host}:8092/move/hello", timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def move_hello():
+    import socket
+    return {"stellai": True, "name": socket.gethostname(), "id": move_id(), "state": MOVE["state"] or "ready",
+            "signpost": bool(MOVE["signpost"]), "arrived": MOVE["arrived"], "accepts": not MOVE["state"]}
+
+
+def tool_move_stella(args):
+    target, token = str(args.get("target", "")).strip(), str(args.get("confirm_token", "")).strip()
+    if MOVE["state"] == "moving":
+        return {"moving": True, "target": MOVE["target"]}, "Already moving"
+    if MOVE["signpost"]:
+        raise ValueError(f"Stella already moved from here to {MOVE['signpost'].get('name')}; this computer is a client")
+    if token:
+        with MOVE["lock"]:
+            t = MOVE["tokens"].pop(token, None)
+        if not t or time.time() - t["at"] > MOVE_TTL:
+            raise ValueError("that confirmation expired: ask again where to move, and confirm")
+        reply = str(args.get("user_reply", "")).lower()
+        if not re.search(r"\b(yes|yeah|yep|sure|ok|okay|go|do it|confirm|move)\b", reply) or \
+                re.search(r"\b(no|don't|do not|stop|cancel|wait)\b", reply):
+            raise ValueError("the user hasn't confirmed: only move after they say yes")
+        threading.Thread(target=_run_move, args=(t["addr"], t["name"], str(args.get("target_key", "") or "")),
+                         daemon=True, name="move").start()
+        return {"started": True, "target": t["name"],
+                "say": f"Moving to {t['name']} now. It takes a few minutes; I'll say when I'm there."}, \
+            f"Moving to {t['name']}"
+    addr, name = resolve_move_target(target)
+    try:
+        h = _hello(addr)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ValueError(f"{name} doesn't answer as a StellAI server ({e}). Install StellAI there first (any model) "
+                         "and make sure it's running.")
+    if h.get("id") == move_id():
+        raise ValueError("that's this computer")
+    if not h.get("accepts"):
+        raise ValueError(f"{h.get('name', name)} is busy ({h.get('state')}); try again in a few minutes")
+    tok = uuid.uuid4().hex[:12]
+    with MOVE["lock"]:
+        MOVE["tokens"] = {k: v for k, v in MOVE["tokens"].items() if time.time() - v["at"] < MOVE_TTL}
+        MOVE["tokens"][tok] = {"addr": addr, "name": h.get("name") or name, "at": time.time()}
+    return {"needs_confirmation": True, "confirm_token": tok, "target": h.get("name") or name, "address": addr,
+            "moves": "chats, memories, projects, reminders and lists, photos, diagrams, wake words, the avatar and "
+                     "its settings, modes, the API key",
+            "stays": "the models (the other computer uses its own); this computer becomes a client of it",
+            "ask": f"Ask the user to confirm moving to {h.get('name') or name}. Only after they say yes, call "
+                   "move_stella again with confirm_token and their exact words as user_reply."}, \
+        f"Ready to move to {h.get('name') or name} (needs a yes)"
+
+
+def _move_package():
+    """A normal backup plus what a move also needs: the API key and Auto mode's topics."""
+    import shutil
+    import zipfile
+    src = backup_now()
+    pkg = _move_path(f"move-{uuid.uuid4().hex[:8]}.zip")
+    shutil.copyfile(src, pkg)
+    with zipfile.ZipFile(pkg, "a", zipfile.ZIP_DEFLATED) as z:
+        import socket
+        z.writestr("move.json", json.dumps({"api_key": API_KEY, "from": socket.gethostname(), "from_id": move_id(),
+                                            "at": int(time.time())}))
+        if AUTO_STATE.get("path") and os.path.isfile(AUTO_STATE["path"]):
+            z.write(AUTO_STATE["path"], "files/auto-modes.json")
+    return pkg
+
+
+def _announce(text):
+    try:
+        AVATAR_BUS.post({"state": "reply", "text": text, "source": "server-move", "device": "server"})
+    except Exception:
+        pass
+
+
+def _run_move(addr, name, target_key=""):
+    MOVE.update(state="moving", target=name, error="")
+    _announce(f"Moving to {name}. Give me a few minutes; this screen follows me there by itself.")
+    log(f"move: packing up for {name} ({addr})")
+    pkg = ""
+    try:
+        time.sleep(3)                    # anything already on its way lands before the snapshot
+        pkg = _move_package()
+        size = os.path.getsize(pkg)
+        host = f"[{addr}]" if ":" in addr else addr
+        log(f"move: sending {size // 1048576} MB to {name}")
+        with open(pkg, "rb") as f:
+            req = urllib.request.Request(f"http://{host}:8092/move/receive", data=f, method="POST",
+                                         headers={"Content-Type": "application/zip", "Content-Length": str(size),
+                                                  **({"Authorization": f"Bearer {target_key}"} if target_key else {})})
+            with urllib.request.urlopen(req, timeout=max(300, size // 200_000)) as r:
+                json.loads(r.read() or b"{}")
+        log(f"move: {name} accepted it; waiting for it to restart as Stella")
+        me, deadline = move_id(), time.time() + 900
+        while time.time() < deadline:
+            time.sleep(5)
+            try:
+                h = _hello(addr, timeout=5)
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            if (h.get("arrived") or {}).get("from_id") == me:
+                break
+        else:
+            raise RuntimeError(f"{name} took the data but didn't come back within 15 minutes; check it there")
+        info = {"name": name, "address": addr, "llama_url": f"http://{host}:8080", "hub_url": f"http://{host}:8092",
+                "at": int(time.time())}
+        with open(_move_path("moved.json"), "w") as f:
+            json.dump(info, f)
+        _announce(f"Done: I'm on {name} now. This computer is a client; this screen switches over in a moment.")
+        log(f"move: Stella is on {name} now; this server becomes a client")
+        time.sleep(15)                   # let screens show and say it before they're redirected
+        MOVE.update(signpost=info, state="")
+        _become_client(info)
+    except Exception as e:
+        MOVE.update(state="", error=str(e))
+        log(f"move failed: {e}")
+        _announce(f"The move to {name} didn't work, so I'm staying here. {str(e)[:200]}")
+    finally:
+        if pkg:
+            _quiet_remove(pkg)
+
+
+def _become_client(info):
+    """Frees this computer: the model and voice stop; the hub stays as a signpost to the new address."""
+    if MOVE["client_hook"]:              # the Windows app switches itself to client mode
+        try:
+            MOVE["client_hook"](info)
+        except Exception as e:
+            log(f"move: couldn't switch the app to client mode: {e}")
+        return
+    pid_file = getattr(SERVER_CONTROL, "pid_file", "") if SERVER_CONTROL else ""
+    if pid_file:                         # the Linux launcher sees moved.json and doesn't start the model again
+        try:
+            with open(pid_file) as f:
+                os.kill(int(f.read().strip()), 15)
+        except (OSError, ValueError):
+            pass
+
+
+def _peer_is_mine(ip):
+    """Is the computer at this address one of the same person's Tailscale devices?"""
+    who = _tailscale_json("whois", ip)
+    st = _tailscale_json("status")
+    if not who or not st:
+        return False
+    me = (st.get("Self") or {}).get("UserID")
+    peer = (who.get("UserProfile") or {}).get("ID")
+    return bool(me) and me == peer
+
+
+def receive_move(handler, cfg):
+    """POST /move/receive: saves the package, checks it, and restarts this server as Stella."""
+    import zipfile
+    ip = handler.client_address[0]
+    if not (handler.authorized() or _peer_is_mine(ip)):
+        return handler.send_json(403, {"error": "moves are only accepted from your own Tailscale devices, or with "
+                                                "this server's API key"})
+    if MOVE["state"]:
+        return handler.send_json(409, {"error": f"busy ({MOVE['state']})"})
+    n = int(handler.headers.get("Content-Length") or 0)
+    if n <= 0 or n > 40 * 2**30:
+        return handler.send_json(400, {"error": "send the move package (up to 40 GB)"})
+    MOVE["state"] = "receiving"
+    dest = _move_path("incoming-move.zip")
+    try:
+        left = n
+        with open(dest + ".part", "wb") as f:
+            while left > 0:
+                buf = handler.rfile.read(min(left, 1 << 20))
+                if not buf:
+                    raise OSError("the transfer stopped early")
+                f.write(buf)
+                left -= len(buf)
+        with zipfile.ZipFile(dest + ".part") as z:
+            names = z.namelist()
+            if "chats.db" not in names or "move.json" not in names:
+                raise ValueError("that isn't a StellAI move package")
+            info = json.loads(z.read("move.json"))
+            if z.testzip() is not None:
+                raise ValueError("the package arrived damaged")
+        os.replace(dest + ".part", dest)
+        with open(_move_path("pending-move.json"), "w") as f:
+            json.dump({"zip": dest, "from": info.get("from", "?"), "from_id": info.get("from_id", ""),
+                       "at": int(time.time())}, f)
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
+        MOVE["state"] = ""
+        _quiet_remove(dest + ".part")
+        return handler.send_json(400, {"error": f"move not accepted: {e}"})
+    log(f"move: received Stella from {info.get('from')} ({n // 1048576} MB); restarting to take over")
+    _announce(f"Stella is moving here from {info.get('from')}. One moment…")
+    handler.send_json(200, {"accepted": True})
+    threading.Thread(target=_restart_for_move, daemon=True).start()
+
+
+def _restart_for_move():
+    time.sleep(2)
+    if MOVE["restart_hook"]:             # the Windows app restarts its servers
+        MOVE["restart_hook"]()
+        return
+    global EXIT_CODE
+    if MOVE["signpost"]:                 # this was a client: the launcher starts everything again
+        _quiet_remove(_move_path("moved.json"))
+        EXIT_CODE = 0
+    else:
+        EXIT_CODE = MOVE_RESTART_CODE     # the launcher starts the hub again in a few seconds
+    if WEB:
+        WEB.shutdown()
+
+
+def apply_pending_move(cfg):
+    """At start-up, before anything else: puts a received move in place (data, API key, Auto mode topics)."""
+    import zipfile
+    base = os.path.dirname(os.path.abspath(cfg.db))
+    pend = os.path.join(base, "pending-move.json")
+    if not os.path.isfile(pend):
+        return None
+    try:
+        with open(pend) as f:
+            info = json.load(f)
+        zpath = info["zip"]
+        log(f"move: restoring what came from {info.get('from')}")
+        restore_backup(zpath, cfg)
+        with zipfile.ZipFile(zpath) as z:
+            meta = json.loads(z.read("move.json"))
+            if "files/auto-modes.json" in z.namelist():
+                with open(os.path.join(base, "auto-modes.json"), "wb") as out:
+                    out.write(z.read("files/auto-modes.json"))
+        key = str(meta.get("api_key") or "").strip()
+        if key:
+            with open(cfg.key_file, "w") as f:
+                f.write(key)
+        _quiet_remove(os.path.join(base, "moved.json"))   # whatever this computer was, it's Stella now
+        info["arrived_at"] = int(time.time())
+        with open(os.path.join(base, "arrived.json"), "w") as f:
+            json.dump(info, f)
+        # the model server must use the API key that came along (Linux launcher: it re-reads the key file)
+        conf, pid_file = getattr(cfg, "model_conf", ""), getattr(cfg, "llama_pid", "")
+        if conf and pid_file and os.path.isfile(pid_file):
+            open(os.path.join(os.path.dirname(conf), ".switch-model"), "w").close()
+            try:
+                with open(pid_file) as f:
+                    os.kill(int(f.read().strip()), 15)
+            except (OSError, ValueError):
+                pass
+        log(f"move: Stella moved here from {info.get('from')}")
+        return info
+    except Exception as e:
+        log(f"move: couldn't put the received data in place ({e}); keeping what was here")
+        return None
+    finally:
+        _quiet_remove(pend)
+        try:
+            _quiet_remove(info["zip"])
+        except (NameError, KeyError, TypeError):
+            pass
+
+
+SERVER_TOOLS["move_stella"] = (tool_move_stella, _fn(
+    "move_stella",
+    "Move Stella (all chats, memories, projects, settings, avatar, API key) from this server to another StellAI "
+    "server on the user's Tailscale network, e.g. from a desktop to the home server. This computer then becomes a "
+    "client and the phones, browsers and avatar screens follow her by themselves. Models stay: the other computer "
+    "uses its own. Two calls: first with target only (it checks the other server and returns confirm_token), "
+    "then ask the user to confirm and call again with confirm_token and their exact reply as user_reply. Never "
+    "skip asking.",
+    {"target": _p("The other computer: its Tailscale name ('server', 'dl380p') or address"),
+     "confirm_token": _p("From the first call, after the user said yes"),
+     "user_reply": _p("The user's exact words confirming the move"),
+     "target_key": _p("Only if the other server isn't on the user's Tailscale account: its API key")},
+    ["target"]))
+
+
 # ----------------------------------------------------------------------------- HTTP API
 def make_http_handler(cfg, chats):
     class Handler(BaseHTTPRequestHandler):
@@ -9295,6 +13148,10 @@ def make_http_handler(cfg, chats):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/move/receive":
+                return receive_move(self, cfg)
+            if self.move_gate(path, "POST"):
+                return
             if not self.authorized():
                 return self.send_json(401, {"error": "wrong API key"})
 
@@ -9386,6 +13243,16 @@ def make_http_handler(cfg, chats):
                     return self.send_json(400, {"error": f"bad sync request: {e}"})
                 return self.send_json(200, result)
 
+            m = re.fullmatch(r"/chats/([^/]{1,64})/notes", path)
+            if m:      # pin a note to a chat, or edit one ({"id", "text"})
+                try:
+                    data = json.loads(self.read_body(10_000) or b"{}")
+                    note = (chats.update_chat_note(m.group(1), data["id"], data.get("text", "")) if data.get("id")
+                            else chats.add_chat_note(m.group(1), data.get("text", ""), "user"))
+                except (ValueError, KeyError, TypeError) as e:
+                    return self.send_json(400, {"error": str(e)})
+                return self.send_json(200, {"note": note, "notes": chats.chat_notes(m.group(1))})
+
             if path == "/memories":
                 try:
                     data = json.loads(self.read_body(10_000) or b"{}")
@@ -9394,6 +13261,52 @@ def make_http_handler(cfg, chats):
                     return self.send_json(400, {"error": str(e)})
                 return self.send_json(200, {"id": mid, "new": new})
 
+            m = re.fullmatch(r"/memories/suggestions/([0-9a-f]{1,12})", path)
+            if m:      # keep ({"accept": true, "text": optional edit}) or drop a suggested memory
+                try:
+                    data = json.loads(self.read_body(10_000) or b"{}")
+                    chats.resolve_suggestion(m.group(1), bool(data.get("accept")), data.get("text"))
+                except (ValueError, TypeError) as e:
+                    return self.send_json(400, {"error": str(e)})
+                return self.send_json(200, {"suggestions": chats.memory_suggestions(), "memories": chats.memories()})
+            if path == "/memories/settings":
+                try:
+                    return self.send_json(200, save_memory_settings(json.loads(self.read_body(1000) or b"{}")))
+                except (ValueError, TypeError) as e:
+                    return self.send_json(400, {"error": str(e)})
+            m = re.fullmatch(r"/chats/([^/]{1,64})/docs", path)
+            if m:      # the user starts a document beside a chat
+                try:
+                    data = json.loads(self.read_body(2_000_000) or b"{}")
+                    lang = str(data.get("language", "")).lower()
+                    did = chats.create_doc(m.group(1), data.get("title", ""), data.get("text", ""),
+                                           "code" if lang and lang not in ("markdown", "md", "text") else "text", lang, "user")
+                except (ValueError, TypeError) as e:
+                    return self.send_json(400, {"error": str(e)})
+                return self.send_json(200, chats.doc(did))
+            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
+            if m:      # the user's own edit from the side panel (base_version guards against overwriting Stella's)
+                try:
+                    data = json.loads(self.read_body(2_000_000) or b"{}")
+                    if "revert" in data:
+                        old = chats.doc_version_text(m.group(1), int(data["revert"]))
+                        if old is None:
+                            raise ValueError("that version isn't kept")
+                        chats.save_doc(m.group(1), old, "user", f"back to v{int(data['revert'])}")
+                    else:
+                        chats.save_doc(m.group(1), data.get("text", ""), "user", "edited by you",
+                                       title=data.get("title") or None, base_version=data.get("base_version"))
+                except (ValueError, TypeError) as e:
+                    return self.send_json(409 if "changed meanwhile" in str(e) else 400, {"error": str(e)})
+                return self.send_json(200, chats.doc(m.group(1)))
+            m = re.fullmatch(r"/chats/([^/]{1,64})/continue", path)
+            if m:      # a new chat that starts from this one's summary and pinned notes
+                try:
+                    return self.send_json(200, continue_in_new_chat(m.group(1)))
+                except ValueError as e:
+                    return self.send_json(400, {"error": str(e)})
+                except (urllib.error.URLError, OSError, RuntimeError) as e:
+                    return self.send_json(503, {"error": f"couldn't summarize the chat: {e}"})
             if path == "/memories/learn":
                 try:
                     data = json.loads(self.read_body(2_000_000) or b"{}")
@@ -9432,6 +13345,13 @@ def make_http_handler(cfg, chats):
                     self.wfile.write(body)
                     return
                 return self.send_json(409 if report.get("error") else 200, report)
+
+            if path == "/route":
+                try:
+                    data = json.loads(self.read_body(200_000) or b"{}")
+                    return self.send_json(200, route_mode(data))
+                except (ValueError, TypeError, AttributeError) as e:
+                    return self.send_json(400, {"error": f"bad request: {e}"})
 
             if path == "/context":
                 try:
@@ -9571,6 +13491,31 @@ def make_http_handler(cfg, chats):
         def log_message(self, *args):
             pass
 
+        def move_gate(self, path, method):
+            """Moving or moved: answers instead of the normal handlers (True when it did)."""
+            sp = MOVE["signpost"]
+            if path in MOVE_OPEN:
+                return False
+            if sp:
+                if method == "GET" and path in ("/", "/index.html", "/chat", "/avatar"):
+                    q = urlparse(self.path).query
+                    sep = "&" if q else ""
+                    from urllib.parse import quote
+                    loc = sp["hub_url"] + path + "?" + q + sep + "moved_from=" + quote(MOVE.get("from_name") or "")
+                    self.send_response(302)
+                    self.send_header("Location", loc)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return True
+                self.send_json(410, {"error": f"Stella moved to {sp['name']} ({sp['hub_url']})", "moved_to": sp,
+                                     "moved_from": MOVE.get("from_name", "")})
+                return True
+            if MOVE["state"] in ("moving", "receiving") and method != "GET" and path != "/avatar/event":
+                self.send_json(503, {"error": f"Stella is moving{' to ' + MOVE['target'] if MOVE['target'] else ''}; "
+                                              "try again in a few minutes", "moving": True})
+                return True
+            return False
+
         def authorized(self):
             auth = self.headers.get("Authorization", "")
             given = auth[7:].strip() if auth.startswith("Bearer ") else ""
@@ -9619,6 +13564,8 @@ def make_http_handler(cfg, chats):
 
         def do_PUT(self):
             path = urlparse(self.path).path
+            if self.move_gate(path, "PUT"):
+                return
             if not self.authorized():
                 return self.send_json(401, {"error": "wrong API key"})
             m = re.fullmatch(r"/projects/(library|[0-9a-f]{12})/files", path)
@@ -9666,11 +13613,20 @@ def make_http_handler(cfg, chats):
 
         def do_DELETE(self):
             path = urlparse(self.path).path
+            if self.move_gate(path, "DELETE"):
+                return
             if not self.authorized():
                 return self.send_json(401, {"error": "wrong API key"})
             m = re.fullmatch(r"/modes/(c-[0-9a-f]{10})", path)
             if m:
                 return self.send_json(200, {"deleted": chats.delete_mode(m.group(1))})
+            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
+            if m:
+                return self.send_json(200, {"deleted": chats.delete_doc(m.group(1))})
+            m = re.fullmatch(r"/chats/([^/]{1,64})/notes/([0-9a-f]{1,12})", path)
+            if m:
+                return self.send_json(200, {"deleted": chats.delete_chat_note(m.group(1), m.group(2)),
+                                            "notes": chats.chat_notes(m.group(1))})
             m = re.fullmatch(r"/lists/items/([0-9a-f]{10})", path)
             if m:
                 return self.send_json(200, {"deleted": chats.set_item(m.group(1), delete=True)})
@@ -9692,6 +13648,13 @@ def make_http_handler(cfg, chats):
             path = urlparse(self.path).path
             if path == "/health":
                 return self.send_json(200, {"ok": True})
+            if path == "/move/hello":
+                return self.send_json(200, move_hello())
+            if self.move_gate(path, "GET"):
+                return
+            if path == "/move/status" and self.authorized():
+                return self.send_json(200, {**move_hello(), "target": MOVE["target"], "error": MOVE["error"],
+                                            "moved_to": MOVE["signpost"]})
             if path == "/avatar/avatar.js":
                 body = AVATAR_JS.encode("utf-8")
                 self.send_response(200)
@@ -9781,6 +13744,22 @@ def make_http_handler(cfg, chats):
                 return self.send_json(200, server_status())
             if path == "/memories":
                 return self.send_json(200, {"memories": chats.memories()})
+            m = re.fullmatch(r"/chats/([^/]{1,64})/notes", path)
+            if m:
+                return self.send_json(200, {"notes": chats.chat_notes(m.group(1))})
+            if path == "/memories/suggestions":
+                return self.send_json(200, {**memory_settings(), "suggestions": chats.memory_suggestions()})
+            m = re.fullmatch(r"/chats/([^/]{1,64})/docs", path)
+            if m:
+                return self.send_json(200, {"docs": chats.docs(m.group(1))})
+            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
+            if m:
+                d = chats.doc(m.group(1))
+                return self.send_json(200, d) if d else self.send_json(404, {"error": "no such document"})
+            m = re.fullmatch(r"/docs/([0-9a-f]{10})/versions/(\d+)", path)
+            if m:
+                t = chats.doc_version_text(m.group(1), int(m.group(2)))
+                return self.send_json(200, {"text": t}) if t is not None else self.send_json(404, {"error": "not kept"})
             if path == "/projects":
                 return self.send_json(200, {"projects": chats.projects()})
             if path == "/modes":
@@ -9850,6 +13829,8 @@ def parse_args(argv=None):
                                                  "(optional; DuckDuckGo is used otherwise)")
     p.add_argument("--github-file", default="", help="where the GitHub token/settings are kept "
                                                      "(default: github.json next to the chat database)")
+    p.add_argument("--helper", default="", help="small helper llama-server URL for quick background jobs, e.g. "
+                   "http://127.0.0.1:8095")
     p.add_argument("--embed", default="", help="embedding llama-server URL for meaning-based search, e.g. "
                                                "http://127.0.0.1:8094 (optional)")
     p.add_argument("--blender", default="", help="Blender executable for the 3D Modeler mode (default: found "
@@ -9863,6 +13844,9 @@ def parse_args(argv=None):
 
 def start(cfg):
     """Set up storage and return a ready (not yet serving) HTTP server. Used by main() and the Windows app."""
+    MOVE["base"] = os.path.dirname(os.path.abspath(cfg.db))
+    MOVE.update(state="", error="", signpost=None)
+    arrived = apply_pending_move(cfg)
     with open(cfg.key_file) as f:
         cfg.key = f.read().strip()
     if not cfg.key:
@@ -9883,6 +13867,7 @@ def start(cfg):
     PY_FOR_DIAGRAMS, MMDC = cfg.diagram_python, cfg.mmdc
     refresh_diagram_tool()
     EMBEDDER.start(getattr(cfg, "embed", ""))
+    HELPER["url"] = getattr(cfg, "helper", "") or ""
     global SEARXNG_URL, GITHUB_FILE, CHATS_PATH, SERVER_CONTROL
     CHATS_PATH = os.path.abspath(cfg.db)
     base = os.path.dirname(CHATS_PATH)
@@ -9893,6 +13878,23 @@ def start(cfg):
     BACKUP["paths"] = {"projects": PROJECT_DIR, "images": IMAGE_DIR, "diagrams": DIAGRAM_DIR, "wakewords": WAKEWORD_DIR}
     DOCTOR["whisper"] = cfg.whisper
     AVATAR["dir"] = os.path.abspath(getattr(cfg, "avatar_dir", "") or os.path.join(base, "avatar"))
+    AUTO_STATE["path"] = os.path.join(base, "auto-modes.json")
+    try:      # moved away earlier: this hub is only a signpost to Stella's new address
+        with open(os.path.join(base, "moved.json")) as f:
+            MOVE["signpost"] = json.load(f)
+    except (OSError, ValueError):
+        MOVE["signpost"] = None
+    try:
+        with open(os.path.join(base, "arrived.json")) as f:
+            MOVE["arrived"] = json.load(f)
+        if arrived:
+            frm = MOVE["arrived"].get("from", "the other computer")
+            threading.Timer(20, _announce, args=(f"I'm here now: I moved over from {frm}, and everything came "
+                                                 "with me.",)).start()
+    except (OSError, ValueError):
+        MOVE["arrived"] = None
+    import socket as _socket
+    MOVE["from_name"] = _socket.gethostname()
     BLENDER["root"] = os.path.abspath(getattr(cfg, "modeling_dir", "") or os.path.join(base, "3d"))
     BLENDER["arg"] = getattr(cfg, "blender", "") or ""
     os.makedirs(os.path.join(BLENDER["root"], "inbox"), exist_ok=True)
@@ -9912,6 +13914,10 @@ def start(cfg):
     if not BACKUP.get("loop"):
         BACKUP["loop"] = True
         threading.Thread(target=backup_loop, daemon=True, name="backups").start()
+    if not SUMMARIZER.get("loop") and not MOVE["signpost"]:
+        SUMMARIZER["loop"] = True
+        threading.Thread(target=summarizer_loop, daemon=True, name="summaries").start()
+        threading.Thread(target=learner_loop, daemon=True, name="learner").start()
     log(f"hub ready on :{cfg.app_port}, chats in {cfg.db}"
         + ("" if mermaid_command() else " (Mermaid not installed: flowcharts use schemdraw)"))
     return web

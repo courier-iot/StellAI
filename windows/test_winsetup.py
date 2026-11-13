@@ -8,6 +8,7 @@ import threading
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))   # stellai_tune
 import winsetup as ws
 
 TAG = "b11960"
@@ -327,6 +328,46 @@ def test_updates():
         pass
     assert not os.path.exists(path)
     srv.shutdown()
+
+
+def test_tuned_plans():
+    """The shared catalog: ranked picks, plans with cards and memory, multi-part files, MTP and the helper."""
+    from unittest import mock
+    assert ws.tune, "stellai_tune should import"
+    hw = {"ram_gb": 64, "cores": 12, "threads": 24, "backend": "cuda", "cuda": "12", "vram_gb": 15, "avx2": True,
+          "gpu_list": [{"index": 0, "name": "Tesla T4", "vram_gb": 15, "vendor": "nvidia"},
+                       {"index": 1, "name": "Tesla T4", "vram_gb": 15, "vendor": "nvidia"}]}
+    res = ws.tune.rank(ws.tune_hw(hw), 58, [0])
+    assert res["picks"] and res["picks"][0]["pick"] == "best"
+    pl = ws.plan_tuned(hw, res["picks"][0], ram_budget=58, gpu_ids=[0], helper={"key": "qwen3.5-2b", "quant": "Q8_0",
+                                                                              "label": "Qwen3.5 2B", "gpu": 1})
+    assert pl["llama_gpus"] == "0" and pl["helper_gpu"] == 1 and pl["model_key"].count("|") == 1
+    assert ws.plan_tuned(hw, res["picks"][0], gpu_ids=[0, 1])["llama_gpus"] == ""      # all cards = no limit
+    assert ws.plan_tuned(hw, res["picks"][0], gpu_ids=[])["llama_gpus"] == "-1"         # none = processor only
+    r = {"key": "qwen3.5-122b-a10b", "label": "Qwen3.5 122B-A10B", "quant": "UD-Q2_K_XL", "mtp": False, "repo": "r",
+         "files": [{"name": f"m-0000{i}-of-00002.gguf", "url": f"u{i}", "size": 1} for i in (1, 2)],
+         "model_file": "m-00001-of-00002.gguf", "size_gb": 41.8, "mmproj": None}
+    with mock.patch.object(ws.tune, "resolve", return_value=r):
+        got = ws.resolve_plan(dict(pl))
+    assert len(got["model_files"]) == 2 and got["model_file"] == "m-00001-of-00002.gguf" and not got["vision"]
+    with mock.patch.object(ws.tune, "resolve", side_effect=RuntimeError("offline")):
+        got = ws.resolve_plan(dict(pl))
+    assert got["model_key"] in ws.MODELS and got["model_file"].endswith(".gguf")
+    with tempfile.TemporaryDirectory() as d:
+        cfg = ws.Config(d)
+        os.makedirs(cfg.p("models"))
+        os.makedirs(cfg.p("bin", "llama"))
+        open(cfg.p("bin", "llama", "llama-server.exe"), "w").write("x")
+        open(cfg.p("models", "h.gguf"), "w").write("x")
+        pl.update(model_file="m.gguf", spec_args=list(ws.tune.MTP_ARGS), helper_file="h.gguf")
+        with mock.patch.object(ws, "llama_flags", return_value="--spec-type draft-mtp --cache-ram"):
+            a = ws.llama_args(cfg, pl, "k")
+        assert "draft-mtp" in a and "--cache-ram" in a
+        with mock.patch.object(ws, "llama_flags", return_value=""):      # an older build: no new options
+            a = ws.llama_args(cfg, pl, "k")
+        assert "draft-mtp" not in a and "--cache-ram" not in a
+        cfg.set(plan=pl)
+        assert ws.helper_args(cfg, pl) and "--helper" in ws.hub_args(cfg)
 
 
 if __name__ == "__main__":

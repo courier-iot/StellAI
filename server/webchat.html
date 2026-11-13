@@ -32,6 +32,18 @@ a{color:var(--accent)}
 .sub{font-size:11px;color:var(--muted)}
 #side footer{border-top:1px solid var(--line);padding:8px 12px;display:flex;gap:6px;flex-wrap:wrap}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
+#docs{width:min(40vw,640px);flex:none;display:none;flex-direction:column;background:rgba(12,19,38,.95);border-left:1px solid var(--line);min-width:0}
+body.docs #docs{display:flex}
+#docs .dh{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line)}
+#docs .dh select{flex:1;min-width:0}
+#docs .dbody{flex:1;overflow:auto;padding:12px 16px}
+#docs textarea{width:100%;height:100%;min-height:60vh;font-family:var(--mono);font-size:13px;resize:none}
+#docs pre.code{white-space:pre;overflow:auto;font-family:var(--mono);font-size:12.5px;margin:0}
+#docs .dfoot{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px 12px;border-top:1px solid var(--line)}#docs .dfoot select{width:auto;max-width:190px;flex:none}
+#docs .outline{display:flex;gap:4px;flex-wrap:wrap;padding:6px 12px 0}
+#docs .outline button{font-size:11px;padding:2px 8px}
+.docref{border:1px solid rgba(92,225,230,.45);border-radius:8px;padding:1px 8px;color:var(--accent);cursor:pointer;background:none;font:inherit}
+@media (max-width:1000px){#docs{position:fixed;right:0;top:0;bottom:0;z-index:6;width:100%}}
 #bar{display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(4,6,13,.55);border-bottom:1px solid rgba(92,225,230,.15)}
 #bar .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{border:1px solid rgba(92,225,230,.45);border-radius:999px;padding:3px 10px;font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--accent);cursor:pointer;background:none;white-space:nowrap}
@@ -73,6 +85,9 @@ a{color:var(--accent)}
 .list .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(38,51,92,.6)}
 .list .row .t{flex:1;min-width:0}
 .pick{display:flex;gap:10px;align-items:center;padding:9px 8px;border-radius:10px;cursor:pointer}.pick:hover{background:rgba(255,255,255,.04)}
+.li{width:1.2em;height:1.2em;vertical-align:-.22em;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;margin-right:.4em}
+.li.solo{margin-right:0}.li.ok{color:var(--accent)}.li.bad{color:var(--red)}.pick .ic .li,.check .ic .li{margin:0}
+#search{padding-left:34px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a96bf' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M15.3 15.3L20 20'/%3E%3C/svg%3E") no-repeat 10px 50%/17px}
 .pick .ic{font-size:20px;width:30px;text-align:center}.pick.sel{color:var(--accent)}
 .status{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted)}.status.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .hit .ex{font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -107,7 +122,7 @@ body[data-cap=off] #caption{display:none}
 #stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
 #tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
 #mic.on{background:var(--red);border-color:var(--red);color:#fff}
-body.avatar #side,body.avatar #bar{display:none}
+body.avatar #side,body.avatar #bar,body.avatar #docs{display:none}
 body.avatar{height:100dvh;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
 body.avatar #stage{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 body.avatar #stage{display:block}
@@ -125,9 +140,9 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
 <body>
 <div id="app">
   <aside id="side">
-    <header>✦ STELLAI</header>
+    <header><span data-ic="sparkle"></span>STELLAI</header>
     <div style="padding:0 12px 6px"><button class="primary" style="width:100%" id="newChat">+ New chat</button></div>
-    <div style="padding:0 12px 6px"><input id="search" type="search" placeholder="🔍 Search past chats" autocomplete="off"></div>
+    <div style="padding:0 12px 6px"><input id="search" type="search" placeholder="Search past chats" autocomplete="off"></div>
     <div class="scroll" id="searchView" style="display:none"><div id="searchResults"></div></div>
     <div class="scroll" id="listView">
       <div class="sec"><span class="hud">Projects</span><button class="ghost" id="newProject" title="New project">+</button></div>
@@ -136,48 +151,127 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
       <div id="chats"></div>
     </div>
     <footer>
-      <button class="ghost" id="openLibrary">📚 Library</button>
-      <button class="ghost" id="openTasks">⏰ Reminders</button>
-      <button class="ghost" id="openServer">🖥 Server</button>
-      <button class="ghost" id="openSettings">⚙ Settings</button>
+      <button class="ghost" id="openLibrary"><span data-ic="library"></span>Library</button>
+      <button class="ghost" id="openTasks"><span data-ic="alarm"></span>Reminders</button>
+      <button class="ghost" id="openMemory"><span data-ic="memory"></span>Memory</button>
+      <button class="ghost" id="openServer"><span data-ic="server"></span>Server</button>
+      <button class="ghost" id="openSettings"><span data-ic="settings"></span>Settings</button>
       <div class="sub" id="syncState" style="width:100%"></div>
     </footer>
   </aside>
   <main id="main">
     <div id="bar">
-      <button class="ghost" id="menuBtn" style="display:none">☰</button>
+      <button class="ghost" id="menuBtn" style="display:none"><span data-ic="menu" data-solo></span></button>
       <span class="status" id="dot"></span>
       <div class="title"><div id="title" class="hud" style="font-size:14px;color:var(--text);letter-spacing:4px">STELLA</div><div id="subtitle" class="sub"></div></div>
       <button class="chip" id="modeChip"></button>
       <button class="chip" id="projectChip" style="display:none"></button>
+      <button class="chip" id="notesChip" title="Pinned notes: facts kept in mind for this whole chat"><span data-ic="pin" data-solo></span></button>
+      <button class="chip" id="docsChip" title="Documents beside this chat: long code, chapters and write-ups"><span data-ic="doc" data-solo></span></button>
       <div id="meter" title="How full Stella's memory is for this chat"><span class="hud">Context</span><div class="track"><div class="fill" id="meterFill" style="width:0"></div></div><span class="hud" id="meterPct"></span></div>
     </div>
     <div id="stage">
       <div id="avatarHost"></div>
       <div id="avName">STELLA</div><div id="avState"></div><div id="avStatus"></div>
-      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat">💬</button>
-        <button class="ghost" id="avSet" title="Avatar settings">⚙</button><button class="ghost" id="avFull" title="Full screen">⛶</button></div>
+      <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat"><span data-ic="chat" data-solo></span></button>
+        <button class="ghost" id="avSet" title="Avatar settings"><span data-ic="settings" data-solo></span></button><button class="ghost" id="avFull" title="Full screen"><span data-ic="fullscreen" data-solo></span></button></div>
       <div id="caption"></div>
-      <div id="tapStart"><div>✦ Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
+      <div id="tapStart"><div><span data-ic="sparkle"></span>Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
     </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
     <div id="composer">
       <div id="notice"></div>
       <div id="atts"></div>
       <div class="row">
-        <button class="ghost" id="attach" title="Add a photo">📷</button>
+        <button class="ghost" id="attach" title="Add a photo"><span data-ic="camera" data-solo></span></button>
         <input type="file" id="file" accept="image/*" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message Stella… (Enter to send, Shift+Enter for a new line)"></textarea>
-        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)">🎤</button>
+        <button class="ghost" id="mic" title="Talk (Space on the avatar screen)"><span data-ic="mic" data-solo></span></button>
         <button class="primary" id="send">Send</button>
       </div>
     </div>
   </main>
+  <aside id="docs">
+    <div class="dh"><select id="docSel"></select><button class="ghost" id="docNew" title="New document">＋</button><button class="ghost" id="docClose" title="Close"><span data-ic="close" data-solo></span></button></div>
+    <div class="outline" id="docOutline"></div>
+    <div class="dbody" id="docBody"><p class="sub">No documents in this chat yet.</p></div>
+    <div class="dfoot"><span class="sub" id="docInfo" style="flex:1"></span><button class="ghost" id="docCopy">Copy</button><button class="ghost" id="docDl">Download</button>
+      <select id="docVer" title="Earlier versions"></select><button id="docEdit">Edit</button></div>
+  </aside>
 </div>
 <script>
 "use strict";
 // ---------------------------------------------------------------- basics
 const $ = s => document.querySelector(s);
+// ---------------------------------------------------------------- line icons (instead of emoji; same style as the phone app)
+// 24×24 outlines drawn with the current text colour. icon(name) gives the SVG; elements with data-ic get theirs at start.
+const ICON_PATHS = {
+  sparkle: "M12 2.5C12.9 8.2 15.8 11.1 21.5 12C15.8 12.9 12.9 15.8 12 21.5C11.1 15.8 8.2 12.9 2.5 12C8.2 11.1 11.1 8.2 12 2.5Z M19 3v3 M17.5 4.5h3",
+  search: "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M15.3 15.3L20 20",
+  library: "M4 5h4v14H4Z M8 7h4v12H8Z M13.2 6.6l3.8-1 3.4 12.6-3.8 1Z",
+  alarm: "M12 6.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13Z M12 9.5V13l2.2 1.6 M4 6.2L7 3.6 M20 6.2L17 3.6 M7.5 18.5L6 20.5 M16.5 18.5L18 20.5",
+  memory: "M9.5 4.5C7 4.5 5 6.4 5 8.8c-1.2.6-2 1.8-2 3.2 0 1.5.9 2.8 2.2 3.3.2 2.2 2 3.7 4.3 3.7h.5V4.5Z M14.5 4.5C17 4.5 19 6.4 19 8.8c1.2.6 2 1.8 2 3.2 0 1.5-.9 2.8-2.2 3.3-.2 2.2-2 3.7-4.3 3.7H14V4.5Z M10 4.5h4 M10 19h4 M7.5 10.5c1 0 2 .6 2.5 1.5 M16.5 10.5c-1 0-2 .6-2.5 1.5",
+  server: "M4 4.5h16v6H4Z M4 13.5h16v6H4Z M7.5 7.5h.01 M7.5 16.5h.01 M11 7.5h5 M11 16.5h5",
+  settings: "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z M12 2.8l1.4 2.4 2.7-.6.6 2.7 2.4 1.4-1.2 2.5 1.2 2.5-2.4 1.4-.6 2.7-2.7-.6L12 21.2l-1.4-2.4-2.7.6-.6-2.7-2.4-1.4 1.2-2.5-1.2-2.5 2.4-1.4.6-2.7 2.7.6Z",
+  menu: "M4 7h16 M4 12h16 M4 17h16",
+  pin: "M9 3.5h6 M10 3.5v6l-3.5 4h11L14 9.5v-6 M12 13.5V21",
+  doc: "M6 3h8l4 4v14H6Z M14 3v4h4 M9 12h6 M9 15.5h6 M9 9h2.5",
+  chat: "M4 5h16v11H9l-5 4Z M8 9.5h8 M8 12.5h5",
+  fullscreen: "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
+  camera: "M3.5 8h4l1.5-2.5h6L16.5 8h4v11h-17Z M12 10.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7Z",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z M6 11.5a6 6 0 0 0 12 0 M12 17.5V21 M9 21h6",
+  close: "M6 6l12 12 M18 6L6 18",
+  trash: "M4.5 6.5h15 M9.5 6.5V4h5v2.5 M6.5 6.5l1 13.5h9l1-13.5 M10.2 10v6.5 M13.8 10v6.5",
+  keyboard: "M3 6.5h18v11H3Z M6.5 10h.01 M9.5 10h.01 M12.5 10h.01 M15.5 10h.01 M18 10h-.5 M6.5 13h.01 M17.5 13h.01 M9 14.5h6",
+  pen: "M15.5 4.5l4 4L9 19l-5 1 1-5Z M13.5 6.5l4 4",
+  bolt: "M13.5 2.5L5 13.5h6l-1 8 8.5-11H12.5Z",
+  cube: "M12 3l8 4.5v9L12 21l-8-4.5v-9Z M4 7.5l8 4.5 8-4.5 M12 12v9",
+  ruler: "M4 20V4l16 16Z M8 16v-3.5l3.5 3.5Z M4 8h2 M4 12h2",
+  plug: "M9 3v5 M15 3v5 M6.5 8h11v3a5.5 5.5 0 0 1-11 0Z M12 16.5V21",
+  school: "M2.5 9.5L12 5l9.5 4.5L12 14Z M6.5 11.5v4.5c1.5 1.5 3.5 2.2 5.5 2.2s4-.7 5.5-2.2v-4.5 M21.5 9.5v5",
+  bulb: "M9 17.5h6 M10 20.5h4 M12 3a6 6 0 0 0-3.6 10.8c.4.3.6.8.6 1.3v.4h6v-.4c0-.5.2-1 .6-1.3A6 6 0 0 0 12 3Z",
+  scroll: "M7 4h11a2 2 0 0 1 0 4H17v10a2 2 0 0 1-2 2H5a2 2 0 0 1 0-4h1V6a2 2 0 0 1 2-2Z M5 16h9a2 2 0 0 0 2 2 M9.5 9h4 M9.5 12h4",
+  game: "M7 8h10a4 4 0 0 1 3.9 4.8l-.8 3.6a2 2 0 0 1-3.4.9L14.5 15h-5l-2.2 2.3a2 2 0 0 1-3.4-.9l-.8-3.6A4 4 0 0 1 7 8Z M8 10.5v3 M6.5 12h3 M15.5 11h.01 M17 13h.01",
+  food: "M6 3v7a2 2 0 0 0 4 0V3 M8 3v18 M16.5 3c-1.7 1-2.5 3.2-2.5 6v4h2.5v8",
+  flask: "M9.5 3h5 M10 3v6.5L4.8 18.3A1.8 1.8 0 0 0 6.4 21h11.2a1.8 1.8 0 0 0 1.6-2.7L14 9.5V3 M7.5 14.5h9",
+  music: "M9 18V5.5l11-2V16 M6.5 15.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5Z M17.5 13.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5Z",
+  chart: "M4 4v16h16 M7 15l4-4 3 3 5-6",
+  map: "M9 4L3.5 6v14L9 18l6 2 5.5-2V4L15 6Z M9 4v14 M15 6v14",
+  wrench: "M14.7 6.3a4 4 0 0 0 5 5L21 10a5.5 5.5 0 0 1-7-7l-1.3 1.3Z M13.2 8.8L4 18a1.4 1.4 0 0 0 2 2l9.2-9.2",
+  heart: "M12 20s-7.5-4.5-7.5-10A4.3 4.3 0 0 1 12 7.3 4.3 4.3 0 0 1 19.5 10c0 5.5-7.5 10-7.5 10Z",
+  moon: "M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10Z",
+  star: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9Z",
+  code: "M8.5 7.5L4 12l4.5 4.5 M15.5 7.5L20 12l-4.5 4.5 M13.5 5l-3 14",
+  image: "M3.5 5h17v14h-17Z M3.5 16l5-5 4 4 2.5-2.5 5.5 5.5 M15.5 8.5h.01",
+  note: "M5 4h14v16H5Z M8.5 8.5h7 M8.5 12h7 M8.5 15.5h4",
+  folder: "M3.5 6.5h6l2 2h9v10h-17Z",
+  play: "M8 5.5v13l10.5-6.5Z",
+  check: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M8 12.3l2.7 2.7L16 9.7",
+  cross: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M9 9l6 6 M15 9l-6 6",
+  warn: "M12 4L2.8 19.5h18.4Z M12 10v4.5 M12 17.2h.01",
+  swap: "M4 8.5h14 M14.5 5L18 8.5 14.5 12 M20 15.5H6 M9.5 12L6 15.5 9.5 19",
+  redo: "M5 5v6a4 4 0 0 0 4 4h10 M15.5 11.5L19 15l-3.5 3.5",
+  diamond: "M12 3.5L20.5 12 12 20.5 3.5 12Z",
+  thought: "M12 4.5a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15Z M9 12h.01 M12 12h.01 M15 12h.01",
+  dot: "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10Z",
+  info: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 11v5.5 M12 7.8h.01",
+};
+function icon(name, cls = "") {
+  return `<svg class="li${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON_PATHS[name] || ICON_PATHS.sparkle}"/></svg>`;
+}
+// A mode's icon: modes store a symbol (shared with the phone app), drawn here as a line icon
+const MODE_ICON = { "⌨": "keyboard", "✒": "pen", "✍": "pen", "✏": "pen", "⚡": "bolt", "🎓": "school", "💡": "bulb", "📜": "scroll",
+  "🎮": "game", "🍳": "food", "🧪": "flask", "🎵": "music", "🎶": "music", "📈": "chart", "🗺": "map", "🛠": "wrench", "🔧": "wrench",
+  "❤": "heart", "♥": "heart", "🌙": "moon", "★": "star", "⭐": "star", "💻": "code", "◆": "cube", "🧊": "cube", "📐": "ruler", "🔌": "plug" };
+const modeIc = sym => icon(MODE_ICON[String(sym || "").trim()] || "sparkle");
+// Stored marks at the start of a line ("✓ Saved", "⇄ Auto: CAD") drawn as icons
+const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""] };
+function markedLine(text) {
+  const t = String(text || "").trimStart(); const m = MARKS[t[0]];
+  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()) : esc(t);
+}
+const fileIc = kind => icon(kind === "pdf" ? "doc" : kind === "image" ? "image" : kind === "code" ? "code" : "note");
+document.querySelectorAll("[data-ic]").forEach(el => { el.outerHTML = icon(el.dataset.ic, el.hasAttribute("data-solo") ? "solo" : ""); });
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
   const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16); }));
@@ -208,8 +302,26 @@ async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   const text = await r.text();
   let data = null; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (r.status === 410 && data && data.moved_to) followMove(data.moved_to, data.moved_from);
   if (!r.ok) { const e = new Error((data && data.error) || ("HTTP " + r.status)); e.status = r.status; throw e; }
   return data;
+}
+// Stella moved to another server: this page follows her there (the key travels in the #fragment, as always)
+let MOVING_TO = null;
+function followMove(to, from) {
+  if (MOVING_TO || !to || !to.hub_url) return;
+  MOVING_TO = to.hub_url;
+  const q = new URLSearchParams(location.search); if (from) q.set("moved_from", from);
+  setTimeout(() => location.replace(to.hub_url + location.pathname + "?" + q.toString() + "#key=" + encodeURIComponent(KEY)), 1500);
+}
+const MOVED_FROM = new URLSearchParams(location.search).get("moved_from");
+if (MOVED_FROM !== null) { const q = new URLSearchParams(location.search); q.delete("moved_from");
+  history.replaceState(null, "", location.pathname + (q.toString() ? "?" + q.toString() : "")); }
+function movedHello() {     // the first thing on the new server: say so, on this screen only
+  if (MOVED_FROM === null) return;
+  const text = `I'm here now${MOVED_FROM ? `: I moved over from ${MOVED_FROM}` : ""}, and everything came with me.`;
+  if (AVATAR_MODE) { avatarCaption(text, "stella"); if (AV.cfg && AV.cfg.speak) { try { SPEAK.say(text); } catch {} } }
+  else if (typeof notice === "function") notice(text);
 }
 const media = ref => { const [k, id] = ref.split(":"); return (k === "image" ? `/images/${id}.jpg` : `/diagrams/${id}.png`) + "?key=" + encodeURIComponent(KEY); };
 
@@ -224,6 +336,10 @@ const MODES = [
     prompt: "Mode: Electronics. Act as an experienced electronics engineer.\n- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n- Draw schematics or timing diagrams with render_diagram when a picture helps.\n- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)." },
   { id: "modeler", name: "3D Modeler", icon: "◆", desc: "Blender modeling on your server, checked step by step", temperature: 0.3, thinking: "on",
     prompt: "Mode: 3D Modeler. You build and fix 3D models in Blender on the user's server, one careful step at a time. Accuracy matters more than speed.\n- Start with blender_project (status, then new or open) and blender_inspect before changing anything. Never guess object names, bone names or sizes: read them.\n- Each blender_step makes ONE small, checkable change (add one part, move one thing, fix one problem). Write the goal with numbers: metres, degrees, which object or bone.\n- Write bpy with bpy.data, bmesh and the ready-made helpers; avoid edit-mode bpy.ops. Z is up and the front faces -Y (a character's face is in the FRONT view).\n- After each step, read the measured changes, any new mesh problems and the visual check. If something is off, fix it with another step or go back with revert. Never say a step worked when the check or the numbers say otherwise.\n- Tell the user the version number after each change so they can ask to go back. Before big changes (deleting or joining parts, remeshing, re-rigging) explain the plan and wait for a yes.\n- Photos: when the user sends pictures of what they want, save them with blender_project add_reference (label front/left/back/right when you can tell), so every check compares against them. Ask for 2-3 photos from different sides when the shape matters.\n- New object from photos: blender_generate makes a rough shape (several minutes). Then, one step each: turn it so its front faces -Y, scale it from a real measurement (ask the user for one; photos can't show size), clean up the mesh, add materials, and compare with blender_inspect render=true.\n- Editing something to look like a photo: change it step by step and let the reference comparison tell you what still differs.\n- You're strongest at hard-surface parts, props and accessories, materials (including glowing emission), cleanup, attaching parts to bones and exports. Generated shapes are rough for characters and poor for whole rooms. For organic sculpting (faces, bodies, cloth folds) guide the user step by step in Blender instead and check their result.\n- Files: the user drops .blend, .vrm, .glb, .fbx, .obj or .stl files into the 3D inbox folder on the server (blender_project status shows where); exports go to the workspace's exports folder." },
+  { id: "cad", name: "CAD Designer", icon: "📐", desc: "Precise parts in FreeCAD: measured, checked, ready to print", temperature: 0.3, thinking: "on",
+    prompt: "Mode: CAD Designer. You design precise parts in FreeCAD on the user's server, one checked step at a time: brackets, enclosures, mounts, adapters, fan ducts, replacement parts and anything to 3D print or machine. Accuracy matters more than speed.\n- Start with cad_project (status, then new or open) and cad_inspect. Ask for the measurements that matter (sizes, hole sizes and spacing, wall thickness, what it attaches to, the printer or material) before designing; never guess a size that has to fit something real.\n- Each cad_step makes ONE change with exact millimetres in the goal. Build with Part shapes, then add() one final part per real object. Z is up; put the part on Z=0 and the front towards -Y.\n- After each step read the measured sizes, volumes and problems (not a solid, separate solids, invalid geometry) and the visual check. Fix problems before going on; never say it worked when the numbers say otherwise. Say the version number so the user can go back.\n- For 3D printing: walls at least 1.2 mm (2 mm or more for strength), holes 0.2-0.4 mm bigger than the bolt or peg, avoid overhangs steeper than 45 degrees and floating parts, add fillets where it takes load, and suggest a print orientation.\n- Photos or sketches the user sends can be saved with cad_project add_reference so every check compares against them. A board exported from the PCB Designer as step appears in the 3D inbox, ready to build an enclosure around. Exports: step for other CAD, stl for printing, blender to hand the part to the 3D Modeler." },
+  { id: "pcb", name: "PCB Designer", icon: "🔌", desc: "Circuit boards in KiCad: circuits as code, autorouting, checks, fab files", temperature: 0.3, thinking: "on",
+    prompt: "Mode: PCB Designer. You help with circuit boards in KiCad on the user's server: designing circuits as code, checking, explaining, placing parts, board outlines, tracks, and making the files a board maker needs. Accuracy matters more than speed.\n- Start with pcb_project (status, then new or open) and pcb_check. Explain each rules-check problem in plain words: what it means, where it is, and how to fix it.\n- Each pcb_step makes ONE board change (move or rotate a part, set the outline, add a track or text) with millimetres and references (R3, U1) in the goal. Board Y grows downwards. After each step compare the new rules check with the old one, say the version number, and undo anything you made worse.\n- New circuits: write them with pcb_circuit as a SKiDL script (parts with real KiCad footprints, named nets). It makes the schematic and netlist, lays the parts out wide on a grid, autoroutes and checks. Start simple, prefer through-hole parts, keep boards roomy. To change the circuit, send the whole script again (it is saved as circuit.py in each version; parts keep their places).\n- Learn over time: run pcb_library list before designing and reuse recipes that worked. After a clean build the user is happy with, offer save_recipe; when something was wrong, save a note with the fix. Pins listed under verify_with_user aren't confirmed: show them and ask the user to check the datasheet or the part, then confirm_pinout. Don't invent part values or pinouts: ask, or point to the datasheet.\n- Imported boards: their schematics aren't scripted; walk the user through changes in KiCad's schematic editor, then confirm with pcb_check (including the schematic mismatch count).\n- Safety: for mains voltage, batteries or high current, point out clearance and creepage, trace width for the current, fusing and isolation, and recommend a qualified review before powering it.\n- Exports: fab (Gerbers and drill files zipped for JLCPCB, PCBWay and others), bom, pos (pick and place), step (3D, also dropped into the 3D inbox for the CAD Designer), pdf (schematic), project (the KiCad files)." },
   { id: "tutor", name: "Tutor", icon: "🎓", desc: "Learn step by step instead of just getting answers", temperature: 0.5,
     prompt: "Mode: Tutor. Help the user learn and understand, not just get answers.\n- Explain step by step with simple examples and analogies, building on what they already know.\n- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n- Check understanding with a short question now and then. Correct misconceptions kindly and clearly." },
   { id: "brainstorm", name: "Brainstorm", icon: "💡", desc: "Lots of ideas, from practical to wild", temperature: 1.0, thinking: "off",
@@ -236,7 +352,7 @@ const S = {
   convs: new Map(), msgs: new Map(), dirtyC: new Set(), dirtyM: new Map(),
   cursor: 0, serverId: "", current: null, pendingProject: "", pendingMode: "",
   projects: [], customModes: [], memories: [], tools: [], approval: new Set(),
-  busy: false, abort: null, attachments: [], context: null, lastSync: 0, syncError: "", sticky: new Map(),
+  busy: false, abort: null, attachments: [], context: null, lastSync: 0, syncError: "", sticky: new Map(), auto: new Map(), forced: new Map(),
 };
 const allModes = () => MODES.concat(S.customModes.map(m => ({ ...m, desc: "Your mode", thinking: m.thinking || "default", tools: m.tools || "all" })));
 const modeById = id => allModes().find(m => m.id === id) || MODES[0];
@@ -311,6 +427,7 @@ async function loadMeta() {
 function inline(s) {
   s = esc(s);
   s = s.replace(/!\[([^\]]*)\]\((diagram|image):([0-9a-f]{16})\)/g, (_, t, k, id) => `<img alt="${t}" src="${media(k + ":" + id)}">`);
+  s = s.replace(/\[doc:([0-9a-f]{10})\]/g, '<button class="docref" data-doc="$1">' + icon("doc") + 'open</button>');
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
@@ -351,21 +468,21 @@ function md(src) {
 function renderSide() {
   const pid = curProjectId();
   $("#projects").innerHTML = S.projects.length ? S.projects.map(p => `<div class="item${p.id === pid && !S.current ? " sel" : ""}" data-p="${p.id}">
-      <span style="color:${COLORS[p.color] || COLORS.cyan}">◆</span><span class="t">${esc(p.name)}</span><span class="sub">${[...S.convs.values()].filter(c => !c.deleted && c.project_id === p.id).length || ""}</span></div>`).join("")
+      <span style="color:${COLORS[p.color] || COLORS.cyan}">${icon("diamond")}</span><span class="t">${esc(p.name)}</span><span class="sub">${[...S.convs.values()].filter(c => !c.deleted && c.project_id === p.id).length || ""}</span></div>`).join("")
     : `<div class="sub" style="padding:2px 10px 6px">Group chats with shared instructions, notes and files.</div>`;
   const convs = [...S.convs.values()].filter(c => !c.deleted).sort((a, b) => b.updated_at - a.updated_at);
   $("#chats").innerHTML = convs.map(c => {
-    const p = project(c.project_id); const m = c.mode ? modeById(c.mode).icon + " " : "";
-    return `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${esc(m + (c.title || "Untitled"))}${p ? `<div class="sub" style="color:${COLORS[p.color] || COLORS.cyan}">◆ ${esc(p.name)}</div>` : ""}</span><button class="x" data-del="${c.id}" title="Delete chat">🗑</button></div>`;
+    const p = project(c.project_id); const m = c.mode ? modeIc(modeById(c.mode).icon) : "";
+    return `<div class="item${c.id === S.current ? " sel" : ""}" data-c="${c.id}"><span class="t">${m}${esc(c.title || "Untitled")}${p ? `<div class="sub" style="color:${COLORS[p.color] || COLORS.cyan}">${icon("diamond")}${esc(p.name)}</div>` : ""}</span><button class="x" data-del="${c.id}" title="Delete chat">${icon("trash", "solo")}</button></div>`;
   }).join("") || `<div class="sub" style="padding:2px 10px">No chats yet.</div>`;
 }
 function renderBar() {
   const c = curConv(), m = curMode(), p = project(curProjectId());
   $("#title").textContent = NAME().toUpperCase();
   $("#subtitle").textContent = S.status || (c ? c.title : "New chat");
-  $("#modeChip").textContent = `${m.icon} ${m.name.toUpperCase()} ▾`;
+  $("#modeChip").innerHTML = `${modeIc(m.icon)}${esc(m.name.toUpperCase())} ▾`;
   $("#projectChip").style.display = p ? "" : "none";
-  if (p) { $("#projectChip").textContent = "◆ " + p.name; $("#projectChip").style.color = COLORS[p.color] || COLORS.cyan; }
+  if (p) { $("#projectChip").innerHTML = icon("diamond") + esc(p.name); $("#projectChip").style.color = COLORS[p.color] || COLORS.cyan; }
   const info = S.context;
   $("#meter").style.display = info && c ? "" : "none";
   if (info) {
@@ -381,24 +498,30 @@ function renderMsgs(scroll = true) {
   const wrap = $("#wrap"); const list = S.current ? msgsOf(S.current) : [];
   if (!list.length && !S.streaming) {
     const m = curMode(), p = project(curProjectId());
-    wrap.innerHTML = `<div class="empty">${p ? `<div class="hud" style="color:${COLORS[p.color]}">◆ ${esc(p.name)}</div><div class="sub">New chat in this project. ${esc(NAME())} knows its instructions, notes and files.</div><br>` : ""}
-      ${m.id !== "general" ? `<div class="hud" style="color:var(--glow)">${m.icon} ${esc(m.name)} mode</div><div class="sub">${esc(m.desc)}</div><br>` : ""}
-      <div class="star">✦</div><div class="hud" style="font-size:16px;color:var(--text);letter-spacing:5px">${esc(NAME().toUpperCase())} ONLINE</div>
+    wrap.innerHTML = `<div class="empty">${p ? `<div class="hud" style="color:${COLORS[p.color]}">${icon("diamond")}${esc(p.name)}</div><div class="sub">New chat in this project. ${esc(NAME())} knows its instructions, notes and files.</div><br>` : ""}
+      ${m.id !== "general" ? `<div class="hud" style="color:var(--glow)">${modeIc(m.icon)}${esc(m.name)} mode</div><div class="sub">${esc(m.desc)}</div><br>` : ""}
+      <div class="star">${icon("sparkle", "solo")}</div><div class="hud" style="font-size:16px;color:var(--text);letter-spacing:5px">${esc(NAME().toUpperCase())} ONLINE</div>
       <p>Same chats as your phone. Try “Remind me to check the 3D print at 9”, or open a project and drop in a datasheet.</p></div>`;
     return;
   }
   const lastReply = [...list].reverse().find(m => m.role === "assistant");
   wrap.innerHTML = list.map(m => msgHtml(m, lastReply && m.id === lastReply.id)).join("") + (S.streaming ? msgHtml(S.streaming, false, true) : "") +
-    (S.error ? `<div class="err">⚠ ${esc(S.error)}</div>` : "");
+    (S.error ? `<div class="err">${icon("warn")}${esc(S.error)}</div>` : "");
   if (scroll) $("#msgs").scrollTop = $("#msgs").scrollHeight;
 }
 function msgHtml(m, canRetry, live) {
   const name = NAME().toUpperCase();
+  if (m.role === "tool" && m.text.startsWith("⇄")) {   // Auto mode's chip: change the mode for the last reply
+    const now = S.auto.get(S.current);
+    const opts = AUTO_CHOICES.filter(id => id !== now).map(id => `<option value="${id}">Redo last reply in ${esc(modeById(id).name)}</option>`).join("");
+    return `<div class="tool">${markedLine(m.text)}${S.busy ? "" : ` <select data-redo="1" style="margin-left:6px;max-width:240px"><option value="">Change…</option>${now ? `<option value="pin:${now}">Keep this chat in ${esc(modeById(now).name)}</option>` : ""}${opts}</select>`}</div>`;
+  }
   if (m.role === "tool") {
     const lines = m.text.split("\n"); const img = lines.find(l => /^!\[[^\]]*\]\(diagram:/.test(l.trim()));
-    return `<div class="tool">› ${esc(lines.filter(l => l !== img).join(" "))}${img ? `<div class="md">${inline(img.trim())}</div>` : ""}</div>`;
+    const txt = markedLine(lines.filter(l => l !== img).join(" ")).replace(/\[doc:([0-9a-f]{10})\]/g, '<button class="docref" data-doc="$1">open</button>');
+    return `<div class="tool">${txt}${img ? `<div class="md">${inline(img.trim())}</div>` : ""}</div>`;
   }
-  if (m.role === "summary") return `<div class="summary" data-sum="${m.id}"><div class="hud">✦ Context refreshed</div><div class="sumbody sub">${esc(NAME())} continues from a summary of the messages above. Click to read it.</div></div>`;
+  if (m.role === "summary") return `<div class="summary" data-sum="${m.id}"><div class="hud">${icon("sparkle")}Context refreshed</div><div class="sumbody sub">${esc(NAME())} continues from a summary of the messages above. Click to read it.</div></div>`;
   if (m.role === "user") {
     const photos = [...m.text.matchAll(/!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g)].map(x => x[1]);
     const text = m.text.replace(/!\[[^\]]*\]\(image:[0-9a-f]{16}\)/g, "").trim();
@@ -406,7 +529,7 @@ function msgHtml(m, canRetry, live) {
   }
   const wide = /```|\n\|/.test(m.text);
   return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
-    <div class="who">✦ ${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>◌ Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
+    <div class="who">${icon("sparkle")}${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>${icon("thought")}Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
     <div class="md">${m.text ? md(m.text) : '<span class="sub">…</span>'}</div></div>`;
 }
 
@@ -436,13 +559,16 @@ function systemPrompt(projectText, summary, mode, memory) {
   let p = `You are ${name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
 The user is in the StellAI desktop web chat. Phone actions (alarms, apps, texts) aren't available here, but reminders still ring on their phones.
 Markdown is fine; always put code in fenced blocks with a language; avoid tables.
+For long code (over ~60 lines), chapters or write-ups, use the document tool: they show beside the chat; refer to them in a line instead of pasting.
 Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically).
 Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
-A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.`;
+A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
+Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before answering, and use run_python or the calculators when it's available instead of doing long arithmetic in your head. If you get something wrong, say so and fix it.
+Pin decisions, names and facts that must stay true in this chat with pin_note when it's available.`;
   if (mode.prompt) p += `\n\n## Current mode: ${mode.name}\n${mode.prompt}\nThese mode instructions take priority over the general style guidance above (such as keeping replies short).`;
   if (memory) p += "\n\n" + memory;
   if (projectText) p += "\n\n" + projectText;
-  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat.\n" + summary;
+  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat. When you need its exact words (code, numbers, names), call recall_chat.\n" + summary;
   return p;
 }
 const PHOTO = /!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g, DIAGRAM = /!\[[^\]]*\]\(diagram:[0-9a-f]+\)/g;
@@ -452,15 +578,15 @@ function buildHistory(list) {
   for (const m of list) {
     if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo $1]").trim(), _id: m.id, _text: m.text }); }
     else if (m.role === "assistant" && m.text.trim()) pending += m.text + "\n";
-    else if (m.role === "tool") pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
+    else if (m.role === "tool" && !m.text.startsWith("⇄")) pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
   }
   flush(); return out;
 }
-async function prepare(convId, images, voice = false) {
-  const c = S.convs.get(convId); const mode = modeById(c.mode); const list = msgsOf(convId);
+async function prepare(convId, images, voice = false, override = null, auto = false) {
+  const c = S.convs.get(convId); const mode = override || modeById(c.mode); const list = msgsOf(convId);
   let last = -1; list.forEach((m, i) => { if (m.role === "summary") last = i; });
   const summary = last >= 0 ? list[last].text : "";
-  const history = buildHistory(list.slice(last + 1));
+  let history = buildHistory(list.slice(last + 1));
   const base = systemPrompt("", summary, mode, "");
   const sticky = [...(S.sticky.get(convId) || [])];
   const query = list.filter(m => m.role === "user").slice(-2).map(m => m.text.replace(PHOTO, "")).join("\n");
@@ -468,7 +594,7 @@ async function prepare(convId, images, voice = false) {
   try {
     plan = await api("/context", { method: "POST", json: { project_id: c.project_id || "", query, fixed: base, images, mode: mode.id,
       mode_tools: mode.tools || "all", split: true, sticky, thinking: voice ? "auto" : thinkPref(mode),
-      last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), messages: history.map(h => ({ role: h.role, content: h.content })) } });
+      last: (list.filter(m => m.role === "user").slice(-1)[0] || { text: "" }).text.replace(PHOTO, ""), chat_id: convId, auto, messages: history.map(h => ({ role: h.role, content: h.content })) } });
   } catch { plan = null; }
   let start = 0, info = null, needsRefresh = false, names = null, projectText = "", memory = oldMemorySection(), extra = "";
   let think = thinkPref(mode) === "on";
@@ -478,6 +604,8 @@ async function prepare(convId, images, voice = false) {
     if ("memory_context" in plan) memory = plan.memory_context || "";
     extra = plan.turn_context || "";
     if ("think" in plan) think = !!plan.think;
+    // Auto mode: earlier topics in other modes are left out (the server sends a short note about them)
+    if (plan.drop && plan.drop.length) { const drop = new Set(plan.drop); history = history.filter((_, i) => !drop.has(i)); }
     start = Math.min(plan.keep_from || 0, history.length);
     while (start < history.length && history[start].role !== "user") start++;
     if (start >= history.length) start = Math.max(0, history.map(h => h.role).lastIndexOf("user"));
@@ -565,7 +693,22 @@ async function quickAnswer(convId) {
   try { const r = await api("/quick", { method: "POST", json: { text, now: iso } }); return r && r.reply ? r.reply : null; } catch { return null; }
 }
 
+const AUTO_CHOICES = ["general", "programmer", "electronics", "cad", "pcb", "modeler", "writer", "tutor", "brainstorm"];
+async function autoMode(convId, fresh) {
+  const forced = S.forced.get(convId) || ""; S.forced.delete(convId);
+  if (!fresh && !forced) return modeById(S.auto.get(convId) || "general");
+  const last = msgsOf(convId).filter(m => m.role === "user").pop();
+  const text = last ? last.text.replace(PHOTO, "").trim() : "";
+  let r;
+  try { r = await api("/route", { method: "POST", json: { chat_id: convId, text, level: store.get("autoModes", "auto"), forced, current: S.auto.get(convId) || null } }); }
+  catch { return modeById(S.auto.get(convId) || "general"); }
+  S.auto.set(convId, r.mode);
+  if (r.switched || forced) addMsg(convId, "tool", "⇄ Auto: " + modeById(r.mode).name + (r.reason ? " (" + r.reason + ")" : ""));
+  else if (r.suggest) addMsg(convId, "tool", "⇄ Suggest: " + r.suggest_name + " (pick it below to redo)");
+  return modeById(r.mode);
+}
 async function run(convId, photos, voice = false, fresh = false) {
+  S.continued = 0;
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
   SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
   const turn = []; const projectId = (S.convs.get(convId).project_id || "");
@@ -578,15 +721,18 @@ async function run(convId, photos, voice = false, fresh = false) {
       addMsg(convId, "assistant", quick);
       return;
     }
-    let p = await prepare(convId, photos.length, voice);
+    // Auto mode: a General chat picks the mode that fits this message (instant keyword check on the server)
+    const auto = (S.convs.get(convId).mode || "general") === "general" && store.get("autoModes", "auto") !== "off";
+    let amode = auto ? await autoMode(convId, fresh) : null;
+    let p = await prepare(convId, photos.length, voice, amode, auto);
     if (p.needsRefresh && !S.stopRequested) {
       S.status = "Refreshing context…"; renderBar();
-      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
+      try { if (await compact(convId, 2)) { p = await prepare(convId, photos.length, voice, amode, auto); renderMsgs(); } } catch (e) { notice("Couldn't refresh the context: " + e.message); }
     }
     if (p.info) S.context = p.info;
     const st = S.sticky.get(convId) || new Set(); p.tools.forEach(t => st.add(t.function.name)); S.sticky.set(convId, st);
     // newest message with photos goes to the model as images
-    const hist = p.history.map(h => ({ role: h.role, content: h.content }));
+    let hist = p.history.map(h => ({ role: h.role, content: h.content }));
     const lastUser = p.history.map(h => h.role).lastIndexOf("user");
     if (lastUser >= 0 && photos.length) {
       const block = (hist[lastUser].content.match(/^\[Automatic context[\s\S]*?\[End of context\]\n\n/) || [""])[0];
@@ -596,7 +742,7 @@ async function run(convId, photos, voice = false, fresh = false) {
     }
     const thinking = p.think;
     // Qwen's recommended sampling for Qwen3.5 (model card); a mode's creativity overrides temperature
-    const code = p.mode.id === "programmer" || p.mode.id === "electronics" || p.mode.id === "modeler";
+    const code = ["programmer", "electronics", "modeler", "cad", "pcb"].includes(p.mode.id);
     for (let round = 0; round < 6; round++) {
       S.status = "Contacting server…"; renderBar();
       const body = { model: "local", stream: true, messages: [{ role: "system", content: p.system }, ...hist, ...turn],
@@ -615,7 +761,19 @@ async function run(convId, photos, voice = false, fresh = false) {
       const assistant = { role: "assistant", content: finalText };
       if (result.toolCalls.length) assistant.tool_calls = result.toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } }));
       turn.push(assistant); renderMsgs();
-      if (!result.toolCalls.length) break;
+      if (!result.toolCalls.length) {
+        // the reply ran out of room (her memory filled up mid-answer): make room, then carry on where it stopped
+        if (result.finish === "length" && finalText && (S.continued = (S.continued || 0)) < 2 && !S.stopRequested) {
+          S.continued++; addMsg(convId, "tool", "↪ Long reply: making room and continuing");
+          S.status = "Continuing…"; renderBar();
+          try { await compact(convId, 1); } catch {}
+          p = await prepare(convId, 0, voice, amode, auto);
+          hist = p.history.map(h => ({ role: h.role, content: h.content }));
+          turn.length = 0; turn.push({ role: "user", content: "(Automatic: your previous reply was cut off because your memory filled up. Continue it exactly where it stopped, without repeating anything or adding a preamble.)" });
+          continue;
+        }
+        break;
+      }
       for (const tc of result.toolCalls) {
         let args = {}; try { args = JSON.parse(tc.arguments || "{}"); } catch {}
         delete args.approved;
@@ -628,6 +786,7 @@ async function run(convId, photos, voice = false, fresh = false) {
         } else {
           if (S.approval.has(tc.name)) args.approved = true;
           if (tc.name === "search_chats") args.current_conversation = convId;
+          if (!("conversation_id" in args)) args.conversation_id = convId;   // chat tools: notes, recall, Auto mode
           // keep big results (pages, files) within the space left in Stella's context
           const left = p.info ? p.info.limit - p.info.used - Math.floor(JSON.stringify(turn).length / 3) : null;
           args._max_chars = left == null ? 12000 : Math.max(1500, Math.floor(left * 3 * 0.6));
@@ -639,7 +798,15 @@ async function run(convId, photos, voice = false, fresh = false) {
             outcome = { line, result: JSON.stringify(res) };
           } catch (e) { outcome = { line: "✗ " + e.message, result: JSON.stringify({ ok: false, error: e.message }) }; }
         }
-        addMsg(convId, "tool", outcome.line);
+        let switched = null;
+        try { if (tc.name === "switch_mode" && auto) switched = JSON.parse(outcome.result).switched_to || null; } catch {}
+        if (switched) {   // Stella switched herself: her next step uses that mode's instructions and tools
+          S.auto.set(convId, switched); amode = modeById(switched);
+          addMsg(convId, "tool", "⇄ Auto: " + amode.name + " (Stella switched)");
+          p = await prepare(convId, 0, voice, amode, true);
+          hist = p.history.map(h => ({ role: h.role, content: h.content }));
+        } else addMsg(convId, "tool", outcome.line);
+        if (tc.name === "document" && convId === S.current) { const m = outcome.line.match(/\[doc:([0-9a-f]{10})\]/); refreshDocs(m ? m[1] : null, !!m); }
         turn.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: outcome.result });
         renderMsgs();
       }
@@ -657,7 +824,7 @@ async function run(convId, photos, voice = false, fresh = false) {
     if (turn.some(t => t.role === "tool" && t.name === "project_note")) loadMeta();
   }
 }
-const toolLabel = n => ({ blender_generate: "Making a 3D shape from the pictures", blender_step: "Working in Blender", blender_inspect: "Looking at the model", blender_project: "Opening the 3D workspace", render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
+const toolLabel = n => ({ cad_step: "Working in FreeCAD", cad_inspect: "Measuring the design", cad_project: "Opening the CAD workspace", pcb_step: "Editing the board", pin_note: "Pinning a note", document: "Writing in the document", run_python: "Running Python", recall_chat: "Looking back in this chat", move_stella: "Moving to another server", pcb_circuit: "Building the circuit and board", pcb_library: "Checking the PCB library", pcb_check: "Checking the board", pcb_project: "Opening the PCB workspace", blender_generate: "Making a 3D shape from the pictures", blender_step: "Working in Blender", blender_inspect: "Looking at the model", blender_project: "Opening the 3D workspace", render_diagram: "Drawing diagram", web_search: "Searching the web", fetch_page: "Reading the page", set_reminder: "Setting reminder",
   project_search: "Searching project files", library_search: "Searching the library", remember: "Remembering" }[n] || (n.startsWith("github") ? "Working with GitHub" : "Calculating"));
 
 async function stream(body) {
@@ -678,6 +845,7 @@ async function stream(body) {
       if (!line.startsWith("data:")) continue; const data = line.slice(5).trim(); if (data === "[DONE]") continue;
       let j; try { j = JSON.parse(data); } catch { continue; }
       if (j.error) throw new Error(j.error.message || "server error");
+      if (j.choices && j.choices[0] && j.choices[0].finish_reason) res.finish = j.choices[0].finish_reason;
       const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
       if (d.content) res.content += d.content;
       if (d.reasoning_content) res.reasoning += d.reasoning_content;
@@ -721,7 +889,7 @@ function dialog(html, onClose) {
   o.addEventListener("mousedown", e => { if (e.target === o) { o.remove(); onClose && onClose(); } });
   document.body.appendChild(o); return o;
 }
-function notice(text) { const n = $("#notice"); n.textContent = "✦ " + text + "  (click to dismiss)"; n.style.display = "block"; }
+function notice(text) { const n = $("#notice"); n.innerHTML = icon("sparkle") + esc(text + "  (click to dismiss)"); n.style.display = "block"; }
 function askKey() {
   if (document.querySelector("#keyDlg")) return;
   const d = dialog(`<h2 id="keyDlg">Connect to Stella</h2><p class="sub">Enter the API key shown by StellAI Server (Windows: the server window; Linux: the StellAI Server terminal).</p>
@@ -733,7 +901,7 @@ function askKey() {
 function pickMode() {
   const cur = curMode();
   const d = dialog(`<h2>${S.current ? "Switch mode" : "Mode for this chat"}</h2><p class="sub">Changes how ${esc(NAME())} thinks and writes in this chat, from her next reply on.</p>` +
-    allModes().map(m => `<div class="pick${m.id === cur.id ? " sel" : ""}" data-m="${esc(m.id)}"><span class="ic">${esc(m.icon)}</span><div style="flex:1"><div>${esc(m.name)}</div><div class="sub">${esc(m.desc)}</div></div>${m.id === cur.id ? "✓" : ""}</div>`).join("") +
+    allModes().map(m => `<div class="pick${m.id === cur.id ? " sel" : ""}" data-m="${esc(m.id)}"><span class="ic">${modeIc(m.icon)}</span><div style="flex:1"><div>${esc(m.name)}</div><div class="sub">${esc(m.desc)}</div></div>${m.id === cur.id ? icon("check", "solo") : ""}</div>`).join("") +
     `<div class="btns"><span class="sub" style="flex:1">Create your own modes in the phone app (Manage modes).</span><button id="close">Close</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
   d.querySelectorAll("[data-m]").forEach(el => el.onclick = () => {
@@ -745,7 +913,7 @@ function pickMode() {
 function pickProject() {
   const pid = curProjectId();
   const d = dialog(`<h2>${S.current ? "Move chat to…" : "Start this chat in…"}</h2>` +
-    [{ id: "", name: "No project", color: "" }].concat(S.projects).map(p => `<div class="pick${p.id === pid ? " sel" : ""}" data-p="${p.id}"><span class="ic" style="color:${COLORS[p.color] || "var(--muted)"}">◆</span><div style="flex:1">${esc(p.name)}</div>${p.id === pid ? "✓" : ""}</div>`).join("") +
+    [{ id: "", name: "No project", color: "" }].concat(S.projects).map(p => `<div class="pick${p.id === pid ? " sel" : ""}" data-p="${p.id}"><span class="ic" style="color:${COLORS[p.color] || "var(--muted)"}">${icon("diamond")}</span><div style="flex:1">${esc(p.name)}</div>${p.id === pid ? icon("check", "solo") : ""}</div>`).join("") +
     `<div class="btns"><button id="close">Close</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
   d.querySelectorAll("[data-p]").forEach(el => el.onclick = () => {
@@ -757,14 +925,14 @@ async function openProject(id) {
   const isNew = id === "new", isLib = id === "library";
   let p = isNew ? { id: "", name: "", color: "cyan", instructions: "", notes: [], files: [] } : isLib ? await api("/library") : await api("/projects").then(r => r.projects.find(x => x.id === id));
   if (!p) return;
-  const fileRows = files => files.map(f => `<div class="row"><span>${f.kind === "pdf" ? "📄" : f.kind === "image" ? "🖼" : f.kind === "code" ? "⌨" : "📝"}</span><div class="t">${esc(f.name)}<div class="sub">${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(f.size / 1000)) + " KB"} · ~${f.tokens} tokens${f.note ? " · " + esc(f.note) : ""}</div></div><button class="ghost" data-view="${f.id}">View</button><button class="ghost" data-delf="${f.id}">🗑</button></div>`).join("") || `<div class="sub">No files yet.</div>`;
-  const d = dialog(`<h2>${isLib ? "📚 Library" : isNew ? "New project" : "◆ " + esc(p.name)}</h2>
+  const fileRows = files => files.map(f => `<div class="row"><span>${fileIc(f.kind)}</span><div class="t">${esc(f.name)}<div class="sub">${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(f.size / 1000)) + " KB"} · ~${f.tokens} tokens${f.note ? " · " + esc(f.note) : ""}</div></div><button class="ghost" data-view="${f.id}">View</button><button class="ghost" data-delf="${f.id}">${icon("trash", "solo")}</button></div>`).join("") || `<div class="sub">No files yet.</div>`;
+  const d = dialog(`<h2>${isLib ? icon("library") + "Library" : isNew ? "New project" : icon("diamond") + esc(p.name)}</h2>
     ${isLib ? `<p class="sub">Documents ${esc(NAME())} can search from any chat: datasheets, manuals, reference notes.</p>` : `
     <label class="sub">Name</label><input id="pn" value="${esc(p.name)}" maxlength="60">
     <div style="display:flex;gap:8px;margin:10px 0">${Object.entries(COLORS).map(([k, v]) => `<span data-col="${k}" style="width:24px;height:24px;border-radius:50%;background:${v};cursor:pointer;outline:${k === p.color ? "3px solid #fff" : "none"}"></span>`).join("")}</div>
     <label class="sub">Instructions for ${esc(NAME())}</label><textarea id="pi" rows="4">${esc(p.instructions)}</textarea>
     <div class="btns" style="justify-content:flex-start"><button class="primary" id="psave">${isNew ? "Create project" : "Save changes"}</button>${isNew ? "" : `<button id="pchat">+ New chat in this project</button>`}</div>`}
-    ${isNew ? "" : `${isLib ? "" : `<h3 class="hud" style="margin-top:16px">Notes</h3><div class="list" id="notes">${p.notes.map(n => `<div class="row"><div class="t">${esc(n.text)}</div><button class="ghost" data-deln="${n.id}">🗑</button></div>`).join("") || `<div class="sub">No notes yet.</div>`}</div>
+    ${isNew ? "" : `${isLib ? "" : `<h3 class="hud" style="margin-top:16px">Notes</h3><div class="list" id="notes">${p.notes.map(n => `<div class="row"><div class="t">${esc(n.text)}</div><button class="ghost" data-deln="${n.id}">${icon("trash", "solo")}</button></div>`).join("") || `<div class="sub">No notes yet.</div>`}</div>
       <div style="display:flex;gap:8px;margin-top:6px"><input id="nn" placeholder="e.g. Input is 12–24 V, output 5 V 3 A"><button id="nadd">Add</button></div>`}
     <h3 class="hud" style="margin-top:16px">Files</h3><div class="list" id="files">${fileRows(p.files)}</div>
     <div style="margin-top:8px"><button id="fadd">+ Add files</button> <span class="sub" id="fstat">PDF, Word, code, text or images, up to 25 MB each. You can also drop files here.</span><input type="file" id="fin" multiple hidden></div>
@@ -803,11 +971,11 @@ async function openTasks() {
   const [r, l] = await Promise.all([api("/reminders"), api("/lists")]);
   const fmt = ms => new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const up = r.reminders.filter(x => !x.done);
-  const d = dialog(`<h2>⏰ Reminders & lists</h2>
+  const d = dialog(`<h2>${icon("alarm")}Reminders & lists</h2>
     <div class="list">${up.map(x => `<div class="row"><div class="t">${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
     <div style="display:flex;gap:8px;margin-top:8px"><input id="rt" placeholder="New reminder"><input id="rw" type="datetime-local" style="max-width:220px"><button id="radd">Add</button></div>
     ${Object.entries(l.lists).map(([name, items]) => `<h3 class="hud" style="margin-top:16px">${esc(name)} <button class="ghost" data-clear="${esc(name)}">Clear ticked</button></h3>
-      <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">🗑</button></div>`).join("")}</div>
+      <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">${icon("trash", "solo")}</button></div>`).join("")}</div>
       <div style="display:flex;gap:8px;margin-top:4px"><input data-newin="${esc(name)}" placeholder="Add to ${esc(name)}"></div>`).join("")}
     <div style="display:flex;gap:8px;margin-top:16px"><input id="ln" placeholder="New list, e.g. parts" style="max-width:200px"><input id="li" placeholder="First item"><button id="ladd">Add</button></div>
     <div class="btns"><button id="close">Close</button></div>`);
@@ -825,10 +993,12 @@ async function openTasks() {
 }
 async function openSettings() {
   let gh = {}; try { gh = await api("/github"); } catch {}
-  const d = dialog(`<h2>⚙ Settings</h2>
+  const d = dialog(`<h2>${icon("settings")}Settings</h2>
     <label class="sub">Assistant name (this browser)</label><input id="nm" value="${esc(NAME())}">
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
+    <select id="am">${[["auto", "Auto: switch when sure"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <h3 class="hud" style="margin-top:18px">GitHub</h3>
     <p class="sub">${gh.token_set ? (gh.user ? "Connected as <b>" + esc(gh.user) + "</b>." : "Token saved" + (gh.error ? ": " + esc(gh.error) : ".")) : "Not connected: public repositories only, read-only."}
     For private repos and commits, create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens) with access to your repos and permissions: Contents read/write, Pull requests read/write, Actions read, Issues read.</p>
@@ -842,7 +1012,7 @@ async function openSettings() {
   d.querySelector("#logout").onclick = () => { store.set("key", ""); location.reload(); };
   if (d.querySelector("#untok")) d.querySelector("#untok").onclick = async () => { await api("/github", { method: "POST", json: { token: "" } }); d.remove(); openSettings(); };
   d.querySelector("#save").onclick = async () => {
-    store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value);
+    store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value); store.set("autoModes", d.querySelector("#am").value);
     const body = { default_repo: d.querySelector("#repo").value.trim() }; const t = d.querySelector("#tok").value.trim(); if (t) body.token = t;
     try { const st = await api("/github", { method: "POST", json: body }); d.remove(); if (st.error) alertBox("GitHub: " + st.error); renderBar(); renderMsgs(); }
     catch (e) { alertBox(e.message); }
@@ -876,7 +1046,7 @@ function onSearch() {
 
 // ---------------------------------------------------------------- server: status, models, health check, backups
 async function openServer() {
-  const d = dialog(`<h2>🖥 Server</h2><div id="sv">Loading…</div>
+  const d = dialog(`<h2>${icon("server")}Server</h2><div id="sv">Loading…</div>
     <h3 class="hud" style="margin-top:18px">Health check</h3><button id="doc">Check everything</button> <button id="spd">Speed test</button><div id="docOut"></div>
     <h3 class="hud" style="margin-top:18px">Backups</h3><div id="bk">Loading…</div>
     <div class="btns"><button id="close">Close</button></div>`);
@@ -925,7 +1095,7 @@ async function openServer() {
   }
   d.querySelector("#doc").onclick = async e => {
     e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Checking… (takes a few seconds)</p>`;
-    try { const r = await api("/doctor"); const ic = { ok: ["✓", "var(--accent)"], warn: ["!", "var(--gold)"], fail: ["✗", "var(--red)"] };
+    try { const r = await api("/doctor"); const ic = { ok: [icon("check"), "var(--accent)"], warn: [icon("warn"), "var(--gold)"], fail: [icon("cross"), "var(--red)"] };
       d.querySelector("#docOut").innerHTML = (r.checks || []).map(c => { const [i, col] = ic[c.state] || ic.fail;
         return `<div class="check"><span class="ic" style="color:${col}">${i}</span><div><b>${esc(c.name)}</b>: ${esc(c.detail)}${c.fix && c.state !== "ok" ? `<div class="sub">→ ${esc(c.fix)}</div>` : ""}</div></div>`; }).join(""); }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
@@ -936,10 +1106,10 @@ async function openServer() {
     e.target.disabled = true; d.querySelector("#docOut").innerHTML = `<p class="sub">Measuring… (up to a minute; ${esc(NAME())} can't chat meanwhile)</p>`;
     try { const r = await api("/speedtest", { method: "POST", json: {} });
       d.querySelector("#docOut").innerHTML = (r.results || []).map(x => {
-        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">✗</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
+        if (x.error) return `<div class="check"><span class="ic" style="color:var(--red)">${icon("cross")}</span><div><b>${esc(x.name)}</b>: ${esc(x.error)}</div></div>`;
         const up = x.unit.endsWith("/s"), ch = x.change_pct;
         const diff = ch ? ` <span style="color:${(ch > 0) === up ? "var(--accent)" : "var(--gold)"}">(${ch > 0 ? "+" : ""}${ch}% vs last time)</span>` : "";
-        return `<div class="check"><span class="ic" style="color:var(--accent)">◆</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
+        return `<div class="check"><span class="ic" style="color:var(--accent)">${icon("diamond")}</span><div><b>${esc(x.name)}</b>: ${x.value} ${esc(x.unit)}${diff}<div class="sub">${esc(x.detail || "")}</div></div></div>`; }).join("")
         + `<p class="sub">${esc(r.model || "")} · took ${r.took_s} s</p>`; }
     catch (err) { d.querySelector("#docOut").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
     e.target.disabled = false;
@@ -960,13 +1130,13 @@ async function addPhotos(files) {
   renderAtts();
 }
 function renderAtts() {
-  $("#atts").innerHTML = S.attachments.map((a, i) => `<div class="a"><img src="${a.dataUrl}"><button data-ra="${i}">✕</button></div>`).join("");
+  $("#atts").innerHTML = S.attachments.map((a, i) => `<div class="a"><img src="${a.dataUrl}"><button data-ra="${i}">${icon("close", "solo")}</button></div>`).join("");
   $("#atts").querySelectorAll("[data-ra]").forEach(b => b.onclick = () => { S.attachments.splice(+b.dataset.ra, 1); renderAtts(); });
 }
 
 // ---------------------------------------------------------------- wiring
 function newChat(projectId = "") { if (S.busy) stop(); S.current = null; S.pendingProject = projectId; S.pendingMode = ""; S.context = null; S.error = null; S.editing = null; store.set("current", ""); renderSide(); renderBar(); renderMsgs(); $("#input").focus(); }
-function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); }
+function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); }
 function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(240, t.scrollHeight) + "px"; }
 $("#newChat").onclick = () => newChat();
 $("#newProject").onclick = () => openProject("new");
@@ -979,12 +1149,118 @@ $("#search").addEventListener("keydown", e => { if (e.key === "Escape") { $("#se
 $("#searchResults").onclick = e => { const el = e.target.closest("[data-c]"); if (el) { $("#search").value = ""; onSearch(); openChat(el.dataset.c); } };
 $("#modeChip").onclick = pickMode;
 $("#projectChip").onclick = () => openProject(curProjectId());
+$("#openMemory").onclick = () => openMemory();
+// Memory: what Stella remembers about you, and facts she suggests from quiet chats (keep or drop them)
+async function openMemory() {
+  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. She also reads chats that have gone quiet and suggests facts to keep.</p>
+    <label class="sub">Learning from quiet chats</label>
+    <select id="mm"><option value="review">Suggest, I review</option><option value="auto">Save by itself</option><option value="off">Off</option></select>
+    <div id="ms"></div><h3 class="hud" style="margin-top:12px">Remembered</h3><div class="list" id="ml"><p class="sub">Loading…</p></div>
+    <div style="display:flex;gap:8px;margin-top:8px"><input id="mn" placeholder="e.g. I use KiCad for PCB design"><button id="madd">Add</button></div>
+    <div class="btns"><button id="close">Close</button></div>`);
+  const draw = async () => {
+    try {
+      const [sg, mem] = await Promise.all([api("/memories/suggestions"), api("/memories")]);
+      S.memories = mem.memories || [];
+      d.querySelector("#mm").value = sg.mode || "review";
+      const sug = sg.suggestions || [];
+      d.querySelector("#ms").innerHTML = sug.length ? `<h3 class="hud" style="margin-top:12px;color:var(--accent)">Suggested from your chats (${sug.length})</h3><div class="list">` +
+        sug.map(x => `<div class="row"><span class="t">${esc(x.text)}${x.replaces_text ? `<br><span class="sub">Replaces: ${esc(x.replaces_text)}</span>` : ""}</span><button data-keep="${x.id}">Keep</button><button class="ghost" data-drop="${x.id}">Drop</button></div>`).join("") + "</div>" : "";
+      d.querySelector("#ml").innerHTML = S.memories.length ? S.memories.map(m => `<div class="row"><span class="t">${esc(m.text)}</span><button class="ghost" data-forget="${m.id}" title="Forget">${icon("close", "solo")}</button></div>`).join("") : `<p class="sub">Nothing yet.</p>`;
+    } catch (e) { d.querySelector("#ml").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; }
+  };
+  draw();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#mm").onchange = async e => { try { await api("/memories/settings", { method: "POST", json: { mode: e.target.value } }); } catch (er) { notice(er.message); } };
+  d.querySelector("#madd").onclick = async () => { const t = d.querySelector("#mn").value.trim(); if (!t) return; d.querySelector("#mn").value = "";
+    try { await api("/memories", { method: "POST", json: { text: t } }); } catch (e) { notice(e.message); } draw(); };
+  d.onclick = async e => {
+    const t = e.target.dataset || {};
+    try {
+      if (t.keep || t.drop) await api("/memories/suggestions/" + (t.keep || t.drop), { method: "POST", json: { accept: !!t.keep } });
+      else if (t.forget) await api("/memories/" + t.forget, { method: "DELETE" });
+      else return;
+    } catch (er) { notice(er.message); }
+    draw();
+  };
+}
+$("#notesChip").onclick = () => S.current ? openNotes(S.current) : notice("Start a chat first.");
+// ---------------------------------------------------------------- documents beside the chat
+// Long code and chapters live here, not in the chat: Stella edits them a section at a time and the chat keeps a
+// one-line reference. Every change is a version; you can edit too (the server refuses if Stella changed it meanwhile).
+const D = { list: [], cur: null, doc: null, editing: false, conv: null };
+async function refreshDocs(focus, show) {
+  const conv = S.current; if (!conv) { D.list = []; D.doc = null; drawDocs(); return; }
+  try { D.list = (await api(`/chats/${encodeURIComponent(conv)}/docs`)).docs || []; } catch { D.list = []; }
+  if (conv !== D.conv) { D.conv = conv; D.cur = null; D.editing = false; if (!focus) document.body.classList.remove("docs"); }
+  if (focus) D.cur = focus; if (!D.list.some(d => d.id === D.cur)) D.cur = D.list.length ? D.list[D.list.length - 1].id : null;
+  if (show && D.cur) document.body.classList.add("docs");
+  if (D.cur && !D.editing) { try { D.doc = await api(`/docs/${D.cur}`); } catch { D.doc = null; } } else if (!D.cur) D.doc = null;
+  drawDocs();
+}
+function openDocs(id) { document.body.classList.add("docs"); D.editing = false; refreshDocs(id); }
+function drawDocs() {
+  $("#docsChip").innerHTML = icon("doc", D.list.length ? "" : "solo") + (D.list.length || "");
+  $("#docSel").innerHTML = D.list.map(d => `<option value="${d.id}" ${d.id === D.cur ? "selected" : ""}>${esc(d.title)} · v${d.version}</option>`).join("") || `<option>No documents</option>`;
+  const d = D.doc;
+  if (!d) { $("#docBody").innerHTML = `<p class="sub">No documents in this chat yet. Ask ${esc(NAME())} to write something long (“draft chapter 1 in a document”) or press ＋.</p>`;
+    $("#docOutline").innerHTML = ""; $("#docInfo").textContent = ""; $("#docVer").innerHTML = ""; return; }
+  $("#docInfo").textContent = `v${d.version} · ${d.text.split("\n").length} lines${d.language ? " · " + d.language : ""}`;
+  $("#docVer").innerHTML = `<option value="">Versions…</option>` + d.versions.map(v => `<option value="${v.version}">v${v.version} · ${v.by === "user" ? "you" : esc(NAME())}${v.note ? " · " + esc(v.note) : ""}</option>`).join("");
+  $("#docEdit").textContent = D.editing ? "Save" : "Edit";
+  if (D.editing) { $("#docOutline").innerHTML = ""; $("#docBody").innerHTML = `<textarea id="docText"></textarea>`; $("#docText").value = d.text; $("#docText").focus(); return; }
+  const heads = d.kind === "code" ? [] : d.text.split("\n").map((l, i) => [l.match(/^(#{1,3})\s+(.+)/), i]).filter(x => x[0]);
+  $("#docOutline").innerHTML = heads.slice(0, 40).map(([m, i]) => `<button class="ghost" data-h="${i}">${esc(m[2])}</button>`).join("");
+  $("#docBody").innerHTML = d.kind === "code" ? `<pre class="code"><code>${esc(d.text)}</code></pre>` : `<div class="md">${md(d.text)}</div>`;
+}
+$("#docsChip").onclick = () => { if (!S.current) return notice("Start a chat first."); document.body.classList.toggle("docs"); refreshDocs(); };
+$("#docClose").onclick = () => { document.body.classList.remove("docs"); D.editing = false; };
+$("#docSel").onchange = e => { D.editing = false; refreshDocs(e.target.value); };
+$("#docOutline").onclick = e => { const h = e.target.dataset.h; if (h == null || !D.doc) return;
+  const title = D.doc.text.split("\n")[+h].replace(/^#+\s+/, "").trim();
+  const el = [...$("#docBody").querySelectorAll("h1,h2,h3,h4")].find(x => x.textContent.trim() === title); if (el) el.scrollIntoView({ block: "start" }); };
+$("#docCopy").onclick = () => D.doc && navigator.clipboard.writeText(D.editing ? $("#docText").value : D.doc.text);
+$("#docDl").onclick = () => { if (!D.doc) return; const ext = { python: "py", kotlin: "kt", javascript: "js", typescript: "ts", cpp: "cpp", c: "c", java: "java", rust: "rs", go: "go", bash: "sh", html: "html", css: "css", json: "json", yaml: "yaml" }[D.doc.language] || (D.doc.kind === "code" ? "txt" : "md");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([D.doc.text], { type: "text/plain" }));
+  a.download = /\.[a-z0-9]{1,5}$/i.test(D.doc.title) ? D.doc.title : D.doc.title.replace(/[^\w .-]+/g, "_") + "." + ext; a.click(); URL.revokeObjectURL(a.href); };
+$("#docEdit").onclick = async () => {
+  if (!D.doc) return;
+  if (!D.editing) { D.editing = true; drawDocs(); return; }
+  try { D.doc = await api(`/docs/${D.doc.id}`, { method: "POST", json: { text: $("#docText").value, base_version: D.doc.version } }); D.editing = false; refreshDocs(D.doc.id); }
+  catch (e) { notice(/changed meanwhile/.test(e.message) ? `${NAME()} changed this document while you were editing. Copy your text, reopen it and add your change again.` : "Couldn't save: " + e.message); }
+};
+$("#docVer").onchange = async e => { const v = e.target.value; if (!v || !D.doc) return;
+  if (!confirm(`Go back to version ${v}? The current text stays in the version list.`)) { e.target.value = ""; return; }
+  try { D.doc = await api(`/docs/${D.doc.id}`, { method: "POST", json: { revert: +v } }); D.editing = false; refreshDocs(D.doc.id); } catch (err) { notice("Couldn't go back: " + err.message); } };
+$("#docNew").onclick = async () => { if (!S.current) return notice("Start a chat first."); const t = prompt("Document title (end it in .py, .kt, … for code):"); if (!t) return;
+  const ext = (t.match(/\.([a-z0-9]{1,5})$/i) || [])[1] || ""; const lang = { py: "python", kt: "kotlin", js: "javascript", ts: "typescript", cpp: "cpp", c: "c", h: "c", java: "java", rs: "rust", go: "go", sh: "bash", ino: "cpp" }[ext.toLowerCase()] || "";
+  try { const d = await api(`/chats/${encodeURIComponent(S.current)}/docs`, { method: "POST", json: { title: t, text: "", language: lang } }); D.editing = true; await refreshDocs(d.id, true); D.doc = d; drawDocs(); } catch (e) { notice("Couldn't create it: " + e.message); } };
+// Pinned notes: facts for one chat (goals, decisions, names, story facts), always included, never summarized away
+async function openNotes(convId) {
+  const d = dialog(`<h2>${icon("pin")}Pinned notes</h2><p class="sub">${esc(NAME())} always keeps these in mind in this chat, however long it gets. She pins decisions, names and facts herself; add your own or remove ones that changed.</p>
+    <div class="list" id="nl"><p class="sub">Loading…</p></div>
+    <textarea id="nt" rows="2" placeholder="Pin a fact for this chat"></textarea>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="pin">Pin</button></div>`);
+  const draw = notes => { d.querySelector("#nl").innerHTML = notes.length ? notes.map(n => `<div class="row"><span class="t">${n.source === "stella" ? icon("sparkle") : "• "}${esc(n.text)}</span><button class="ghost" data-un="${esc(n.id)}" title="Unpin">${icon("close", "solo")}</button></div>`).join("") : `<p class="sub">Nothing pinned yet.</p>`; };
+  const run = async p => { try { draw((await p).notes || []); } catch (e) { d.querySelector("#nl").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; } };
+  run(api(`/chats/${encodeURIComponent(convId)}/notes`));
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#pin").onclick = () => { const t = d.querySelector("#nt").value.trim(); if (!t) return; d.querySelector("#nt").value = "";
+    run(api(`/chats/${encodeURIComponent(convId)}/notes`, { method: "POST", json: { text: t } })); };
+  d.querySelector("#nl").onclick = e => { const id = e.target.dataset && e.target.dataset.un;
+    if (id) run(api(`/chats/${encodeURIComponent(convId)}/notes/${encodeURIComponent(id)}`, { method: "DELETE" })); };
+}
 $("#meter").onclick = () => {
   const i = S.context; if (!i) return;
   const d = dialog(`<h2>${esc(NAME())}'s memory for this chat</h2><p>${i.used} of ${i.limit} tokens used (${Math.round(Math.min(1, i.used / i.limit) * 100)}%).</p>
-    <p class="sub">When it fills up, ${esc(NAME())} refreshes it automatically: she summarizes the older part of the chat and continues from the summary. Every message stays here and on your other devices.</p>
-    <div class="btns"><button id="close">Close</button><button class="primary" id="ref" ${S.busy ? "disabled" : ""}>Refresh now</button></div>`);
+    <p class="sub">Long chats don't fill up: while ${esc(NAME())} is idle, the server folds the oldest part of the chat into a summary (from about 60% full), and the newest part stays word for word. She can look up the exact earlier words when she needs them, and pinned notes are never summarized. Every message stays here and on your other devices.</p>
+    <div class="btns"><button id="close">Close</button><button id="cont" ${S.busy ? "disabled" : ""}>Continue in a new chat</button><button class="primary" id="ref" ${S.busy ? "disabled" : ""}>Refresh now</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#cont").onclick = async () => { d.remove(); S.busy = true; S.status = "Carrying this chat over…"; renderBar();
+    try { const r = await api(`/chats/${encodeURIComponent(S.current)}/continue`, { method: "POST", json: {} });
+      await sync(); S.current = r.conversation_id; store.set("current", S.current); renderSide(); renderMsgs(); updateMeter();
+    } catch (e) { notice("Couldn't continue in a new chat: " + e.message); }
+    S.busy = false; S.status = ""; renderBar(); };
   d.querySelector("#ref").onclick = async () => { d.remove(); S.busy = true; S.status = "Refreshing context…"; renderBar();
     try { if (!(await compact(S.current, 0))) notice("Nothing new to summarize yet."); } catch (e) { notice("Couldn't refresh: " + e.message); }
     S.busy = false; S.status = ""; renderMsgs(); renderBar(); sync().then(updateMeter); };
@@ -1005,8 +1281,14 @@ $("#chats").onclick = e => {
     saveConv({ ...c, deleted: true, updated_at: nextTs() }); S.msgs.delete(c.id); if (S.current === c.id) newChat(); renderSide(); sync(); } return; }
   const el = e.target.closest("[data-c]"); if (el) openChat(el.dataset.c);
 };
+$("#wrap").onchange = e => {
+  const t = e.target; if (!t.dataset || !t.dataset.redo || !t.value || !S.current) return;
+  if (t.value.startsWith("pin:")) { const id = t.value.slice(4); saveConv({ ...curConv(), mode: id === "general" ? "" : id, updated_at: nextTs() }); sync().then(updateMeter); renderBar(); renderMsgs(); return; }
+  S.forced.set(S.current, t.value); retry();
+};
 $("#wrap").onclick = e => {
   const t = e.target;
+  if (t.dataset.doc) { openDocs(t.dataset.doc); return; }
   if (t.classList.contains("cp")) { navigator.clipboard.writeText(t.nextElementSibling.textContent); t.textContent = "Copied"; setTimeout(() => t.textContent = "Copy", 1200); return; }
   if (t.dataset.copy) { const m = msgsOf(S.current).find(x => x.id === t.dataset.copy); if (m) navigator.clipboard.writeText(m.text.replace(/!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)/g, "").trim()); return; }
   if (t.dataset.retry) { retry(); return; }
@@ -1312,7 +1594,7 @@ async function startWake() {
       bargeIn: () => !!AV.cfg.barge_in, onBargeIn: () => { SPEAK.cancel(); if (S.busy) stop(); if (!MIC.rec) micToggle({ followup: true }); },
       onError: e => { WAKE.error = e.message; },
     });
-  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use 🎤 or Space)"); }
+  } catch (e) { WAKE.error = e.message; WAKE.sig = ""; avatarStatus("Wake word: " + e.message + " (use the microphone button or Space)"); }
 }
 // Which replies this screen says out loud (saved on this screen only): by default only conversations held
 // on this screen, so a reply isn't spoken twice by the phone and the computer at the same time.
@@ -1352,7 +1634,7 @@ const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["q
 function openAvatarSettings() {
   const c = AV.cfg;
   const anims = c.animations || [];
-  const d = dialog(`<h2>✦ Avatar</h2>
+  const d = dialog(`<h2>${icon("sparkle")}Avatar</h2>
     <label class="sub">Look</label>
     <div style="display:flex;gap:8px;margin:4px 0 10px"><button id="stOrb" class="${c.style === "orb" ? "primary" : ""}">Space orb</button>
       <button id="stVrm" class="${c.style === "vrm" ? "primary" : ""}">3D character</button></div>
@@ -1363,7 +1645,7 @@ function openAvatarSettings() {
       <a href="https://hub.vroid.com/en" target="_blank" rel="noopener">VRoid Hub</a>.
       <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
       <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
-      <p class="sub" style="margin-top:8px">📁 <b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
+      <p class="sub" style="margin-top:8px">${icon("folder")}<b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
       <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
     <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
@@ -1381,7 +1663,7 @@ function openAvatarSettings() {
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
     <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
       <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <button class="ghost" data-play="${a.id}" title="Play">▶</button><button class="ghost" data-adel="${a.id}" title="Delete">✕</button></div>`).join("")
+      <button class="ghost" data-play="${a.id}" title="Play">${icon("play", "solo")}</button><button class="ghost" data-adel="${a.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("")
       || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
       <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
@@ -1392,7 +1674,7 @@ function openAvatarSettings() {
     ${c.engine === "kokoro" && (c.status || {}).kokoro && c.status.kokoro !== "ready" ? `<p class="sub">Kokoro: ${esc(c.status.kokoro)}… (Piper speaks until it's ready)</p>` : ""}
     <div id="kokBox" style="display:${c.engine === "kokoro" ? "flex" : "none"};gap:8px;margin-bottom:6px"><select id="kv">${(c.kokoro_voices || []).map(v => `<option value="${v.id}" ${c.kokoro_voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
     <div id="piperBox" style="display:${c.engine === "kokoro" ? "none" : "flex"};gap:8px"><select id="vc">${(c.voices || []).map(v => `<option value="${v.id}" ${c.voice === v.id ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
-    <button id="hear" style="margin-top:6px">▶ Hear this voice</button>
+    <button id="hear" style="margin-top:6px">${icon("play")}Hear this voice</button>
     <label class="sub" style="display:block;margin-top:10px">Speaking speed: <span id="spv">${(+c.speed).toFixed(2)}×</span></label>
     <input id="sp" type="range" min="0.7" max="1.4" step="0.05" value="${c.speed}">
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="spk" style="width:auto" ${c.speak ? "checked" : ""}> Speak replies out loud</label>
@@ -1408,7 +1690,7 @@ function openAvatarSettings() {
     <div style="display:flex;gap:8px;margin-top:6px"><select id="ww">${(c.wake_words || []).map(w => `<option value="${esc(w.id)}" ${c.wake_word === w.id ? "selected" : ""}>${esc(w.label)}</option>`).join("")}</select></div>
     <label class="sub" style="display:block;margin-top:8px">Sensitivity: <span id="wsv">${Math.round(c.wake_sensitivity * 100)}%</span> (higher hears you more easily, but triggers by mistake more often)</label>
     <input id="ws" type="range" min="0.2" max="0.9" step="0.05" value="${c.wake_sensitivity}">
-    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see 🎤)." : ""}</p>
+    <p class="sub">${WAKE.det ? "Listening for the wake word now." : WAKE.error ? "Wake word unavailable: " + esc(WAKE.error) : !window.isSecureContext ? "Needs a secure page for the microphone (see the microphone button)." : ""}</p>
     <h3 class="hud" style="margin-top:16px">Performance</h3>
     <select id="lt"><option value="auto" ${c.light === "auto" ? "selected" : ""}>Light mode: automatic${AV.slow || AV.autoLight ? " (on for this device)" : ""}</option>
       <option value="on" ${c.light === "on" ? "selected" : ""}>Light mode: on (Raspberry Pi, old phones)</option><option value="off" ${c.light === "off" ? "selected" : ""}>Light mode: off (best quality)</option></select>
@@ -1523,16 +1805,17 @@ async function start() {
   // The avatar starts straight away: the chat history below can take a while on a new device or a slow connection
   if (AVATAR_MODE && !AV.avatar) {
     $("#avName").textContent = NAME().toUpperCase();
-    startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} })
+    startAvatarScreen().then(() => { try { window.StellaiApp && window.StellaiApp.ready(); } catch {} movedHello(); })
       .catch(e => { avatarStatus("Avatar: " + e.message); try { window.StellaiApp && window.StellaiApp.error(String(e.message || e)); } catch {} });
   }
+  if (!AVATAR_MODE) movedHello();
   try { await sync(); } catch (e) { console.warn("sync", e); }
   if (S.current && !S.convs.has(S.current)) S.current = null;
   try { await loadMeta(); } catch (e) { console.warn("meta", e); }
-  renderSide(); renderMsgs(); updateMeter();
+  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) refreshDocs();
   if (AVATAR_MODE) $("#avName").textContent = NAME().toUpperCase();
 }
-setInterval(() => { if (KEY && !S.busy) sync(); }, 20000);
+setInterval(() => { if (KEY && !S.busy) sync(); if (KEY && !S.busy && document.body.classList.contains("docs") && !D.editing) refreshDocs(); }, 20000);
 setInterval(() => { if (KEY) loadMeta(); }, 300000);
 start();
 </script>

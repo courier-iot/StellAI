@@ -83,6 +83,13 @@ object PhoneTools {
             props("query" to prop("string", "e.g. 'Bohemian Rhapsody Queen'"),
                 "kind" to prop("string", "song, artist, album, playlist or any"),
                 "app" to prop("string", "optional, e.g. Spotify; default Stellar Disc if installed")), "query"))
+        put(tool("uplink_download",
+            "Download a song or video into Stellar Disc with its Uplink downloader. Give a url (e.g. one found with web_search) or a query to take the top YouTube result.",
+            props("query" to prop("string", "song and artist, e.g. 'Midnight City M83'"),
+                "url" to prop("string", "optional link instead of a search"),
+                "kind" to prop("string", "music (default) or video"),
+                "quality" to prop("string", "best, balanced or saver (default: the user's Autopilot choice)"),
+                "queue_when_done" to prop("boolean", "add it to the play queue when it's downloaded"))))
         put(tool("set_sound_mode", "Ringer and Do Not Disturb.",
             props("mode" to prop("string", "normal, vibrate, silent, dnd_on or dnd_off")), "mode"))
         put(tool("set_brightness", "Screen brightness.",
@@ -118,6 +125,7 @@ object PhoneTools {
         "media_control" -> "Controlling music"
         "now_playing" -> "Checking what's playing"
         "play_music" -> "Playing music"
+        "uplink_download" -> "Sending to Uplink"
         "set_sound_mode" -> "Changing sound mode"
         "set_brightness" -> "Setting brightness"
         "open_settings" -> "Opening settings"
@@ -207,6 +215,7 @@ object PhoneTools {
                 "media_control" -> extra(PhoneExtras.mediaControl(ctx, args))
                 "now_playing" -> extra(PhoneExtras.nowPlaying(ctx))
                 "play_music" -> extra(PhoneExtras.playMusic(ctx, args))
+                "uplink_download" -> extra(PhoneExtras.uplinkDownload(ctx, args))
                 "set_sound_mode" -> extra(PhoneExtras.setSoundMode(ctx, args))
                 "set_brightness" -> extra(PhoneExtras.setBrightness(ctx, args))
                 "open_settings" -> extra(PhoneExtras.openSettings(ctx, args.optString("page", "")))

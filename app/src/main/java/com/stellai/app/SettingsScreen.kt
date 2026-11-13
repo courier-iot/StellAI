@@ -80,6 +80,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
     var key by rememberSaveable { mutableStateOf(s.apiKey) }
     var showKey by rememberSaveable { mutableStateOf(false) }
     var thinking by rememberSaveable { mutableStateOf(s.thinkingMode) }
+    var autoModes by rememberSaveable { mutableStateOf(s.autoModes) }
     var name by rememberSaveable { mutableStateOf(s.assistantName) }
     var wake by rememberSaveable { mutableStateOf(s.wakeWordEnabled) }
     var wakeWord by rememberSaveable { mutableStateOf(s.wakeWord) }
@@ -120,6 +121,11 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
         s.serverUrl = AppSettings.normalizeUrl(url)
         s.apiKey = key.trim()
         s.thinkingMode = thinking
+        s.autoModes = autoModes
+        if (s.learnFromChats != learn) {      // the server does the learning now: tell it
+            val m = if (learn) "review" else "off"
+            app.scope.launch { app.memory.changeMode(m) }
+        }
         s.learnFromChats = learn
         s.assistantName = name.trim().ifBlank { "Stella" }
         s.wakeWordEnabled = wake && micAllowed
@@ -225,12 +231,21 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                     FilterChip(selected = thinking == v, onClick = { thinking = v }, label = { Text(label) })
                 }
             }
+            Text("Switching modes by herself", style = MaterialTheme.typography.labelLarge)
+            Hint("In General chats Stella picks the mode that fits each message (CAD for a bracket, PCB for a board) " +
+                "and shows a chip you can tap to change it. Ask: she only suggests. Off: modes are only what you pick. " +
+                "Picking a mode for a chat keeps it there.")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("auto" to "Auto", "ask" to "Ask first", "off" to "Off").forEach { (v, label) ->
+                    FilterChip(selected = autoModes == v, onClick = { autoModes = v }, label = { Text(label) })
+                }
+            }
 
             HorizontalDivider()
             SectionTitle("Memory")
             SettingSwitch(
                 "Learn from conversations",
-                "After a chat goes quiet, the server picks out lasting facts (projects, tools, preferences) for $name to remember.",
+                "After a chat goes quiet, the server picks out lasting facts (projects, tools, preferences) and suggests them in Memory for you to keep or drop.",
                 learn,
             ) { learn = it }
             Text(

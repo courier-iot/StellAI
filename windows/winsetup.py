@@ -16,6 +16,11 @@ import urllib.error
 import urllib.request
 import zipfile
 
+try:      # the model catalog, ranking and speed test shared with the Linux setup and the hub (server/)
+    import stellai_tune as tune
+except ImportError:
+    tune = None
+
 
 def _trust_more_certificates():
     """Trust Mozilla's certificate list (certifi) as well as Windows' own: Windows only fetches some root
@@ -213,6 +218,19 @@ def vulkan_present():
     return os.name != "nt" or _system_dll("vulkan-1.dll")
 
 
+def _avx2():
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(40))   # PF_AVX2_INSTRUCTIONS_AVAILABLE
+        except (AttributeError, OSError):
+            return True
+    try:
+        with open("/proc/cpuinfo") as f:
+            return " avx2 " in f.read()
+    except OSError:
+        return True
+
+
 def detect():
     cpu, cores, logical = _cpu()
     gpus = _registry_gpus()
@@ -223,7 +241,19 @@ def detect():
         notes.append(f"{gpu['name'] if gpu else 'The graphics card'} needs a newer graphics driver for Vulkan; "
                      "using the CPU until it's updated")
         backend, gpu, cuda = "cpu", None, ""
+    gpu_list = []
+    if backend == "cuda" and tune:
+        gpu_list = tune.nvidia_gpus()
+    if not gpu_list and gpu and backend != "cpu":
+        gpu_list = [{"index": 0, "name": gpu["name"], "vram_gb": gpu["vram_gb"], "free_gb": gpu["vram_gb"],
+                     "vendor": gpu.get("vendor", "nvidia")}]
+    try:
+        disk = round(shutil.disk_usage(data_dir() if os.path.isdir(data_dir()) else os.path.expanduser("~")).free
+                     / 2**30, 1)
+    except OSError:
+        disk = 0.0
     return {"notes": notes, "vcredist": vcredist_present(),"ram_gb": _ram_gb(), "cpu": cpu, "cores": cores, "threads": logical,
+            "gpu_list": gpu_list, "avx2": _avx2(), "disk_free_gb": disk,
             "gpus": [g["name"] for g in gpus] or ([nvidia["name"]] if nvidia else []),
             "backend": backend, "gpu": gpu["name"] if gpu else "", "vram_gb": gpu["vram_gb"] if gpu else 0,
             "cuda": cuda, "cuda_driver": nvidia["cuda"] if nvidia else ""}
@@ -321,6 +351,121 @@ def plan(hw, model_key, vision=True, whisper=None):
         "gpu_args": gpu_args, "context": ctx, "threads": max(1, hw["cores"]),
         "threads_batch": max(1, hw.get("threads") or hw["cores"]),
     }
+
+
+# ---- Plans from the shared catalog (stellai_tune): any model that fits, picked on the setup screen ------------
+def tune_hw(hw):
+    """This PC in the form stellai_tune ranks for."""
+    return {"cpu": hw.get("cpu", ""), "cores": hw.get("cores") or 2, "threads": hw.get("threads") or 4,
+            "ram_gb": hw.get("ram_gb") or 8, "avx2": hw.get("avx2", True),
+            "gpus": (hw.get("gpu_list") or []) if hw.get("backend") != "cpu" else []}
+
+
+def ram_budgets(ram):
+    """(label, GB) choices for how much memory StellAI may use."""
+    most = max(2, ram - (6 if ram >= 64 else 4 if ram >= 24 else 3))
+    return [(f"{most} GB: nearly all (a dedicated server)", most), (f"{ram * 3 // 4} GB: three quarters", ram * 3 // 4),
+            (f"{ram // 2} GB: half", ram // 2)]
+
+
+def cache_ram_mb(budget_gb, model_gb):
+    spare = budget_gb * 1024 - model_gb * 1024 - 2048
+    return 8192 if spare >= 12288 else 4096 if spare >= 6144 else 2048 if spare >= 3072 else 0
+
+
+def plan_tuned(hw, choice, vision=True, whisper=None, ram_budget=None, gpu_ids=None, helper=None, try_mtp=True,
+               context=None):
+    """A plan for a catalog model. choice: {"key", "quant", "size_gb", "context", "mtp", "label"} from
+    stellai_tune.rank()/options(), or {"custom_url": ...}. The exact files are looked up when installing."""
+    budget = ram_budget or hw.get("ram_gb", 8)
+    gpu_args = ["-ub", "1024"] if hw["backend"] != "cpu" else []
+    if whisper is None:
+        whisper = "small" if hw["ram_gb"] >= 14 and hw["cores"] >= 6 else "base"
+    wname = f"ggml-{whisper}.en.bin"
+    all_ids = [g["index"] for g in hw.get("gpu_list") or []]
+    llama_gpus = "" if gpu_ids is None or sorted(gpu_ids) == sorted(all_ids) else (
+        ",".join(str(i) for i in gpu_ids) if gpu_ids else "-1")
+    if choice.get("custom_url"):
+        name = choice["custom_url"].split("?")[0].rsplit("/", 1)[-1]
+        label, mid, gb, ctx = "Custom: " + name[:-5], "custom", float(choice.get("size_gb") or 8), 16384
+        files = [{"name": name, "url": choice["custom_url"]}]
+    else:
+        label = f"{choice['label']} {choice['quant']}"
+        mid, gb, ctx, files, name = f"{choice['key']}|{choice['quant']}", choice["size_gb"], choice["context"], [], ""
+    return {
+        "model_key": mid, "tuned_choice": not choice.get("custom_url"), "label": label, "backend": hw["backend"],
+        "cuda": hw.get("cuda", ""), "cuda_driver": hw.get("cuda_driver", ""),
+        "model_file": name, "model_files": files, "model_url": files[0]["url"] if files else "", "model_gb": gb,
+        "vision": bool(vision) and not choice.get("custom_url"), "mmproj_file": "", "mmproj_url": "",
+        "whisper_file": wname, "whisper_url": f"{HF}/ggerganov/whisper.cpp/resolve/main/{wname}",
+        "gpu_args": gpu_args, "context": int(context or ctx), "threads": max(1, hw["cores"]),
+        "threads_batch": max(1, hw.get("threads") or hw["cores"]),
+        "try_mtp": bool(try_mtp and choice.get("mtp")), "mtp": False, "spec_args": [],
+        "llama_gpus": llama_gpus, "ram_budget_gb": budget, "cache_ram_mb": cache_ram_mb(budget, gb),
+        "helper": helper, "helper_gpu": (helper or {}).get("gpu"), "helper_file": "",
+    }
+
+
+def resolve_plan(pl, status=lambda t: None):
+    """Fills in the exact files of a catalog plan from Hugging Face (falls back to the files StellAI knew)."""
+    if not pl.get("tuned_choice") or not tune:
+        return pl
+    key, _, quant = pl["model_key"].partition("|")
+    status("Looking up the model files on Hugging Face…")
+    try:
+        r = tune.resolve(key, quant, mtp=pl.get("try_mtp"))
+    except (RuntimeError, urllib.error.URLError, OSError, ValueError) as e:
+        status(f"Couldn't look the files up ({e}); using a model StellAI knew before")
+        old = {"qwen3.5-4b": "4b", "qwen3.5-9b": "9b"}.get(key, "35b" if "35b" in key or "27b" in key or "122b" in key
+                                                         else "4b")
+        legacy = plan({"backend": pl["backend"], "ram_gb": pl["ram_budget_gb"], "cores": pl["threads"],
+                       "threads": pl["threads_batch"], "vram_gb": 0, "cuda": pl.get("cuda", "")}, old)
+        pl.update({k: legacy[k] for k in ("model_key", "label", "model_file", "model_url", "model_gb", "mmproj_file",
+                                          "mmproj_url")}, tuned_choice=False, try_mtp=False,
+                  model_files=[{"name": legacy["model_file"], "url": legacy["model_url"]}])
+        return pl
+    pl.update(model_key=f"{r['key']}|{r['quant']}", label=f"{r['label']} {r['quant']}" + (" (MTP)" if r["mtp"] else ""),
+              model_file=r["model_file"], model_files=[{"name": f["name"], "url": f["url"]} for f in r["files"]],
+              model_url=r["files"][0]["url"], model_gb=r["size_gb"], mtp=r["mtp"], resolved=r,
+              mmproj_file=(r["mmproj"] or {}).get("name", ""), mmproj_url=(r["mmproj"] or {}).get("url", ""))
+    if not r["mmproj"]:
+        pl["vision"] = False
+    return pl
+
+
+def tune_now(cfg, log=lambda t: None):
+    """Measures the installed model (servers must be stopped): the context that loads and whether MTP helps.
+    Updates the plan and returns a short report."""
+    pl = dict(cfg.get("plan") or {})
+    exe = cfg.p("bin", "llama", "llama-server.exe" if os.name == "nt" else "llama-server")
+    model = cfg.p("models", pl.get("model_file", ""))
+    if not (tune and os.path.isfile(exe) and os.path.isfile(model)):
+        raise RuntimeError("nothing to test yet: install a model first")
+    flags = llama_flags(cfg)
+    args = ["-t", str(cfg.get("threads") or pl["threads"]), "-tb", str(pl.get("threads_batch") or pl["threads"])]
+    args += pl.get("gpu_args") or []
+    if pl.get("backend", "cpu") != "cpu":
+        args += ["--fit-target", str(1024 + (1000 if pl.get("vision") else 0) + (700 if cfg.get("whisper_gpu") else 0))]
+    args += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja"]
+    env = {"CUDA_VISIBLE_DEVICES": pl["llama_gpus"]} if pl.get("llama_gpus") else None
+    res = tune.tune(exe, model, args, int(pl.get("context") or 16384), env=env, try_mtp=bool(pl.get("mtp")),
+                    has_opt=lambda o: o in flags, log=log)
+    if res.get("error"):
+        raise RuntimeError("the model didn't load: " + str(res["error"])[:300])
+    pl["context"] = res["context"]
+    pl["spec_args"] = list(tune.MTP_ARGS) if res.get("mtp") else []
+    pl["tuned"] = {"context": res["context"], "mtp": res.get("mtp", False), "tok_s": res.get("gen_tps")}
+    cfg.set(plan=pl, context=None)
+    man = tune.read_manifest(cfg.p("models"))
+    if pl.get("model_key") in man:
+        man[pl["model_key"]]["tuned"] = pl["tuned"]
+        tune.write_manifest(cfg.p("models"), man)
+    lines = [f"Writes {res.get('gen_tps', 0):g} tokens/s, reads prompts at {res.get('prompt_tps', 0):g} tokens/s.",
+             f"Conversation window: {res['context'] // 1024}K tokens."]
+    if pl.get("mtp"):
+        lines.append(f"MTP speed-up: {'on' if res.get('mtp') else 'off'} "
+                     f"({res.get('mtp_tps', 0):g} tokens/s with it{'' if res.get('mtp') else ': not faster here'}).")
+    return " ".join(lines)
 
 
 # ============================================================================ GitHub releases
@@ -817,10 +962,24 @@ def install(cfg, pl, status, progress, cancel):
         except (RuntimeError, urllib.error.URLError, OSError) as e:
             status(f"Voice recognition skipped: {e}")
 
-    for label, url, name in [("Speech model", pl["whisper_url"], pl["whisper_file"]),
-                             (pl["label"], pl["model_url"], pl["model_file"])] + \
-            ([("Vision add-on", pl["mmproj_url"], pl["mmproj_file"])] if pl["vision"] else []):
+    pl = resolve_plan(pl, status)
+    files = pl.get("model_files") or [{"name": pl["model_file"], "url": pl["model_url"]}]
+    todo = [("Speech model", pl["whisper_url"], pl["whisper_file"])]
+    todo += [(pl["label"] + (f" (part {i + 1} of {len(files)})" if len(files) > 1 else ""), f["url"], f["name"])
+             for i, f in enumerate(files)]
+    if pl["vision"] and pl.get("mmproj_url"):
+        todo.append(("Vision add-on", pl["mmproj_url"], pl["mmproj_file"]))
+    for label, url, name in todo:
         download(url, os.path.join(models, name), prog(label), cancel)
+    if pl.get("helper") and tune:
+        try:
+            h = tune.resolve(pl["helper"]["key"], pl["helper"].get("quant", "Q8_0"))
+            download(h["files"][0]["url"], os.path.join(models, h["model_file"]), prog("Helper model"), cancel)
+            pl["helper_file"] = h["model_file"]
+        except (RuntimeError, urllib.error.URLError, OSError, ValueError) as e:
+            status(f"The helper model was skipped ({e}); the main model does its jobs")
+    if tune and pl.get("resolved"):
+        tune.record_model(models, pl.pop("resolved"), pl["mmproj_file"] if pl["vision"] else "")
     try:
         download(EMBED_URL, os.path.join(models, EMBED_FILE), prog("Search model"), cancel)
     except (RuntimeError, urllib.error.URLError, OSError) as e:
@@ -954,9 +1113,35 @@ def llama_args(cfg, pl, key):
     # Cap thinking so it can't fill the context
     a += ["--reasoning-budget", "1024" if ctx <= 8192 else "2048",
           "--reasoning-budget-message", "I have thought enough; time to answer."]
+    # The speed-up the speed test chose (MTP), and a prompt cache in RAM sized to the memory budget
+    if pl.get("spec_args") and "draft-mtp" in flags:
+        a += list(pl["spec_args"])
+    if pl.get("cache_ram_mb") is not None and "--cache-ram" in flags:
+        a += ["--cache-ram", str(int(pl["cache_ram_mb"]))]
     a += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja",
           "--api-key", key, "--host", "0.0.0.0", "--port", str(LLAMA_PORT)]
     return a
+
+
+def llama_env(pl):
+    """Which graphics cards Stella's model may use ("" = all, "-1" = none)."""
+    g = (pl or {}).get("llama_gpus")
+    return {"CUDA_VISIBLE_DEVICES": g} if g else None
+
+
+HELPER_PORT = 8095
+
+
+def helper_args(cfg, pl):
+    """The small helper model for quick background jobs, on the processor or a spare card."""
+    name = (pl or {}).get("helper_file")
+    exe = cfg.p("bin", "llama", "llama-server.exe")
+    if not name or not (os.path.isfile(exe) and os.path.isfile(cfg.p("models", name))):
+        return None
+    on_gpu = pl.get("helper_gpu") not in (None, "")
+    return [exe, "-m", cfg.p("models", name), "-c", "8192", "-np", "2", "-t", "4" if pl["threads"] >= 8 else "2",
+            "-ngl", "99" if on_gpu else "0", "-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+            "--jinja", "--host", "127.0.0.1", "--port", str(HELPER_PORT)]
 
 
 def whisper_args(cfg, pl):
@@ -984,6 +1169,8 @@ def hub_args(cfg):
             "--mmdc", shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT), "--avatar-dir", cfg.p("avatar")]
     if os.path.isfile(cfg.p("models", EMBED_FILE)):
         args += ["--embed", f"http://127.0.0.1:{EMBED_PORT}"]
+    if helper_args(cfg, cfg.get("plan") or {}):
+        args += ["--helper", f"http://127.0.0.1:{HELPER_PORT}"]
     if cfg.get("searxng"):
         args += ["--searxng", f"http://127.0.0.1:{SEARXNG_PORT}"]
     return args
@@ -1062,12 +1249,13 @@ class Servers:
         self._state = {"llama": "stopped", "whisper": "stopped", "hub": "stopped"}
         self._monitor = None
 
-    def _spawn(self, name, args):
+    def _spawn(self, name, args, env=None):
         logf = open(self.cfg.p("logs", f"{name}.log"), "w", encoding="utf-8", errors="replace")
         # Voice recognition runs a notch above the model, so Stella hears you promptly even while she's writing
         prio = ABOVE_NORMAL if name == "whisper" else 0
         p = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                             creationflags=NO_WINDOW | prio, cwd=os.path.dirname(args[0]))
+                             creationflags=NO_WINDOW | prio, cwd=os.path.dirname(args[0]),
+                             env=dict(os.environ, **env) if env else None)
         self.job.add(p)
         self.procs[name] = (p, logf)
         self.log(f"started {name} (pid {p.pid})")
@@ -1080,7 +1268,11 @@ class Servers:
             pl = self.cfg.get("plan")
             key = api_key(self.cfg)
             os.makedirs(self.cfg.p("logs"), exist_ok=True)
-            self._spawn("llama", llama_args(self.cfg, pl, key))
+            self._spawn("llama", llama_args(self.cfg, pl, key), llama_env(pl))
+            ha = helper_args(self.cfg, pl)
+            if ha:
+                self._spawn("helper", ha, {"CUDA_VISIBLE_DEVICES": str(pl.get("helper_gpu")) if
+                                           pl.get("helper_gpu") not in (None, "") else "-1"})
             wa = whisper_args(self.cfg, pl)
             if wa:
                 self._spawn("whisper", wa)
@@ -1093,10 +1285,61 @@ class Servers:
                 threading.Thread(target=start_searxng, args=(self.cfg,), daemon=True).start()
             if getattr(sys, "frozen", False):
                 self.hub.DIAGRAM_RUNNER_CMD = [sys.executable, "--schemdraw-runner"]
+                self.hub.CODE_RUNNER_CMD = [sys.executable, "--python-runner"]
             self.hub.LOG_HOOK = self.log
             self.web = self.hub.start(self.hub.parse_args(hub_args(self.cfg)))
             self.hub.SERVER_CONTROL = WinServerControl(self)   # lets the phone app switch models
+            self._move_hooks()
             threading.Thread(target=self.web.serve_forever, daemon=True, name="hub").start()
+
+    # ---- moving Stella to another server, and back ------------------------------------------------------------
+    on_moved = None        # set by the app: called with the new server's info after Stella moved away
+    on_arrived = None      # set by the app: called after Stella moved here (servers restarted)
+
+    def _move_hooks(self):
+        mv = getattr(self.hub, "MOVE", None)
+        if mv is None:
+            return
+        mv["client_hook"] = self._became_client
+        mv["restart_hook"] = lambda: threading.Thread(target=self._restart_after_move, daemon=True).start()
+
+    def _became_client(self, info):
+        """Stella moved away: stop the model, voice and helpers; the hub stays as a signpost."""
+        with self.lock:
+            for name in ("llama", "whisper", "embed", "helper"):
+                entry = self.procs.pop(name, None)
+                if entry:
+                    p, logf = entry
+                    if p.poll() is None:
+                        p.terminate()
+                    logf.close()
+        self.cfg.set(client={"server": info.get("address", ""), "key": api_key(self.cfg)}, moved=info)
+        self.log(f"Stella moved to {info.get('name')}; this PC is a client now")
+        if self.on_moved:
+            self.on_moved(info)
+
+    def start_signpost(self):
+        """After a move away: only the hub runs, pointing phones and browsers to Stella's new server."""
+        with self.lock:
+            if self.web:
+                return
+            self.hub.LOG_HOOK = self.log
+            self.web = self.hub.start(self.hub.parse_args(hub_args(self.cfg)))
+            self._move_hooks()
+            threading.Thread(target=self.web.serve_forever, daemon=True, name="hub").start()
+
+    def _restart_after_move(self):
+        """A move arrived (the hub saved it): restart everything so it's put in place, as Stella."""
+        time.sleep(1)
+        self.stop()
+        self.cfg.set(client=None, moved=None)
+        try:
+            os.remove(self.cfg.p("moved.json"))
+        except OSError:
+            pass
+        self.start()
+        if self.on_arrived:
+            self.on_arrived()
 
     def restart_llama(self):
         """Restarts only the AI model (after switching models)."""
@@ -1112,7 +1355,8 @@ class Servers:
                         p.kill()
                 logf.close()
             if self.wanted:
-                self._spawn("llama", llama_args(self.cfg, self.cfg.get("plan"), api_key(self.cfg)))
+                pl = self.cfg.get("plan")
+                self._spawn("llama", llama_args(self.cfg, pl, api_key(self.cfg)), llama_env(pl))
 
     def stop(self):
         with self.lock:
@@ -1203,6 +1447,36 @@ def tailscale_ip():
         return ""
     out = _run([exe, "ip", "-4"], timeout=5).strip().splitlines()
     return out[0].strip() if out else ""
+
+
+def find_servers(timeout=2.0):
+    """StellAI servers among your own Tailscale devices: [(address, name)]. Empty without Tailscale."""
+    exe = shutil.which("tailscale") or r"C:\Program Files\Tailscale\tailscale.exe"
+    if not (os.path.isfile(exe) or shutil.which("tailscale")):
+        return []
+    try:
+        st = json.loads(_run([exe, "status", "--json"], timeout=10) or "{}")
+    except ValueError:
+        return []
+    me = (st.get("Self") or {}).get("UserID")
+    peers = [p for p in (st.get("Peer") or {}).values() if p.get("Online") and p.get("UserID") == me]
+
+    def probe(p):
+        ip = next((i for i in p.get("TailscaleIPs") or [] if "." in i), "")
+        for path in ("/move/hello", "/health"):
+            try:
+                with urllib.request.urlopen(f"http://{ip}:{HUB_PORT}{path}", timeout=timeout) as r:
+                    d = json.loads(r.read() or b"{}")
+                if d.get("stellai") or d.get("ok"):
+                    if d.get("signpost"):
+                        return None       # Stella moved away from that one: it's a client now
+                    return ip, p.get("HostName") or ip
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(16) as ex:
+        return [r for r in ex.map(probe, peers) if r]
 
 
 def pair_link(url, key):
@@ -1347,15 +1621,33 @@ class WinServerControl:
         whisper = (cur.get("whisper_file") or "ggml-base.en.bin").replace("ggml-", "").replace(".en.bin", "")
         return plan(self._hw(), key, vision=cur.get("vision", False), whisper=whisper)
 
+    def _tuned(self):
+        pl = self.cfg.get("plan") or {}
+        hw = self._hw()
+        ids = None
+        if pl.get("llama_gpus") == "-1":
+            ids = []
+        elif pl.get("llama_gpus"):
+            ids = [int(x) for x in pl["llama_gpus"].split(",") if x.isdigit()]
+        return tune_hw(hw), pl.get("ram_budget_gb") or hw.get("ram_gb", 8), ids
+
     def catalog(self):
         cur = (self.cfg.get("plan") or {}).get("model_file")
         out = []
+        if tune:
+            try:
+                thw, budget, ids = self._tuned()
+                out = tune.library(thw, budget, self.cfg.p("models"), cur, ids, self.download)
+            except Exception:
+                out = []
         for key, m in MODELS.items():
             pl = self._plan(key)
             path = self.cfg.p("models", pl["model_file"])
+            have = os.path.isfile(path) and os.path.getsize(path) > 100_000_000
+            if out and not have:
+                continue        # with the full catalog, the old three only show when they're downloaded
             out.append({"key": key, "label": m["label"], "about": m["about"], "file": pl["model_file"],
-                        "size_gb": pl["model_gb"], "context": pl["context"],
-                        "installed": os.path.isfile(path) and os.path.getsize(path) > 100_000_000,
+                        "size_gb": pl["model_gb"], "context": pl["context"], "installed": have,
                         "current": pl["model_file"] == cur, "download": self.download.get(key)})
         return out
 
@@ -1365,6 +1657,21 @@ class WinServerControl:
                 "can_switch": True}
 
     def switch(self, key):
+        if tune and "|" in key:
+            e = tune.read_manifest(self.cfg.p("models")).get(key)
+            if not e or not tune.installed(self.cfg.p("models"), e):
+                raise ValueError("download it first")
+            row = next((r for r in self.catalog() if r["key"] == key), {})
+            pl = dict(self.cfg.get("plan") or {})
+            tuned = e.get("tuned") or {}
+            pl.update(model_key=key, label=e.get("label", key), model_file=e["model_file"], model_gb=e.get("size_gb", 0),
+                      model_files=[{"name": n, "url": ""} for n in e.get("files", [])], mtp=e.get("mtp", False),
+                      mmproj_file=e.get("mmproj", ""), context=tuned.get("context") or row.get("context") or 16384,
+                      spec_args=list(tune.MTP_ARGS) if tuned.get("mtp") else [], tuned_choice=True)
+            pl["vision"] = bool(pl.get("vision") and pl["mmproj_file"])
+            self.cfg.set(plan=pl)
+            threading.Thread(target=self.servers.restart_llama, daemon=True).start()
+            return f"switching to {pl['label']}; it takes a minute to load"
         if key not in MODELS:
             raise ValueError("unknown model")
         pl = self._plan(key)
@@ -1375,6 +1682,22 @@ class WinServerControl:
         return f"switching to {pl['label']}; it takes a minute to load"
 
     def start_download(self, key):
+        if tune and "|" in key:
+            state = {"state": "downloading", "done": 0, "total": 0, "error": ""}
+            self.download[key] = state
+            vision = bool((self.cfg.get("plan") or {}).get("vision"))
+
+            def fetch(url, dest, st):
+                download(url, dest, lambda done, total: st.__setitem__("done", done))
+
+            def work_tuned():
+                try:
+                    tune.download_model(key, self.cfg.p("models"), state, fetch, vision=vision)
+                    state["state"] = "ready"
+                except Exception as e:
+                    state.update(state="failed", error=str(e))
+            threading.Thread(target=work_tuned, daemon=True).start()
+            return "download started"
         if key not in MODELS:
             raise ValueError("unknown model")
         pl = self._plan(key)

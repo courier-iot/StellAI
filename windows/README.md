@@ -30,13 +30,9 @@ The app checks your computer:
 | AMD or Intel Arc GPU with 4 GB+, or an NVIDIA GPU with an old driver | Vulkan |
 | Anything else (e.g. laptop integrated graphics) | CPU |
 
-It recommends a model (same choices as on Linux) and you can pick another:
+Then the setup window walks through the same steps as on Linux: which graphics cards Stella may use (with two or more), how much memory StellAI may use, the model (ranked for this PC: best overall, fastest, best coder, smartest, or *Show every model that fits*, or your own Hugging Face `.gguf` link), the conversation length, the helper model, and extras. The summary line shows the total download and free disk space.
 
-- **Qwen3.5 4B**: about 2.7 GB. Best for 8 GB laptops.
-- **Qwen3.5 9B**: about 5.7 GB (4.6 GB 3-bit version on 6 GB GPUs). Needs 16 GB RAM or a 6 GB GPU.
-- **Qwen3.5 35B-A3B**: about 13.6 GB. Needs about 20 GB RAM plus a GPU with 4 GB or more.
-
-Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardware, the model, the voice recognition model and (optionally) the vision add-on. Downloads resume if interrupted. Everything goes to `%LOCALAPPDATA%\StellAI`: models, chats, memories, photos, diagrams, logs and the API key.
+Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardware, the model (all its parts, for big models), the helper, the voice recognition model and (optionally) the vision add-on. After that the **test run** measures the model and keeps the MTP speed-up only if it's faster here; **Test & tune** on the dashboard runs it again. Downloads resume if interrupted. Everything goes to `%LOCALAPPDATA%\StellAI`: models, chats, memories, photos, diagrams, logs and the API key.
 
 ## Every day
 
@@ -49,11 +45,12 @@ Then it downloads the official prebuilt llama.cpp and whisper.cpp for your hardw
 - **Tailscale**: install it on the PC and phone (same account) and pick the Tailscale address to use Stella away from home.
 - Closing the window keeps the server running in the tray. Right-click the tray icon → **Quit** to stop everything.
 - **Change model** to switch models or re-detect hardware (for example after adding a GPU).
-- **Kokoro voice**: pick it on the avatar screen (⚙ → Voice). The first time, StellAI downloads a private copy of Python (from python.org) and the Kokoro voice into `%LOCALAPPDATA%\StellAI\avatar\kokoro` (~200 MB); Piper speaks until it's ready.
+- **Kokoro voice**: pick it on the avatar screen (gear → Voice). The first time, StellAI downloads a private copy of Python (from python.org) and the Kokoro voice into `%LOCALAPPDATA%\StellAI\avatar\kokoro` (~200 MB); Piper speaks until it's ready.
 - **Avatar screen** opens Stella full screen with a face and voice (orb or your 3D character); see the main README.
 - **Check everything** runs the health check and shows what needs fixing.
 - **Back up now** / **Restore a backup…**: backups are also made every night into `%LOCALAPPDATA%\StellAI\backups` (last 14 kept).
-- The phone app's **Server** screen and the desktop chat's **🖥 Server** button show status, switch models and run the same checks.
+- The phone app's **Server** screen and the desktop chat's **Server** button show status, switch models and run the same checks.
+- **CAD Designer and PCB Designer modes**: install FreeCAD (freecad.org) and KiCad (kicad.org) with their normal installers; StellAI finds them in Program Files. For circuits as code, also run `pip install skidl` with KiCad's Python (`C:\Program Files\KiCad\<version>\bin\python.exe -m pip install skidl`), install Java 21 (adoptium.net), and put `freerouting-X.jar` from github.com/freerouting/freerouting/releases in a `freerouting` folder next to `chats.db`.
 - **3D Modeler mode**: install Blender from blender.org (the normal installer); StellAI finds it in Program Files by itself. For VRoid/VRM characters, also add the VRM add-on in Blender (Edit → Preferences → Get Extensions → search "VRM"). Drop models into `%LOCALAPPDATA%\StellAI\3d\inbox`. Reference pictures work the same as on Linux. The photo-to-3D generator isn't installed automatically on Windows yet: set it up from the Hunyuan3D-2 instructions and put `{"python": "C:\\path\\to\\venv\\Scripts\\python.exe"}` in `%LOCALAPPDATA%\StellAI\3d\generator.json`; it runs when a graphics card has 7–9 GB free (StellAI can't pause Stella's model on Windows).
 - **Wake words folder**: drop a trained `hey_stella.onnx` here and it appears in the phone app's wake word list.
 

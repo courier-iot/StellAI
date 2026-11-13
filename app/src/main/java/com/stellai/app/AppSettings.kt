@@ -22,6 +22,8 @@ class AppSettings(context: Context) {
     var wakeWordEnabled by boolPref("wake_enabled", false)
     var wakeWord by stringPref("wake_word", "hey_jarvis")
     var wakeSensitivity by intPref("wake_sensitivity", 1)
+    /** General chats pick the right mode per message: "auto" (switch when sure), "ask" (suggest only), "off". */
+    var autoModes by stringPref("auto_modes", "auto")
     var speakReplies by boolPref("speak_replies", true)
     /** After a spoken answer, keep listening for a reply without the wake word. */
     var followUp by boolPref("follow_up", true)

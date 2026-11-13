@@ -18,7 +18,7 @@ A dedicated always-on screen for the avatar: it starts full screen at login, lis
 ## 1. Install Raspberry Pi OS
 
 1. In **Raspberry Pi Imager**, choose **Raspberry Pi OS (64-bit)**, the version *with desktop*.
-2. Click the ⚙ / "Edit settings" button and set the hostname (e.g. `stella-screen`), your username and password, Wi-Fi, and the time zone.
+2. Click the gear / "Edit settings" button and set the hostname (e.g. `stella-screen`), your username and password, Wi-Fi, and the time zone.
 3. Write to the NVMe or the microSD card:
    - **NVMe:** use a USB adapter to write it, or first boot from a microSD card and copy across with *SD Card Copier*.
    - **NVMe boot order:** if the board doesn't boot from NVMe, run `sudo raspi-config` → Advanced Options → Boot Order → NVMe/USB.
@@ -44,7 +44,7 @@ Reboot with `sudo reboot`. Stella appears after the desktop loads.
 
 ## 3. Tune it
 
-Tap ⚙ (top right) on the avatar screen. Settings are saved on the server and shared by every avatar screen.
+Tap the gear (top right) on the avatar screen. Settings are saved on the server and shared by every avatar screen.
 - **Look:** Space orb or 3D character (upload a female `.vrm`), height (default 5′8″) and camera framing.
 - **Animations:** built-in gestures, plus your own `.vrma` or Mixamo `.fbx` files, and when each plays.
 - **Voice:** choice of voice, speed, and whether she also speaks replies to the phone.

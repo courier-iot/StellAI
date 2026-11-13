@@ -14,6 +14,9 @@ import org.json.JSONObject
 
 data class Memory(val id: String, val text: String, val source: String)
 
+/** A fact the server picked out of a quiet chat, waiting for the user to keep or drop ("replaces" an old one). */
+data class MemorySuggestion(val id: String, val text: String, val replaces: String)
+
 /**
  * Stella's long-term memory. The facts live on the server (shared by all your devices);
  * this keeps a copy for the prompt and the Memory screen, and asks the server to learn
@@ -26,6 +29,11 @@ class MemoryManager(private val app: App) {
         private set
     /** Short note shown in the chat after Stella learns something, e.g. "Learned 2 new things". */
     var lastLearned by mutableStateOf<String?>(null)
+
+    /** Suggestions waiting for review, and the server's mode: "review", "auto" or "off". */
+    val suggestions = mutableStateListOf<MemorySuggestion>()
+    var mode by mutableStateOf("review")
+        private set
 
     private var learnJob: Job? = null
     private val learnedUpTo = mutableMapOf<String, String>() // conversation id -> last message id learned from
@@ -45,10 +53,48 @@ class MemoryManager(private val app: App) {
         items.addAll(parse(arr))
         app.settings.memoryCache = arr.toString()
         status = ""
+        refreshSuggestions()
         true
     } catch (e: Exception) {
         status = "Couldn't reach the server: ${app.engine.friendlyError(e)}"
         false
+    }
+
+    /** Fetches the suggestions waiting for review (newer servers learn from quiet chats by themselves). */
+    suspend fun refreshSuggestions() {
+        try {
+            val o = withContext(Dispatchers.IO) { HubApi.memorySuggestions(app.settings.serverUrl, app.settings.apiKey) }
+            mode = o.optString("mode", "review")
+            suggestionsSeen = true
+            val arr = o.optJSONArray("suggestions") ?: JSONArray()
+            suggestions.clear()
+            for (i in 0 until arr.length()) {
+                val j = arr.optJSONObject(i) ?: continue
+                suggestions.add(MemorySuggestion(j.optString("id"), j.optString("text"), j.optString("replaces_text")))
+            }
+        } catch (_: Exception) {
+            // older server or offline: no suggestions
+        }
+    }
+
+    suspend fun resolve(id: String, keep: Boolean) {
+        try {
+            withContext(Dispatchers.IO) { HubApi.resolveSuggestion(app.settings.serverUrl, app.settings.apiKey, id, keep) }
+            suggestions.removeAll { it.id == id }
+            if (keep) refresh()
+        } catch (e: Exception) {
+            status = "Couldn't save: ${app.engine.friendlyError(e)}"
+        }
+    }
+
+    suspend fun changeMode(newMode: String) {
+        try {
+            val o = withContext(Dispatchers.IO) { HubApi.setMemoryMode(app.settings.serverUrl, app.settings.apiKey, newMode) }
+            mode = o.optString("mode", newMode)
+            app.settings.learnFromChats = mode != "off"
+        } catch (e: Exception) {
+            status = "Couldn't change it: ${app.engine.friendlyError(e)}"
+        }
     }
 
     suspend fun add(text: String) {
@@ -92,6 +138,9 @@ class MemoryManager(private val app: App) {
      * remembering. Runs on the server's model, so it waits until you're not mid-conversation.
      */
     fun scheduleLearning(convId: String) {
+        // Newer servers read quiet chats by themselves (from every device) and suggest facts for review;
+        // this phone only asks when the server is an older one.
+        if (serverLearns) return
         if (!app.settings.learnFromChats || app.settings.apiKey.isBlank()) return
         learnJob?.cancel()
         learnJob = app.scope.launch {
@@ -127,6 +176,10 @@ class MemoryManager(private val app: App) {
             }
         }
     }
+
+    /** True once the server answered /memories/suggestions: it learns by itself. */
+    private val serverLearns: Boolean get() = suggestionsSeen
+    private var suggestionsSeen = false
 
     companion object {
         val IMAGE_REF = Regex("!\\[[^\\]]*\\]\\((?:image|diagram):[0-9a-f]+\\)")

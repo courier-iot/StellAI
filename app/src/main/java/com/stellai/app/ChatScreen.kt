@@ -134,6 +134,8 @@ fun ChatScreen(
     var confirmDelete by remember { mutableStateOf<Conversation?>(null) }
     var moveDialog by remember { mutableStateOf(false) }
     var contextDialog by remember { mutableStateOf(false) }
+    var notesDialog by remember { mutableStateOf(false) }
+    var docsDialog by remember { mutableStateOf(false) }
     var modeDialog by remember { mutableStateOf(false) }
     val mode = engine.currentMode
     var overflow by remember { mutableStateOf(false) }
@@ -448,6 +450,21 @@ fun ChatScreen(
                                 }
                                 DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
                                     DropdownMenuItem(
+                                        text = { IconText(LineIcons.Pin, "Pinned notes") },
+                                        enabled = engine.currentId != null,
+                                        onClick = { overflow = false; notesDialog = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { IconText(LineIcons.Document, "Documents") },
+                                        enabled = engine.currentId != null,
+                                        onClick = { overflow = false; docsDialog = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Continue in a new chat") },
+                                        enabled = engine.currentId != null && !engine.busy,
+                                        onClick = { overflow = false; engine.continueInNewChat() },
+                                    )
+                                    DropdownMenuItem(
                                         text = { Text("Refresh context") },
                                         enabled = engine.currentId != null && !engine.busy,
                                         onClick = { overflow = false; engine.refreshContext() },
@@ -740,9 +757,11 @@ fun ChatScreen(
                             if (info.projectTokens > 0) ", including ${tokens(info.projectTokens)} of project context." else ".")
                     }
                     Text(
-                        "When this fills up, $name refreshes it automatically: she summarizes the older part of the chat " +
-                            "and continues from the summary. You can also refresh now, e.g. when switching topics. " +
-                            "Every message stays here and on your other devices.",
+                        "Long chats don't fill up: while $name is idle, the server folds the oldest part of the chat " +
+                            "into a summary (from about 60% full), and the newest part stays word for word. She can " +
+                            "look up the exact earlier words when she needs them, and pinned notes are never summarized. " +
+                            "You can also refresh now, e.g. when switching topics. Every message stays here and on " +
+                            "your other devices.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Space.Muted,
                     )
@@ -754,8 +773,27 @@ fun ChatScreen(
                     onClick = { contextDialog = false; engine.refreshContext() },
                 ) { Text("Refresh now") }
             },
-            dismissButton = { TextButton(onClick = { contextDialog = false }) { Text("Close") } },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        enabled = engine.currentId != null && !engine.busy,
+                        onClick = { contextDialog = false; engine.continueInNewChat() },
+                    ) { Text("New chat from here") }
+                    TextButton(onClick = { contextDialog = false }) { Text("Close") }
+                }
+            },
         )
+    }
+
+    if (notesDialog) {
+        engine.currentId?.let { id -> PinnedNotesDialog(app, id, name) { notesDialog = false } }
+            ?: run { notesDialog = false }
+    }
+
+    if (docsDialog || engine.openDocId != null) {
+        engine.currentId?.let { id ->
+            DocsDialog(app, id, name, engine.openDocId, engine.docsChanged) { docsDialog = false; engine.openDocId = null }
+        } ?: run { docsDialog = false; engine.openDocId = null }
     }
 
     confirmDelete?.let { c ->
@@ -855,7 +893,9 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
     val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     val plain = msg.text.replace(MemoryManager.IMAGE_REF, "").trim()
-    val longPress = Modifier.combinedClickable(onClick = {}, onLongClick = { menu = true })
+    // Auto mode's chip ("⇄ Auto: CAD Designer"): a tap opens the choices
+    val autoChip = msg.role == Role.TOOL && msg.text.startsWith("⇄")
+    val longPress = Modifier.combinedClickable(onClick = { if (autoChip) menu = true }, onLongClick = { menu = true })
 
     @Composable
     fun Actions() {
@@ -881,6 +921,23 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                     engine.startEdit(msg)
                 })
             }
+            if (autoChip && !engine.busy) {
+                engine.autoModeNow?.let { now ->
+                    DropdownMenuItem(text = { Text("Keep this chat in ${now.name}") }, onClick = {
+                        menu = false
+                        engine.pinMode(now.id)
+                    })
+                }
+                AUTO_CHOICES.forEach { id ->
+                    val m = App.instance.modes.get(id)
+                    if (m.id != engine.autoModeNow?.id) {
+                        DropdownMenuItem(text = { Text("Redo last reply in ${m.name}") }, onClick = {
+                            menu = false
+                            engine.redoAs(m.id)
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -888,10 +945,11 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
         Role.TOOL -> {
             val lines = msg.text.lines()
             val diagram = lines.firstNotNullOfOrNull { DIAGRAM_LINE.find(it.trim()) }
+            val docRef = DOC_REF.find(msg.text)?.groupValues?.get(1)
             Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
                 Box {
                     StatusLine(
-                        lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }.joinToString(" ").trim(),
+                        lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }.joinToString(" ").replace(DOC_REF, "").trim(),
                         modifier = longPress,
                         color = Space.Gold, style = HudLabel.copy(letterSpacing = 0.5.sp),
                         okColor = Space.Gold, badColor = Space.Red,
@@ -901,6 +959,9 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                 if (diagram != null) {
                     Spacer(Modifier.size(6.dp))
                     RemoteImage("diagram:" + diagram.groupValues[2], diagram.groupValues[1])
+                }
+                if (docRef != null) {
+                    TextButton(onClick = { engine.openDocId = docRef }) { IconText(LineIcons.Document, "Open the document", color = Space.Accent) }
                 }
             }
         }
@@ -961,7 +1022,10 @@ private fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                         if (msg.text.isEmpty()) {
                             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Accent)
                         } else {
-                            MarkdownContent(msg.text, Space.Text)
+                            MarkdownContent(msg.text.replace(DOC_REF, "").replace(Regex(" +([.,;:!?])"), "$1").trim(), Space.Text)
+                            DOC_REF.findAll(msg.text).map { it.groupValues[1] }.distinct().forEach { ref ->
+                                TextButton(onClick = { engine.openDocId = ref }) { IconText(LineIcons.Document, "Open the document", color = Space.Accent) }
+                            }
                         }
                     }
                     Actions()
@@ -980,6 +1044,7 @@ private fun ReasoningBlock(reasoning: String) {
     else IconText(Icons.Outlined.Psychology, "Thought process (tap to show)", mod, Space.Glow.copy(alpha = 0.85f), style, 14.dp)
 }
 
+private val DOC_REF = Regex("\\[doc:([0-9a-f]{10})\\]")
 private val DIAGRAM_LINE = Regex("^!\\[([^\\]]*)\\]\\(diagram:([0-9a-f]{16})\\)$")
 
 /** Marks where the context was refreshed; tap to read what Stella carried forward. */
@@ -1144,3 +1209,6 @@ private fun ApprovalDialog(a: Approval, name: String) {
         dismissButton = { TextButton(onClick = { a.decline() }) { Text("Decline", color = Space.Red) } },
     )
 }
+
+/** Modes Auto can switch between (the chip's "Redo in …" choices). */
+private val AUTO_CHOICES = listOf("general", "programmer", "electronics", "cad", "pcb", "modeler", "writer", "tutor", "brainstorm")

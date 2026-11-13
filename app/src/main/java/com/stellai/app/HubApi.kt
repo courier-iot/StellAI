@@ -71,7 +71,8 @@ object HubApi {
             .post(argsJson.ifBlank { "{}" }.toRequestBody("application/json".toMediaType()))
             .build()
         // Blender steps render, measure and have the vision add-on look at the result: minutes, not seconds.
-        return JSONObject(execute(request, if (name.startsWith("blender_")) modeling else http))
+        val slow = name.startsWith("blender_") || name.startsWith("cad_") || name.startsWith("pcb_")
+        return JSONObject(execute(request, if (slow) modeling else http))
     }
 
     // 35 minutes: a photo-to-3D job can take up to 25, plus importing, rendering and checking it.
@@ -94,6 +95,50 @@ object HubApi {
     private fun authed(serverUrl: String, apiKey: String, path: String) = Request.Builder()
         .url("${url(serverUrl)}$path")
         .header("Authorization", "Bearer ${apiKey.trim()}")
+
+    /** A chat's pinned notes: {"notes": [{id, text, source}]}. */
+    fun chatNotes(serverUrl: String, apiKey: String, convId: String): JSONObject =
+        getJson(serverUrl, apiKey, "/chats/$convId/notes")
+
+    fun addChatNote(serverUrl: String, apiKey: String, convId: String, text: String): JSONObject =
+        postJson(serverUrl, apiKey, "/chats/$convId/notes", JSONObject().put("text", text))
+
+    fun deleteChatNote(serverUrl: String, apiKey: String, convId: String, id: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/chats/$convId/notes/$id").delete().build()))
+
+    /** Documents beside a chat: {"docs": [{id, title, kind, language, version, chars, updated_at}]}. */
+    fun chatDocs(serverUrl: String, apiKey: String, convId: String): JSONObject =
+        getJson(serverUrl, apiKey, "/chats/$convId/docs")
+
+    /** One document: {id, title, kind, language, version, text, versions: [{version, by, note, at}]}. */
+    fun doc(serverUrl: String, apiKey: String, id: String): JSONObject = getJson(serverUrl, apiKey, "/docs/$id")
+
+    /** Saves the user's edit; fails with "changed meanwhile" if Stella changed it after baseVersion. */
+    fun saveDoc(serverUrl: String, apiKey: String, id: String, text: String, baseVersion: Int): JSONObject =
+        postJson(serverUrl, apiKey, "/docs/$id", JSONObject().put("text", text).put("base_version", baseVersion))
+
+    fun revertDoc(serverUrl: String, apiKey: String, id: String, version: Int): JSONObject =
+        postJson(serverUrl, apiKey, "/docs/$id", JSONObject().put("revert", version))
+
+    fun createDoc(serverUrl: String, apiKey: String, convId: String, title: String, language: String): JSONObject =
+        postJson(serverUrl, apiKey, "/chats/$convId/docs", JSONObject().put("title", title).put("text", "").put("language", language))
+
+    fun deleteDoc(serverUrl: String, apiKey: String, id: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/docs/$id").delete().build()))
+
+    /** Memories the server suggests from quiet chats, waiting to be kept or dropped: {"mode", "suggestions"}. */
+    fun memorySuggestions(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/memories/suggestions")
+
+    fun resolveSuggestion(serverUrl: String, apiKey: String, id: String, accept: Boolean): JSONObject =
+        postJson(serverUrl, apiKey, "/memories/suggestions/$id", JSONObject().put("accept", accept))
+
+    /** "review" (suggestions to keep or drop), "auto" (saved straight away) or "off". */
+    fun setMemoryMode(serverUrl: String, apiKey: String, mode: String): JSONObject =
+        postJson(serverUrl, apiKey, "/memories/settings", JSONObject().put("mode", mode))
+
+    /** A new chat that starts from this one's summary and pinned notes: {"conversation_id", "title"}. */
+    fun continueChat(serverUrl: String, apiKey: String, convId: String): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/chats/$convId/continue").post("{}".toRequestBody(JSON)).build(), slow))
 
     fun memories(serverUrl: String, apiKey: String): JSONArray =
         JSONObject(execute(authed(serverUrl, apiKey, "/memories").get().build())).optJSONArray("memories") ?: JSONArray()
@@ -267,6 +312,10 @@ object HubApi {
         execute(authed(serverUrl, apiKey, "/speedtest?format=text").post("{}".toRequestBody(JSON)).build(), slow)
 
     /** Token budget for the next request: project context, counts and how much history fits. */
+    /** Auto mode: which mode the next reply in a General chat should use. */
+    fun route(serverUrl: String, apiKey: String, body: JSONObject): JSONObject =
+        JSONObject(execute(authed(serverUrl, apiKey, "/route").post(body.toString().toRequestBody(JSON)).build()))
+
     fun context(serverUrl: String, apiKey: String, body: JSONObject): JSONObject =
         JSONObject(execute(authed(serverUrl, apiKey, "/context").post(body.toString().toRequestBody(JSON)).build()))
 
@@ -307,9 +356,24 @@ object HubApi {
         false
     }
 
+    /**
+     * Set by the app: Stella moved to another server ("move yourself to the server"). The old server answers
+     * 410 with her new address; this is called with the new AI server address (http://HOST:8080) and its name.
+     */
+    @Volatile
+    var onMoved: ((String, String) -> Unit)? = null
+
     private fun execute(request: Request, client: OkHttpClient = http): String =
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
+            if (response.code == 410) {
+                try {
+                    val to = JSONObject(text).optJSONObject("moved_to")
+                    val url = to?.optString("llama_url").orEmpty()
+                    if (url.startsWith("http")) onMoved?.invoke(url, to?.optString("name").orEmpty())
+                } catch (_: Exception) {
+                }
+            }
             if (!response.isSuccessful) {
                 val msg = try {
                     JSONObject(text).optString("error")

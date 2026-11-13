@@ -17,7 +17,9 @@ import java.util.concurrent.TimeUnit
 class LlamaClient {
 
     data class ToolCall(val id: String, val name: String, val arguments: String)
-    data class StreamResult(val content: String, val reasoning: String, val toolCalls: List<ToolCall>)
+    /** finishReason: "stop", "tool_calls" or "length" (the reply ran out of room). */
+    data class StreamResult(val content: String, val reasoning: String, val toolCalls: List<ToolCall>,
+                            val finishReason: String = "")
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -74,6 +76,7 @@ class LlamaClient {
         val content = StringBuilder()
         val reasoning = StringBuilder()
         val toolBuilders = sortedMapOf<Int, ToolCallBuilder>()
+        var finish = ""
 
         val call = http.newCall(request)
         currentCall = call
@@ -100,6 +103,7 @@ class LlamaClient {
                         throw IOException(it.optString("message", "Server error"))
                     }
                     val choice = json.optJSONArray("choices")?.optJSONObject(0) ?: continue
+                    choice.optStringOrNull("finish_reason")?.let { if (it.isNotEmpty()) finish = it }
                     val delta = choice.optJSONObject("delta") ?: continue
 
                     var changed = false
@@ -139,7 +143,7 @@ class LlamaClient {
                     arguments = b.arguments.toString().ifBlank { "{}" },
                 )
             }
-        return StreamResult(content.toString(), reasoning.toString(), calls)
+        return StreamResult(content.toString(), reasoning.toString(), calls, finish)
     }
 
     private class ToolCallBuilder {

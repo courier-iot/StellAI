@@ -293,6 +293,24 @@ object PhoneExtras {
                       else "$appName doesn't take play requests; I can open it with open_app instead")
     }
 
+    /** Sends a song or video to Stellar Disc's Uplink downloader (it asks first unless the user turned that off). */
+    fun uplinkDownload(ctx: Context, args: JSONObject): Res {
+        if (!installed(ctx, STELLAR_DISC)) return Res(false, "Stellar Disc isn't installed on this phone")
+        val url = args.optString("url", "").trim()
+        val query = args.optString("query", "").trim()
+        if (url.isEmpty() && query.isEmpty()) return Res(false, "Give a link or the song to search for")
+        if (url.isNotEmpty() && !url.startsWith("http")) return Res(false, "The link must start with http")
+        val intent = Intent("com.stellapp.disc.action.UPLINK").setPackage(STELLAR_DISC)
+            .putExtra("url", url).putExtra("query", query)
+            .putExtra("kind", args.optString("kind", ""))
+            .putExtra("quality", args.optString("quality", ""))
+            .putExtra("queue_when_done", args.optBoolean("queue_when_done", false))
+        val what = if (url.isNotEmpty()) "the link" else "\"$query\" (top YouTube result)"
+        return if (start(ctx, intent))
+            Res(true, "Sent $what to Uplink in Stellar Disc. It downloads straight away if \"Let assistants start downloads\" is on; otherwise it's waiting for you to tap Download.")
+        else Res(false, "Stellar Disc didn't take the request; update it to 3.4.0 or newer")
+    }
+
     // ---- Sound ---------------------------------------------------------------------------------
     fun setVolume(ctx: Context, args: JSONObject): Res {
         val percent = args.optInt("percent", -1)

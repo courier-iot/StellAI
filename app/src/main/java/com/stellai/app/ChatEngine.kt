@@ -93,7 +93,33 @@ class ChatEngine(private val app: App) {
     /** Last problem refreshing the context, shown in the chat. */
     var contextNotice by mutableStateOf<String?>(null)
 
+    /** Documents beside the chat: the one to show (set by tapping a document reference or Stella's edit) and a change counter. */
+    var openDocId by mutableStateOf<String?>(null)
+    var docsChanged by mutableStateOf(0)
+
     private var meterJob: Job? = null
+
+    /** Auto mode: the mode each General chat is using now, and a mode the user picked for the next reply. */
+    private val autoActive = mutableMapOf<String, String>()
+    private val forcedMode = mutableMapOf<String, String>()
+
+    /** The mode Auto is using in the open chat (null when the chat has its own mode or Auto is off). */
+    val autoModeNow: Mode?
+        get() {
+            val id = currentId ?: return null
+            if (modeOf(id).id != GENERAL_MODE.id || app.settings.autoModes == "off") return null
+            return autoActive[id]?.let { app.modes.get(it) }
+        }
+
+    /** Redo Stella's last reply in another mode (Auto learns from this). */
+    fun redoAs(modeId: String) {
+        val id = currentId ?: return
+        forcedMode[id] = modeId
+        retry()
+    }
+
+    /** Keep this chat in one mode from now on (turns Auto off for it). */
+    fun pinMode(modeId: String) = setMode(modeId)
 
     /** Tool names already offered in each chat; kept so the tool list stays stable (see select_tools on the server). */
     private val stickyTools = mutableMapOf<String, MutableSet<String>>()
@@ -167,6 +193,33 @@ class ChatEngine(private val app: App) {
         loadMessages(id)
         context = null
         updateMeter()
+    }
+
+    /**
+     * Continue in a new chat: the server starts one from this chat's summary and pinned notes (same project and
+     * mode), so a long conversation can go on with a fresh, nearly empty memory. Opens it when it's ready.
+     */
+    fun continueInNewChat() {
+        val id = currentId ?: return
+        if (busy) return
+        busy = true
+        status = "Carrying this chat over…"
+        app.scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { HubApi.continueChat(app.settings.serverUrl, app.settings.apiKey, id) }
+                app.sync.syncNow()
+                reloadConversations()
+                busy = false
+                status = ""
+                open(r.optString("conversation_id"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                busy = false
+                status = ""
+                contextNotice = "Couldn't continue in a new chat: ${friendlyError(e)}"
+            }
+        }
     }
 
     /** Starts a new chat, optionally inside a project. */
@@ -316,7 +369,7 @@ class ChatEngine(private val app: App) {
         var remindersChanged = false
         status = "Contacting server…"
         val projectId = conversations.firstOrNull { it.id == convId }?.projectId.orEmpty()
-        val mode = modeOf(convId)
+        var mode = modeOf(convId)
         val turn = mutableListOf<JSONObject>() // this turn's tool calls and results, in API format
         var finalReply = ""
         app.avatarEvent("thinking", voice = fromVoice)
@@ -344,6 +397,9 @@ class ChatEngine(private val app: App) {
                 if (speakOut) main.post { feeder.feed(reply, finish = true) }
                 return
             }
+            // Auto mode: a General chat picks the mode that fits this message (instant keyword check on the server)
+            val auto = mode.id == GENERAL_MODE.id && app.settings.autoModes != "off"
+            if (auto) mode = autoMode(convId, fresh)
             withContext(Dispatchers.IO) {
                 // Share new photos with your other devices (the model gets them directly below).
                 for (id in newPhotos) {
@@ -356,16 +412,17 @@ class ChatEngine(private val app: App) {
             }
             app.memory.refresh()
             // Fit the chat into Stella's context window; when it's nearly full, refresh it with a summary.
-            var prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice)
+            var prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice, auto)
+            var continued = 0
             if (prepared.needsRefresh && !stopRequested && gen == generation) {
                 status = "Refreshing context…"
-                if (compact(convId, keepUserTurns = 2)) prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice)
+                if (compact(convId, keepUserTurns = 2)) prepared = prepare(convId, projectId, newPhotos.size, mode, fromVoice, auto)
             }
             if (gen == generation && prepared.info != null) context = prepared.info
             rememberTools(convId, prepared.tools)
-            val base = prepared.history
-            val system = prepared.system
-            val tools = prepared.tools
+            var base = prepared.history
+            var system = prepared.system
+            var tools = prepared.tools
             repeat(MAX_TOOL_ROUNDS) {
                 status = "Contacting server…"
                 val streamId = STREAMING_PREFIX + UUID.randomUUID()
@@ -411,7 +468,23 @@ class ChatEngine(private val app: App) {
                 }
                 turn.add(assistant)
 
-                if (result.toolCalls.isEmpty()) return
+                if (result.toolCalls.isEmpty()) {
+                    // The reply ran out of room (Stella's memory filled up mid-answer): make room and carry on
+                    if (result.finishReason == "length" && finalText.isNotEmpty() && continued < MAX_CONTINUES &&
+                        !stopRequested && gen == generation) {
+                        continued++
+                        addStored(convId, Role.TOOL, "↪ Long reply: making room and continuing")
+                        status = "Continuing…"
+                        compact(convId, keepUserTurns = 1)
+                        prepared = prepare(convId, projectId, 0, mode, fromVoice, auto)
+                        base = prepared.history
+                        system = prepared.system
+                        turn.clear()
+                        turn.add(JSONObject().put("role", "user").put("content", CONTINUE_PROMPT))
+                        return@repeat
+                    }
+                    return
+                }
 
                 for (tc in result.toolCalls) {
                     val onServer = ServerTools.has(tc.name)
@@ -428,6 +501,8 @@ class ChatEngine(private val app: App) {
                     // Project tools act on this chat's project
                     if (tc.name in PROJECT_TOOLS && projectId.isNotEmpty()) argsJson.put("project_id", projectId)
                     if (tc.name == "search_chats") argsJson.put("current_conversation", convId)
+                    // chat tools (pinned notes, recall, Auto mode) need to know which chat this is
+                    if (!argsJson.has("conversation_id")) argsJson.put("conversation_id", convId)
                     val needsOk = onServer && ServerTools.needsApproval(tc.name)
                     val outcome = if (needsOk && !askApproval(tc.name, argsJson)) {
                         val why = if (app.isVisible) "The user declined this action." else
@@ -443,7 +518,23 @@ class ChatEngine(private val app: App) {
                     } else {
                         PhoneTools.execute(app, tc.name, tc.arguments)
                     }
-                    addStored(convId, Role.TOOL, outcome.summary)
+                    if (tc.name == "document" && outcome.summary.startsWith("✓") && convId == currentId) docsChanged++
+                    if (tc.name == "switch_mode" && outcome.summary.startsWith("✓")) {
+                        // Stella switched herself: her next step uses that mode's instructions and tools
+                        val to = try { JSONObject(outcome.result).optString("switched_to") } catch (_: Exception) { "" }
+                        if (to.isNotEmpty() && auto) {
+                            autoActive[convId] = to
+                            mode = app.modes.get(to)
+                            addStored(convId, Role.TOOL, "⇄ Auto: ${mode.name} (Stella switched)")
+                            prepared = prepare(convId, projectId, 0, mode, fromVoice, auto)
+                            base = prepared.history
+                            system = prepared.system
+                            tools = prepared.tools
+                            rememberTools(convId, tools)
+                        }
+                    } else {
+                        addStored(convId, Role.TOOL, outcome.summary)
+                    }
                     turn.add(JSONObject()
                         .put("role", "tool")
                         .put("tool_call_id", tc.id)
@@ -535,7 +626,7 @@ class ChatEngine(private val app: App) {
                 Role.ASSISTANT -> if (m.text.isNotBlank() && !m.id.startsWith(STREAMING_PREFIX)) {
                     pending.append(m.text).append('\n')
                 }
-                Role.TOOL -> pending.append("(action result: ")
+                Role.TOOL -> if (!m.text.startsWith("⇄")) pending.append("(action result: ")
                     .append(m.text.replace(DIAGRAM_REF, "[diagram shown]").trim())
                     .append(")\n")
                 Role.ERROR, Role.SUMMARY -> {}
@@ -589,12 +680,45 @@ class ChatEngine(private val app: App) {
      * Builds what Stella will see: instructions (with the project and any earlier summary) and as
      * much recent history as fits. The server counts tokens exactly and picks relevant project files.
      */
+    /**
+     * Auto mode for a General chat: asks the server which mode fits the newest message, shows a chip when it
+     * switches or suggests, and remembers the choice for follow-ups. Falls back to the last mode if the server
+     * can't be reached.
+     */
+    private suspend fun autoMode(convId: String, fresh: Boolean): Mode {
+        val forced = forcedMode.remove(convId).orEmpty()
+        if (!fresh && forced.isEmpty()) return app.modes.get(autoActive[convId])
+        val text = withContext(Dispatchers.IO) {
+            app.store.messages(convId).map { it.toUi() }.lastOrNull { it.role == Role.USER }?.text
+        }?.replace(PHOTO_REF, "")?.trim().orEmpty()
+        val r = try {
+            withContext(Dispatchers.IO) {
+                HubApi.route(app.settings.serverUrl, app.settings.apiKey, JSONObject()
+                    .put("chat_id", convId).put("text", text).put("level", app.settings.autoModes)
+                    .put("forced", forced).put("current", autoActive[convId] ?: JSONObject.NULL))
+            }
+        } catch (_: Exception) {
+            return app.modes.get(autoActive[convId])
+        }
+        val id = r.optString("mode", "general")
+        autoActive[convId] = id
+        val mode = app.modes.get(id)
+        val why = r.optString("reason")
+        if (r.optBoolean("switched") || forced.isNotEmpty()) {
+            addStored(convId, Role.TOOL, "⇄ Auto: ${mode.name}" + if (why.isNotEmpty()) " ($why)" else "")
+        } else if (!r.isNull("suggest") && r.optString("suggest").isNotEmpty()) {
+            addStored(convId, Role.TOOL, "⇄ Suggest: ${r.optString("suggest_name")} (tap to redo in it)")
+        }
+        return mode
+    }
+
     private suspend fun prepare(
         convId: String,
         projectId: String,
         images: Int,
         mode: Mode = modeOf(convId),
         fromVoice: Boolean = false,
+        auto: Boolean = false,
     ): Prepared = withContext(Dispatchers.IO) {
         val list = app.store.messages(convId).map { it.toUi() }
         val lastSummary = list.indexOfLast { it.role == Role.SUMMARY }
@@ -619,6 +743,8 @@ class ChatEngine(private val app: App) {
                 .put("sticky", JSONArray(sticky.toList()))
                 .put("thinking", if (fromVoice) "auto" else thinkingPref(mode))
                 .put("last", lastText)
+                .put("chat_id", convId)
+                .put("auto", auto)
                 .put("messages", JSONArray().apply {
                     history.forEach { put(JSONObject().put("role", it.optString("role")).put("content", textOf(it))) }
                 }))
@@ -638,16 +764,19 @@ class ChatEngine(private val app: App) {
         val limit = nCtx - plan.optInt("reply_reserve", 1024)
         val projectTokens = plan.optInt("project_tokens")
         val used = plan.optInt("fixed_tokens") + projectTokens + plan.optInt("history_tokens")
-        var start = plan.optInt("keep_from", 0).coerceIn(0, history.size)
-        while (start < history.size && history[start].optString("role") != "user") start++
-        if (start >= history.size) start = history.indexOfLast { it.optString("role") == "user" }.coerceAtLeast(0)
-        val userTurns = history.count { it.optString("role") == "user" }
+        // Auto mode: earlier topics in other modes are left out (the server sends a short note about them)
+        val drop = plan.optJSONArray("drop")?.let { arr -> (0 until arr.length()).map { arr.optInt(it) }.toSet() }.orEmpty()
+        val kept = if (drop.isEmpty()) history else history.filterIndexed { i, _ -> i !in drop }
+        var start = plan.optInt("keep_from", 0).coerceIn(0, kept.size)
+        while (start < kept.size && kept[start].optString("role") != "user") start++
+        if (start >= kept.size) start = kept.indexOfLast { it.optString("role") == "user" }.coerceAtLeast(0)
+        val userTurns = kept.count { it.optString("role") == "user" }
         // Newer servers keep the instructions stable (so the model server can reuse its work on them) and
         // send what changes per message (relevant memories, file excerpts) to attach to the newest message.
         val memory = if (plan.has("memory_context")) plan.optString("memory_context") else app.memory.promptSection()
         Prepared(
             system = systemPrompt(plan.optString("project_context"), summary, mode, memory),
-            history = withTurnContext(history.subList(start, history.size),
+            history = withTurnContext(kept.subList(start, kept.size),
                 plan.optString("turn_context") + if (fromVoice) "\n" + VOICE_STYLE else ""),
             needsRefresh = userTurns >= 2 && (start > 0 || used > limit * REFRESH_AT),
             info = ContextInfo(used, limit, nCtx, projectTokens),
@@ -849,7 +978,7 @@ class ChatEngine(private val app: App) {
         turn.forEach { all.put(it) }
         // Qwen's recommended sampling for Qwen3.5 (model card): precise for code, a presence penalty elsewhere
         // to avoid the repetition loops quantized models can fall into. A mode's creativity overrides temperature.
-        val code = mode.id == "programmer" || mode.id == "electronics" || mode.id == "modeler"
+        val code = mode.id in setOf("programmer", "electronics", "modeler", "cad", "pcb")
         val temperature = mode.temperature ?: if (thinking) (if (code) 0.6 else 1.0) else 0.7
         return JSONObject()
             .put("model", "local")
@@ -876,10 +1005,13 @@ class ChatEngine(private val app: App) {
             The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm briefly afterwards; never claim success if a tool failed.
             Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and mobile data open a settings panel for the user to tap. If a tool says Stella needs an access, tell the user where to turn it on.
             Markdown is fine; always put code in fenced blocks with a language; avoid tables.
+            For long code (over ~60 lines), chapters or write-ups, use the document tool when you have it: they show beside the chat; refer to them in a line instead of pasting.
             Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically; if it fails, fix it and retry once).
             Describe photos only from what you actually see.
             Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
             A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
+            Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before answering, and use run_python or the calculators when it's available instead of doing long arithmetic in your head. If you get something wrong, say so and fix it.
+            Pin decisions, names and facts that must stay true in this chat with pin_note when it's available.
         """.trimIndent() +
             (if (mode.prompt.isBlank()) "" else "\n\n## Current mode: ${mode.name}\n${mode.prompt}\n" +
                 "These mode instructions take priority over the general style guidance above (such as keeping replies short).") +
@@ -887,7 +1019,8 @@ class ChatEngine(private val app: App) {
             (if (project.isBlank()) "" else "\n\n$project") +
             (if (summary.isBlank()) "" else "\n\n## Earlier in this chat\n" +
                 "The start of this conversation was summarized to free up memory. Continue naturally from it; " +
-                "the user can still see the full chat.\n$summary")
+                "the user can still see the full chat. When you need its exact words (code, numbers, names), " +
+                "call recall_chat.\n$summary")
     }
 
     private fun stripThink(text: String): String =
@@ -923,6 +1056,10 @@ class ChatEngine(private val app: App) {
         val PHOTO_REF = Regex("!\\[[^\\]]*\\]\\(image:([0-9a-f]{16})\\)")
         val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
         private const val MAX_TOOL_ROUNDS = 6
+        /** A reply that runs out of room is continued at most this many times. */
+        private const val MAX_CONTINUES = 2
+        private const val CONTINUE_PROMPT = "(Automatic: your previous reply was cut off because your memory filled " +
+            "up. Continue it exactly where it stopped, without repeating anything or adding a preamble.)"
         private const val MAX_HISTORY = 24
         /** Modes where the server may answer simple requests itself. */
         private val QUICK_MODES = setOf("general", "programmer", "electronics")
@@ -949,6 +1086,7 @@ class ChatEngine(private val app: App) {
             "media_control" to Regex("\\bplay|pause|resume|skip|next (song|track)|previous|\\bsong|track|music|podcast|stop (the )?(music|song|video)"),
             "now_playing" to Regex("\\bsong|track|playing|music|listening|what'?s this"),
             "play_music" to Regex("\\bplay\\b|\\bsong|music|album|playlist|artist|put on"),
+            "uplink_download" to Regex("download|uplink|save (this|that|the) (song|video|track)|grab (this|that|the)"),
             "set_sound_mode" to Regex("silent|vibrat|do not disturb|\\bdnd\\b|ringer|\\bmute|sound (on|off)|quiet mode"),
             "set_brightness" to Regex("bright|\\bdim\\b|darker|screen light"),
             "open_settings" to Regex("wi-?fi|bluetooth|mobile data|airplane|flight mode|hotspot|\\bnfc\\b|location|\\bgps\\b|settings"),

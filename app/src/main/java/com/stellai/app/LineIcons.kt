@@ -14,6 +14,9 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.HistoryEdu
@@ -29,6 +32,8 @@ import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material.icons.outlined.Architecture
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Icon
@@ -89,11 +94,13 @@ object LineIcons {
         "★", "⭐" -> Icons.Outlined.StarOutline
         "💻" -> Icons.Outlined.Code
         "◆", "🧊" -> Icons.Outlined.ViewInAr
+        "📐" -> Icons.Outlined.Architecture
+        "🔌" -> Icons.Outlined.Memory
         else -> Sparkle
     }
 
     /** Icons offered when you make your own mode (stored as their symbol). */
-    val MODE_CHOICES = listOf("★", "⌨", "✒", "⚡", "🎓", "💡", "📜", "🎮", "🍳", "🧪", "🎵", "📈", "🗺", "🛠", "◆", "❤", "🌙")
+    val MODE_CHOICES = listOf("★", "⌨", "✒", "⚡", "🎓", "💡", "📜", "🎮", "🍳", "🧪", "🎵", "📈", "🗺", "🛠", "◆", "📐", "🔌", "❤", "🌙")
 
     fun forFile(kind: String): ImageVector = when (kind) {
         "pdf" -> Icons.Outlined.PictureAsPdf
@@ -103,6 +110,8 @@ object LineIcons {
     }
 
     val Reminder get() = Icons.Outlined.Alarm
+    val Pin get() = Icons.Outlined.PushPin
+    val Document get() = Icons.Outlined.Description
 }
 
 /** A small line icon followed by text, in one colour. */
@@ -117,7 +126,7 @@ fun IconText(icon: ImageVector, text: String, modifier: Modifier = Modifier, col
 }
 
 /**
- * Text that may start with a status mark ("✓ ", "✗ " or "⚠ ", as stored in chats and tool results):
+ * Text that may start with a status mark ("✓ ", "✗ ", "⚠ ", "⇄ " or "↪ ", as stored in chats and tool results):
  * the mark is drawn as a line icon instead.
  */
 @Composable
@@ -128,6 +137,8 @@ fun StatusLine(text: String, modifier: Modifier = Modifier, color: Color = Local
         t.startsWith("✓") -> IconText(Icons.Outlined.CheckCircle, t.drop(1).trim(), modifier, okColor, style)
         t.startsWith("✗") -> IconText(Icons.Outlined.Cancel, t.drop(1).trim(), modifier, badColor, style)
         t.startsWith("⚠") -> IconText(Icons.Outlined.WarningAmber, t.drop(1).trim(), modifier, badColor, style)
+        t.startsWith("⇄") -> IconText(Icons.Outlined.SwapHoriz, t.drop(1).trim(), modifier, color, style)
+        t.startsWith("↪") -> IconText(Icons.AutoMirrored.Outlined.Redo, t.drop(1).trim(), modifier, color, style)
         else -> Text(text, modifier, color = color, style = style)
     }
 }

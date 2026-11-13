@@ -6,17 +6,17 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 1. [ ] **Quick launch** (app, S)
    A Quick Settings tile and a home-screen widget to talk to Stella in one tap.
 
-### Next: long chats that don't run out, and working more like Claude (agreed, not started)
+### Long chats that don't run out, and working more like Claude (done in 0.24.0 to 0.26.0)
 
 2. [x] **Bigger context windows** (0.14.1): 32K for 4B, 16–64K for 9B, 64K for 35B on a graphics card, sized so the model stays on the card; 8–16K without one.
-3. [ ] **Background rolling summaries** (server + clients, M): summarize the oldest turns while idle from ~60% full, fold old summaries together; no waiting.
-4. [ ] **Recall inside the current chat** (server, M): search the summarized-away part of the same chat and bring exact passages back.
-5. [ ] **Pinned working notes per chat** (all, M): goals, decisions, names, story facts; always included, never summarized.
-6. [ ] **Documents beside the chat** (all, L): long code and chapters live in a side panel Stella edits by section; the chat keeps a reference.
-7. [ ] **Automatic memory** (server, M): pull lasting facts from quiet chats into Memory, with a review list.
-8. [ ] **Code runner** (server, M): run Python on the server to check maths, test code and analyze files.
-9. [ ] **Personality and working style** (prompt, S): direct, asks one clarifying question, admits uncertainty, checks its work.
-10. [ ] **Conveniences** (all, S): auto-continue at the length limit; "Continue in a new chat" carrying notes and summary.
+3. [x] **Background rolling summaries** (server + clients, M): summarize the oldest turns while idle from ~60% full, fold old summaries together; no waiting.
+4. [x] **Recall inside the current chat** (server, M): search the summarized-away part of the same chat and bring exact passages back.
+5. [x] **Pinned working notes per chat** (all, M): goals, decisions, names, story facts; always included, never summarized.
+6. [x] **Documents beside the chat** (0.26.0): long code and chapters live in a side panel Stella edits by section or passage, with versions; the chat keeps a reference.
+7. [x] **Automatic memory** (server, M): pull lasting facts from quiet chats into Memory, with a review list.
+8. [x] **Code runner** (server, M): run Python on the server to check maths, test code and analyze files.
+9. [x] **Personality and working style** (prompt, S): direct, asks one clarifying question, admits uncertainty, checks its work.
+10. [x] **Conveniences** (all, S): auto-continue at the length limit; "Continue in a new chat" carrying notes and summary.
 
 ## Also discussed, not yet built
 
@@ -29,7 +29,14 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 
 ## Done
 
-- [x] **More phone powers** (app 0.17.0): turn off alarms and timers, next alarm, music control / now playing / play by name, volumes per stream, silent and Do Not Disturb, brightness, notifications, contacts, calendar reading, settings panels; Settings → Phone access. 0.17.1: "play ..." goes to Stellar Disc by default when nothing else is playing. Next: Home Assistant controls.
+- [x] **Memory review, code runner, working style, conveniences** (app 0.25.0): server learns from quiet chats into a keep/drop list (or saves, or off); `run_python` with plots, time/memory limits and no network; direct, one-question, honest working style; long replies continue by themselves; Continue in a new chat.
+- [x] **Long chats** (app 0.24.0): background rolling summaries on the server (from ~60% full, newest ~35% kept, old summaries folded in), `recall_chat` for the exact earlier words of the same chat, 📌 pinned notes per chat (Stella pins decisions herself; never summarized).
+- [x] **Move Stella + server/client/both** (app 0.23.0): "move yourself to the server" by voice (Tailscale names or addresses, confirmation, same-account check), the package restored on the new server with the API key, the old server as a signpost that redirects phones, browsers and avatar screens, then a client; avatar announcements. Setup's first question: server only, client only (finds servers on Tailscale) or both, on Linux and Windows.
+- [x] **Proxmox + install guides** (app 0.22.0): `stellai-proxmox.sh` (host NVIDIA driver with DKMS, Ubuntu LXC with the cards, /dev/net/tun, nesting for Docker, then the normal setup); container-aware setup (matching driver programs, pinned; no zram or sysctl); start-at-boot service; health check catches driver version mismatches; step-by-step guides for Linux and Proxmox. 
+- [x] **Setup screens + model catalog + helper** (app 0.21.0): Linux menu screens and Windows setup window (cards, memory budget, ranked models, conversation length, helper, extras, summary); shared catalog with exact Hugging Face files (split models, MTP versions); helper model for background jobs; test run that sizes the context and keeps MTP only if faster; RAM prompt cache. Next: per-mode models (a coder model for Programmer/CAD/PCB), a speed test the phone app can start.
+- [x] **Auto mode + circuits as code** (app 0.20.0): General chats switch modes by themselves (sticky, learns from corrections, chips to redo or pin, topic lanes folded with facts kept, "back to …"); PCB Designer writes circuits in SKiDL, places them wide, autoroutes with Freerouting, and keeps recipes, confirmed pinouts and notes. Next: offer to move a big topic into its own chat; smarter placement (group parts by connection); live KiCad add-on.
+- [x] **CAD Designer + PCB Designer** (app 0.19.0): FreeCAD and KiCad modes with versioned, measured, pictured steps; rules checks explained; fab exports; STEP hand-offs between PCB, CAD and Blender. Next: live FreeCAD/KiCad window add-ons.
+- [x] **More phone powers** (app 0.17.0): turn off alarms and timers, next alarm, music control / now playing / play by name, volumes per stream, silent and Do Not Disturb, brightness, notifications, contacts, calendar reading, settings panels; Settings → Phone access. 0.17.1: "play ..." goes to Stellar Disc by default when nothing else is playing. 0.18.0: "download ..." sends songs to Stellar Disc's Uplink. Next: Home Assistant controls.
 - [x] **Picture to model** (app 0.16.0): reference pictures per 3D workspace (every visual check compares with them; chat photos now carry their id so tools can use them); photo-to-3D shapes with Hunyuan3D-2 mini / multi-view on the NVIDIA card, pausing Stella's model on one card or using a second card; `LLAMA_GPUS` keeps Stella on one card. Next: Windows install for the generator, optional texturing (Hunyuan3D-Paint).
 - [x] **3D Modeler mode** (app 0.15.0): Blender kept running in the background on the server; each step is a checked bpy script saved as a new version, with measured changes, four-angle renders and a vision check; revert, history, export (glb/fbx/obj/stl/vrm/blend); Linux setup offers Blender and the VRM add-on. Next: the live add-on for an open Blender window, reusing the same commands.
 
