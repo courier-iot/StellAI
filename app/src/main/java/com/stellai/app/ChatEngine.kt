@@ -753,7 +753,7 @@ class ChatEngine(private val app: App) {
         }
         if (plan == null) {
             return@withContext Prepared(systemPrompt("", summary, mode, app.memory.promptSection()),
-                withTurnContext(trimByCount(history), if (fromVoice) VOICE_STYLE else ""), false, null,
+                withTurnContext(trimByCount(history), if (fromVoice) app.modes.prompts.voiceStyle else ""), false, null,
                 toolDefinitions(projectId.isNotEmpty(), mode, selected = null, phone = phoneNames),
                 think = !fromVoice && thinkingPref(mode) == "on")
         }
@@ -777,7 +777,7 @@ class ChatEngine(private val app: App) {
         Prepared(
             system = systemPrompt(plan.optString("project_context"), summary, mode, memory),
             history = withTurnContext(kept.subList(start, kept.size),
-                plan.optString("turn_context") + if (fromVoice) "\n" + VOICE_STYLE else ""),
+                plan.optString("turn_context") + if (fromVoice) "\n" + app.modes.prompts.voiceStyle else ""),
             needsRefresh = userTurns >= 2 && (start > 0 || used > limit * REFRESH_AT),
             info = ContextInfo(used, limit, nCtx, projectTokens),
             tools = toolDefinitions(projectId.isNotEmpty(), mode, selected = chosen, phone = phoneNames),
@@ -998,29 +998,16 @@ class ChatEngine(private val app: App) {
         else -> app.settings.thinkingMode
     }
 
+    /** Stella's instructions: the server's shared text (see Prompts) plus this chat's mode, memories, project and summary. */
     private fun systemPrompt(project: String, summary: String, mode: Mode, memory: String): String {
         val name = app.settings.assistantName.ifBlank { "Stella" }
-        return """
-            You are $name, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
-            The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm briefly afterwards; never claim success if a tool failed.
-            Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and mobile data open a settings panel for the user to tap. If a tool says Stella needs an access, tell the user where to turn it on.
-            Markdown is fine; always put code in fenced blocks with a language; avoid tables.
-            For long code (over ~60 lines), chapters or write-ups, use the document tool when you have it: they show beside the chat; refer to them in a line instead of pasting.
-            Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically; if it fails, fix it and retry once).
-            Describe photos only from what you actually see.
-            Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
-            A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
-            Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before answering, and use run_python or the calculators when it's available instead of doing long arithmetic in your head. If you get something wrong, say so and fix it.
-            Pin decisions, names and facts that must stay true in this chat with pin_note when it's available.
-        """.trimIndent() +
-            (if (mode.prompt.isBlank()) "" else "\n\n## Current mode: ${mode.name}\n${mode.prompt}\n" +
-                "These mode instructions take priority over the general style guidance above (such as keeping replies short).") +
+        val p = app.modes.prompts
+        return p.instructions.replace("{name}", name) +
+            (if (mode.prompt.isBlank()) "" else "\n\n## Current mode: ${mode.name}\n${mode.prompt}" +
+                (if (p.modeNote.isBlank()) "" else "\n${p.modeNote}")) +
             (if (memory.isBlank()) "" else "\n\n$memory") +
             (if (project.isBlank()) "" else "\n\n$project") +
-            (if (summary.isBlank()) "" else "\n\n## Earlier in this chat\n" +
-                "The start of this conversation was summarized to free up memory. Continue naturally from it; " +
-                "the user can still see the full chat. When you need its exact words (code, numbers, names), " +
-                "call recall_chat.\n$summary")
+            (if (summary.isBlank()) "" else "\n\n## Earlier in this chat\n${p.summaryIntro}\n$summary")
     }
 
     private fun stripThink(text: String): String =
@@ -1047,11 +1034,6 @@ class ChatEngine(private val app: App) {
     }
 
     companion object {
-        /** How to answer when the user spoke (it's added to the newest message, not the instructions). */
-        const val VOICE_STYLE = "Voice conversation: the user said this out loud and will hear your reply spoken. " +
-            "Answer the way a person talks: usually one to three short sentences, warm and natural, with contractions. " +
-            "No markdown, lists, headings, tables, code or links. If the answer needs detail, give the key point first " +
-            "and offer to go into more detail or put it on screen."
         private val ACKS = listOf("One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.")
         val PHOTO_REF = Regex("!\\[[^\\]]*\\]\\(image:([0-9a-f]{16})\\)")
         val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")

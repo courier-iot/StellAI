@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+import json, os, sys
+job=json.load(open(os.environ["STELLAI_JOB"]))
+st={"objects":[]}
+if job.get("open"): st=json.load(open(job["open"]))
+if job.get("import"): st={"objects":[{"name":"Imported","label":"Imported","size_mm":[10,10,10],"solids":1,"faces":6}]}
+out={"ok":True}
+c=job.get("code","")
+if c:
+    out["before"]={"objects":[dict(o) for o in st["objects"]]}
+    if "boom" in c: print("@@CAD@@"+json.dumps({"ok":False,"error":"NameError: boom","where":["line 1: boom()"]})); sys.exit()
+    if "nothing" not in c: st["objects"].append({"name":"Base%d"%len(st["objects"]),"label":"Base","size_mm":[40,20,5],"volume_mm3":4000,"solids":1,"faces":6})
+out["after"]={"objects":st["objects"],"issues":{},"size_mm":[40,20,5]}
+if job.get("save"): json.dump(st,open(job["save"],"w"))
+for p,f in job.get("exports",[]): open(p,"w").write("solid x\nendsolid x\n")
+print("FreeCAD noise"); print("@@CAD@@"+json.dumps(out))

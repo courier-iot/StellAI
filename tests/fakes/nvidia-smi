@@ -1,0 +1,4 @@
+#!/bin/bash
+f=${FAKE_FREE:-15000}
+[[ -f /tmp/fake_paused ]] && f=15500
+echo "0, $f, 15360, Tesla T4"

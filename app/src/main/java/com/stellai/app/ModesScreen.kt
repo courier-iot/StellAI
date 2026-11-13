@@ -109,7 +109,7 @@ fun ModesScreen(onDone: () -> Unit) {
                 }
             }
             item { ModesHeader("Built in") }
-            items(BUILT_IN_MODES, key = { it.id }) { m ->
+            items(modes.builtIn, key = { it.id }) { m ->
                 ModeRow(m) {
                     if (m.id != GENERAL_MODE.id) {
                         TextButton(onClick = {

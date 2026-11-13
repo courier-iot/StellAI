@@ -37,6 +37,11 @@ class AppSettings(context: Context) {
         get() = prefs.getString("memory_cache", "[]") ?: "[]"
         set(v) = prefs.edit().putString("memory_cache", v).apply()
 
+    /** Stella's instructions and the built-in modes, as last fetched from the server (GET /prompts). */
+    var promptCache: String
+        get() = prefs.getString("prompt_cache", "{}") ?: "{}"
+        set(v) = prefs.edit().putString("prompt_cache", v).apply()
+
     /** Your own modes, as last fetched from the server. */
     var modeCache: String
         get() = prefs.getString("mode_cache", "[]") ?: "[]"

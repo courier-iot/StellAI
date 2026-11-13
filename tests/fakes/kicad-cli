@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import sys, json, os, struct, zlib
+a=sys.argv[1:]
+def png(path):
+    raw=b"".join(b"\x00"+b"\x10\x80\x10"*4 for _ in range(4))
+    ch=lambda t,d: struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)&0xffffffff)
+    open(path,"wb").write(b"\x89PNG\r\n\x1a\n"+ch(b"IHDR",struct.pack(">IIBBBBB",4,4,8,2,0,0,0))+ch(b"IDAT",zlib.compress(raw))+ch(b"IEND",b""))
+o=a[a.index("-o")+1] if "-o" in a else None
+if a[:1]==["version"]: print("10.0.7")
+elif a[:2]==["pcb","drc"]: json.dump({"violations":[{"severity":"error","type":"clearance","description":"Clearance violation","items":[{"description":"Track on F.Cu"}]}],"unconnected_items":[{}],"schematic_parity":[]},open(o,"w"))
+elif a[:2]==["sch","erc"]: json.dump({"sheets":[{"violations":[{"severity":"warning","type":"pin_not_connected","description":"Pin not connected"}]}]},open(o,"w"))
+elif a[:2]==["pcb","render"]: png(o)
+elif a[:3]==["pcb","export","gerbers"] or a[:3]==["pcb","export","drill"]: open(os.path.join(o,"b-%s.gbr"%a[2]),"w").write("G04*")
+elif a[:2]==["pcb","export"] or a[:2]==["sch","export"]: open(o,"w").write("x")

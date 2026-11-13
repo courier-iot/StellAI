@@ -6,6 +6,15 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 1. [ ] **Quick launch** (app, S)
    A Quick Settings tile and a home-screen widget to talk to Stella in one tap.
 
+### Cleanup (agreed)
+
+- [x] **Tests in the project** (0.27.0): `tests/run_tests.py`, run by GitHub on every upload.
+- [x] **No copies inside other files** (0.27.0): the setup installs the real hub and catalog; the hub is built from its sections by `server/build_hub.py`.
+- [x] **The server in sections** (0.27.0): `server/hub/*.py`, and one route table for its web addresses (`docs/api.md`).
+- [x] **One copy of Stella's instructions and modes** (0.27.0): on the server (`/prompts`), cached by the apps.
+- [ ] **The reply loop on the server** (all, L): the phone and the desktop chat each run tools, Auto mode and auto-continue themselves; the server could do it once for every app.
+- [ ] **Small tidy-ups** (S): one settings folder for the server's state files; split the phone's chat screen into smaller pieces.
+
 ### Long chats that don't run out, and working more like Claude (done in 0.24.0 to 0.26.0)
 
 2. [x] **Bigger context windows** (0.14.1): 32K for 4B, 16–64K for 9B, 64K for 35B on a graphics card, sized so the model stays on the card; 8–16K without one.

@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+import sys
+a=sys.argv
+if "--gui.enabled=false" in a and "OLD" in open(__file__).read(): sys.exit(1)
+open(a[a.index("-do")+1],"w").write("(session)")

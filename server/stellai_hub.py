@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Built by server/build_hub.py from server/hub/*.py, webchat.html and avatar.js: edit those, then run
+# `python3 server/build_hub.py`. (Kept as one file because installed servers update by downloading it.)
 """
 StellAI hub: speech-to-text and chat sync for the StellAI phone app.
 
@@ -4957,6 +4959,179 @@ def quick_reply(text, now_text="", phone=False):
     return None
 
 
+# ---- Stella's instructions and the built-in modes ------------------------------------------------------------------
+# The one copy: the phone app and the desktop chat fetch these (GET /prompts) and cache them, so changing a line here
+# changes it everywhere. {name} is the assistant's name. The apps add the mode, memories, project and summary parts.
+INSTRUCTION_LINES = [   # (which apps, line)
+    ("all", "You are {name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable "
+            "with a light space-explorer touch; concise and practical."),
+    ("phone", "The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm "
+              "briefly afterwards; never claim success if a tool failed."),
+    ("phone", "Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and "
+              "mobile data open a settings panel for the user to tap. If a tool says Stella needs an access, tell the user "
+              "where to turn it on."),
+    ("web", "The user is in the StellAI desktop web chat. Phone actions (alarms, apps, texts) aren't available here, but "
+            "reminders still ring on their phones."),
+    ("all", "Markdown is fine; always put code in fenced blocks with a language; avoid tables."),
+    ("all", "For long code (over ~60 lines), chapters or write-ups, use the document tool when you have it: they show "
+            "beside the chat; refer to them in a line instead of pasting."),
+    ("all", "Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows "
+            "automatically; if it fails, fix it and retry once)."),
+    ("all", "Describe photos only from what you actually see."),
+    ("phone", "Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for "
+              "wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links."),
+    ("web", "Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then "
+            "fetch_page, citing links."),
+    ("all", "A user message may start with an automatic context block (time, memories, file excerpts); the user didn't "
+            "write it."),
+    ("all", "Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask "
+            "one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're "
+            "not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before "
+            "answering, and use run_python or the calculators when it's available instead of doing long arithmetic in "
+            "your head. If you get something wrong, say so and fix it."),
+    ("all", "Pin decisions, names and facts that must stay true in this chat with pin_note when it's available."),
+]
+# Put after the mode's own instructions; then the summary of earlier messages starts with SUMMARY_INTRO
+MODE_NOTE = "These mode instructions take priority over the general style guidance above (such as keeping replies short)."
+SUMMARY_INTRO = ("The start of this conversation was summarized to free up memory. Continue naturally from it; the user can "
+                 "still see the full chat. When you need its exact words (code, numbers, names), call recall_chat.")
+VOICE_STYLE = ("Voice conversation: the user said this out loud and will hear your reply spoken. Answer the way a person "
+               "talks: usually one to three short sentences, warm and natural, with contractions. No markdown, lists, "
+               "headings, tables, code or links. If the answer needs detail, give the key point first and offer to go into "
+               "more detail or put it on screen.")
+
+# The built-in modes. temperature None = the model's default; thinking "on"/"off"/"default"; tools "all" or "minimal"
+# (no calculators or diagrams); style "work" or "story" (what a context refresh keeps). icon is a symbol the apps draw
+# as a line icon.
+BUILT_IN_MODES = [
+    {
+        "id": "general", "name": "General", "icon": "✦",
+        "desc": "Everyday help and quick answers",
+        "temperature": None, "thinking": "default", "tools": "all", "style": "work",
+        "prompt": "",
+    },
+    {
+        "id": "programmer", "name": "Programmer", "icon": "⌨",
+        "desc": "Pair programming: complete code, debugging, reviews",
+        "temperature": 0.3, "thinking": "on", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: Programmer. Act as a senior software engineer pair-programming with the user.\n"
+            "- Give complete, working code in fenced blocks with a language tag. For changes to existing code, show the whole changed function or file section, not fragments.\n"
+            "- Explain briefly why, not just what. Point out bugs, edge cases, performance and security issues you notice.\n"
+            "- When debugging, reason from the actual error message and code; if they're missing, ask for them instead of guessing.\n"
+            "- Follow the user's language, framework and code style. Prefer simple, maintainable solutions.\n"
+            "- Replies can be as long as the code needs."
+        ),
+    },
+    {
+        "id": "writer", "name": "Writer", "icon": "✒",
+        "desc": "Creative writing partner for novels and stories",
+        "temperature": 0.9, "thinking": "off", "tools": "minimal", "style": "story",
+        "prompt": (
+            "Mode: Writer. You are the user's creative writing partner for fiction: novels, short stories, scenes and worldbuilding.\n"
+            "- Write vivid, original prose with a strong voice, sensory detail, natural dialogue and good pacing. Show, don't tell.\n"
+            "- Keep continuity: characters, names, timeline, world rules and established facts. Match the user's genre, tense, point of view and style.\n"
+            "- When asked to write, write the full passage, not a summary or outline (unless asked). Long replies are welcome.\n"
+            "- Write story text as plain prose: no headings, bullet points or bold in the story itself.\n"
+            "- Avoid clichés and purple prose. Give characters distinct voices.\n"
+            "- Suggest directions or ask questions only at natural decision points or when asked.\n"
+            "- You don't need to be brief in this mode."
+        ),
+    },
+    {
+        "id": "electronics", "name": "Electronics", "icon": "⚡",
+        "desc": "Circuits, PCBs, firmware and calculations",
+        "temperature": 0.4, "thinking": "default", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: Electronics. Act as an experienced electronics engineer.\n"
+            "- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n"
+            "- Draw schematics or timing diagrams with render_diagram when a picture helps.\n"
+            "- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n"
+            "- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)."
+        ),
+    },
+    {
+        "id": "modeler", "name": "3D Modeler", "icon": "◆",
+        "desc": "Blender modeling on your server, checked step by step",
+        "temperature": 0.3, "thinking": "on", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: 3D Modeler. You build and fix 3D models in Blender on the user's server, one careful step at a time. Accuracy matters more than speed.\n"
+            "- Start with blender_project (status, then new or open) and blender_inspect before changing anything. Never guess object names, bone names or sizes: read them.\n"
+            "- Each blender_step makes ONE small, checkable change (add one part, move one thing, fix one problem). Write the goal with numbers: metres, degrees, which object or bone.\n"
+            "- Write bpy with bpy.data, bmesh and the ready-made helpers; avoid edit-mode bpy.ops. Z is up and the front faces -Y (a character's face is in the FRONT view).\n"
+            "- After each step, read the measured changes, any new mesh problems and the visual check. If something is off, fix it with another step or go back with revert. Never say a step worked when the check or the numbers say otherwise.\n"
+            "- Tell the user the version number after each change so they can ask to go back. Before big changes (deleting or joining parts, remeshing, re-rigging) explain the plan and wait for a yes.\n"
+            "- Photos: when the user sends pictures of what they want, save them with blender_project add_reference (label front/left/back/right when you can tell), so every check compares against them. Ask for 2-3 photos from different sides when the shape matters.\n"
+            "- New object from photos: blender_generate makes a rough shape (several minutes). Then, one step each: turn it so its front faces -Y, scale it from a real measurement (ask the user for one; photos can't show size), clean up the mesh, add materials, and compare with blender_inspect render=true.\n"
+            "- Editing something to look like a photo: change it step by step and let the reference comparison tell you what still differs.\n"
+            "- You're strongest at hard-surface parts, props and accessories, materials (including glowing emission), cleanup, attaching parts to bones and exports. Generated shapes are rough for characters and poor for whole rooms. For organic sculpting (faces, bodies, cloth folds) guide the user step by step in Blender instead and check their result.\n"
+            "- Files: the user drops .blend, .vrm, .glb, .fbx, .obj or .stl files into the 3D inbox folder on the server (blender_project status shows where); exports go to the workspace's exports folder."
+        ),
+    },
+    {
+        "id": "cad", "name": "CAD Designer", "icon": "📐",
+        "desc": "Precise parts in FreeCAD: measured, checked, ready to print",
+        "temperature": 0.3, "thinking": "on", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: CAD Designer. You design precise parts in FreeCAD on the user's server, one checked step at a time: brackets, enclosures, mounts, adapters, fan ducts, replacement parts and anything to 3D print or machine. Accuracy matters more than speed.\n"
+            "- Start with cad_project (status, then new or open) and cad_inspect. Ask for the measurements that matter (sizes, hole sizes and spacing, wall thickness, what it attaches to, the printer or material) before designing; never guess a size that has to fit something real.\n"
+            "- Each cad_step makes ONE change with exact millimetres in the goal. Build with Part shapes, then add() one final part per real object. Z is up; put the part on Z=0 and the front towards -Y.\n"
+            "- After each step read the measured sizes, volumes and problems (not a solid, separate solids, invalid geometry) and the visual check. Fix problems before going on; never say it worked when the numbers say otherwise. Say the version number so the user can go back.\n"
+            "- For 3D printing: walls at least 1.2 mm (2 mm or more for strength), holes 0.2-0.4 mm bigger than the bolt or peg, avoid overhangs steeper than 45 degrees and floating parts, add fillets where it takes load, and suggest a print orientation.\n"
+            "- Photos or sketches the user sends can be saved with cad_project add_reference so every check compares against them. A board exported from the PCB Designer as step appears in the 3D inbox, ready to build an enclosure around. Exports: step for other CAD, stl for printing, blender to hand the part to the 3D Modeler."
+        ),
+    },
+    {
+        "id": "pcb", "name": "PCB Designer", "icon": "🔌",
+        "desc": "Circuit boards in KiCad: circuits as code, autorouting, checks, fab files",
+        "temperature": 0.3, "thinking": "on", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: PCB Designer. You help with circuit boards in KiCad on the user's server: designing circuits as code, checking, explaining, placing parts, board outlines, tracks, and making the files a board maker needs. Accuracy matters more than speed.\n"
+            "- Start with pcb_project (status, then new or open) and pcb_check. Explain each rules-check problem in plain words: what it means, where it is, and how to fix it.\n"
+            "- Each pcb_step makes ONE board change (move or rotate a part, set the outline, add a track or text) with millimetres and references (R3, U1) in the goal. Board Y grows downwards. After each step compare the new rules check with the old one, say the version number, and undo anything you made worse.\n"
+            "- New circuits: write them with pcb_circuit as a SKiDL script (parts with real KiCad footprints, named nets). It makes the schematic and netlist, lays the parts out wide on a grid, autoroutes and checks. Start simple, prefer through-hole parts, keep boards roomy. To change the circuit, send the whole script again (it is saved as circuit.py in each version; parts keep their places).\n"
+            "- Learn over time: run pcb_library list before designing and reuse recipes that worked. After a clean build the user is happy with, offer save_recipe; when something was wrong, save a note with the fix. Pins listed under verify_with_user aren't confirmed: show them and ask the user to check the datasheet or the part, then confirm_pinout. Don't invent part values or pinouts: ask, or point to the datasheet.\n"
+            "- Imported boards: their schematics aren't scripted; walk the user through changes in KiCad's schematic editor, then confirm with pcb_check (including the schematic mismatch count).\n"
+            "- Safety: for mains voltage, batteries or high current, point out clearance and creepage, trace width for the current, fusing and isolation, and recommend a qualified review before powering it.\n"
+            "- Exports: fab (Gerbers and drill files zipped for JLCPCB, PCBWay and others), bom, pos (pick and place), step (3D, also dropped into the 3D inbox for the CAD Designer), pdf (schematic), project (the KiCad files)."
+        ),
+    },
+    {
+        "id": "tutor", "name": "Tutor", "icon": "🎓",
+        "desc": "Learn step by step instead of just getting answers",
+        "temperature": 0.5, "thinking": "default", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: Tutor. Help the user learn and understand, not just get answers.\n"
+            "- Explain step by step with simple examples and analogies, building on what they already know.\n"
+            "- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n"
+            "- Check understanding with a short question now and then. Correct misconceptions kindly and clearly."
+        ),
+    },
+    {
+        "id": "brainstorm", "name": "Brainstorm", "icon": "💡",
+        "desc": "Lots of ideas, from practical to wild",
+        "temperature": 1.0, "thinking": "off", "tools": "all", "style": "work",
+        "prompt": (
+            "Mode: Brainstorm. Generate many diverse ideas quickly: practical ones and bold, unusual ones.\n"
+            "- Use short bullet points, one idea each, grouped if that helps. Build on and remix the user's ideas.\n"
+            "- Don't judge ideas while generating; offer to evaluate or narrow them down afterwards."
+        ),
+    },
+]
+
+
+def instructions_for(client):
+    """The base instructions for one app ("phone" or "web"), with {name} left for the app to fill in."""
+    return "\n".join(line for who, line in INSTRUCTION_LINES if who in ("all", client))
+
+
+def prompts_payload():
+    """GET /prompts: everything the apps need to build Stella's instructions, plus a version to cache by."""
+    body = {"instructions": {c: instructions_for(c) for c in ("phone", "web")}, "mode_note": MODE_NOTE,
+            "summary_intro": SUMMARY_INTRO, "voice_style": VOICE_STYLE, "modes": BUILT_IN_MODES}
+    import hashlib
+    body["version"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:12]
+    return body
 # ---- 3D Modeler: Blender on the server -------------------------------------------------------------
 # Stella edits 3D models in a hidden Blender that stays running. Every change is one small bpy script: the
 # server opens the newest saved version, runs it, saves a new numbered version (nothing is overwritten), renders
@@ -8790,6 +8965,13 @@ def self_test():
         assert check_bpy_code("board.ExportSpecctraDSN('x')", allowed=PCB_IMPORTS, bad_prefixes=("Export",))
         assert not check_bpy_code("move('R1', 10, 5, 90)", allowed=PCB_IMPORTS, extra_bad=PCB_BAD_ATTRS)
         db.db.close()
+    pp = prompts_payload()
+    assert "{name}" in pp["instructions"]["phone"] and "Android phone" not in pp["instructions"]["web"]
+    assert [x["id"] for x in pp["modes"]][:2] == ["general", "programmer"] and len(pp["version"]) == 12
+    h = make_http_handler(argparse.Namespace(), None).routes
+    assert h.find("GET", "/docs/0123456789/versions/3", "key")[1].group(2) == "3"
+    assert h.find("POST", "/tools/web_search", "key")[0] and not h.find("GET", "/nope", "key")[0]
+    assert h.find("GET", "/health", "first")[0] and h.find("GET", "/chat", "open")[0]
     print("self-test ok")
 
 
@@ -8893,7 +9075,7 @@ def ensure_packages():
 
 
 # ----------------------------------------------------------------------------- desktop web chat
-# The page is kept in server/webchat.html and copied here by server/embed_webchat.py.
+# The page is kept in server/webchat.html; build_hub.py puts it here.
 WEBCHAT_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -9222,25 +9404,18 @@ function movedHello() {     // the first thing on the new server: say so, on thi
 const media = ref => { const [k, id] = ref.split(":"); return (k === "image" ? `/images/${id}.jpg` : `/diagrams/${id}.png`) + "?key=" + encodeURIComponent(KEY); };
 
 // ---------------------------------------------------------------- modes (same as the phone app)
-const MODES = [
-  { id: "general", name: "General", icon: "✦", desc: "Everyday help and quick answers", prompt: "" },
-  { id: "programmer", name: "Programmer", icon: "⌨", desc: "Pair programming: complete code, debugging, reviews", temperature: 0.3, thinking: "on",
-    prompt: "Mode: Programmer. Act as a senior software engineer pair-programming with the user.\n- Give complete, working code in fenced blocks with a language tag. For changes to existing code, show the whole changed function or file section, not fragments.\n- Explain briefly why, not just what. Point out bugs, edge cases, performance and security issues you notice.\n- When debugging, reason from the actual error message and code; if they're missing, ask for them instead of guessing.\n- Follow the user's language, framework and code style. Prefer simple, maintainable solutions.\n- Replies can be as long as the code needs." },
-  { id: "writer", name: "Writer", icon: "✒", desc: "Creative writing partner for novels and stories", temperature: 0.9, thinking: "off", tools: "minimal", style: "story",
-    prompt: "Mode: Writer. You are the user's creative writing partner for fiction: novels, short stories, scenes and worldbuilding.\n- Write vivid, original prose with a strong voice, sensory detail, natural dialogue and good pacing. Show, don't tell.\n- Keep continuity: characters, names, timeline, world rules and established facts. Match the user's genre, tense, point of view and style.\n- When asked to write, write the full passage, not a summary or outline (unless asked). Long replies are welcome.\n- Write story text as plain prose: no headings, bullet points or bold in the story itself.\n- Avoid clichés and purple prose. Give characters distinct voices.\n- Suggest directions or ask questions only at natural decision points or when asked.\n- You don't need to be brief in this mode." },
-  { id: "electronics", name: "Electronics", icon: "⚡", desc: "Circuits, PCBs, firmware and calculations", temperature: 0.4,
-    prompt: "Mode: Electronics. Act as an experienced electronics engineer.\n- Always use the calculate/electronics tools for maths, and pick real standard part values (E12/E24) and common parts.\n- Draw schematics or timing diagrams with render_diagram when a picture helps.\n- Mention ratings that matter (voltage, current, power dissipation, tolerances) and give pin numbers when relevant.\n- Flag safety issues clearly (mains voltage, Li-ion batteries, high current, heat)." },
-  { id: "modeler", name: "3D Modeler", icon: "◆", desc: "Blender modeling on your server, checked step by step", temperature: 0.3, thinking: "on",
-    prompt: "Mode: 3D Modeler. You build and fix 3D models in Blender on the user's server, one careful step at a time. Accuracy matters more than speed.\n- Start with blender_project (status, then new or open) and blender_inspect before changing anything. Never guess object names, bone names or sizes: read them.\n- Each blender_step makes ONE small, checkable change (add one part, move one thing, fix one problem). Write the goal with numbers: metres, degrees, which object or bone.\n- Write bpy with bpy.data, bmesh and the ready-made helpers; avoid edit-mode bpy.ops. Z is up and the front faces -Y (a character's face is in the FRONT view).\n- After each step, read the measured changes, any new mesh problems and the visual check. If something is off, fix it with another step or go back with revert. Never say a step worked when the check or the numbers say otherwise.\n- Tell the user the version number after each change so they can ask to go back. Before big changes (deleting or joining parts, remeshing, re-rigging) explain the plan and wait for a yes.\n- Photos: when the user sends pictures of what they want, save them with blender_project add_reference (label front/left/back/right when you can tell), so every check compares against them. Ask for 2-3 photos from different sides when the shape matters.\n- New object from photos: blender_generate makes a rough shape (several minutes). Then, one step each: turn it so its front faces -Y, scale it from a real measurement (ask the user for one; photos can't show size), clean up the mesh, add materials, and compare with blender_inspect render=true.\n- Editing something to look like a photo: change it step by step and let the reference comparison tell you what still differs.\n- You're strongest at hard-surface parts, props and accessories, materials (including glowing emission), cleanup, attaching parts to bones and exports. Generated shapes are rough for characters and poor for whole rooms. For organic sculpting (faces, bodies, cloth folds) guide the user step by step in Blender instead and check their result.\n- Files: the user drops .blend, .vrm, .glb, .fbx, .obj or .stl files into the 3D inbox folder on the server (blender_project status shows where); exports go to the workspace's exports folder." },
-  { id: "cad", name: "CAD Designer", icon: "📐", desc: "Precise parts in FreeCAD: measured, checked, ready to print", temperature: 0.3, thinking: "on",
-    prompt: "Mode: CAD Designer. You design precise parts in FreeCAD on the user's server, one checked step at a time: brackets, enclosures, mounts, adapters, fan ducts, replacement parts and anything to 3D print or machine. Accuracy matters more than speed.\n- Start with cad_project (status, then new or open) and cad_inspect. Ask for the measurements that matter (sizes, hole sizes and spacing, wall thickness, what it attaches to, the printer or material) before designing; never guess a size that has to fit something real.\n- Each cad_step makes ONE change with exact millimetres in the goal. Build with Part shapes, then add() one final part per real object. Z is up; put the part on Z=0 and the front towards -Y.\n- After each step read the measured sizes, volumes and problems (not a solid, separate solids, invalid geometry) and the visual check. Fix problems before going on; never say it worked when the numbers say otherwise. Say the version number so the user can go back.\n- For 3D printing: walls at least 1.2 mm (2 mm or more for strength), holes 0.2-0.4 mm bigger than the bolt or peg, avoid overhangs steeper than 45 degrees and floating parts, add fillets where it takes load, and suggest a print orientation.\n- Photos or sketches the user sends can be saved with cad_project add_reference so every check compares against them. A board exported from the PCB Designer as step appears in the 3D inbox, ready to build an enclosure around. Exports: step for other CAD, stl for printing, blender to hand the part to the 3D Modeler." },
-  { id: "pcb", name: "PCB Designer", icon: "🔌", desc: "Circuit boards in KiCad: circuits as code, autorouting, checks, fab files", temperature: 0.3, thinking: "on",
-    prompt: "Mode: PCB Designer. You help with circuit boards in KiCad on the user's server: designing circuits as code, checking, explaining, placing parts, board outlines, tracks, and making the files a board maker needs. Accuracy matters more than speed.\n- Start with pcb_project (status, then new or open) and pcb_check. Explain each rules-check problem in plain words: what it means, where it is, and how to fix it.\n- Each pcb_step makes ONE board change (move or rotate a part, set the outline, add a track or text) with millimetres and references (R3, U1) in the goal. Board Y grows downwards. After each step compare the new rules check with the old one, say the version number, and undo anything you made worse.\n- New circuits: write them with pcb_circuit as a SKiDL script (parts with real KiCad footprints, named nets). It makes the schematic and netlist, lays the parts out wide on a grid, autoroutes and checks. Start simple, prefer through-hole parts, keep boards roomy. To change the circuit, send the whole script again (it is saved as circuit.py in each version; parts keep their places).\n- Learn over time: run pcb_library list before designing and reuse recipes that worked. After a clean build the user is happy with, offer save_recipe; when something was wrong, save a note with the fix. Pins listed under verify_with_user aren't confirmed: show them and ask the user to check the datasheet or the part, then confirm_pinout. Don't invent part values or pinouts: ask, or point to the datasheet.\n- Imported boards: their schematics aren't scripted; walk the user through changes in KiCad's schematic editor, then confirm with pcb_check (including the schematic mismatch count).\n- Safety: for mains voltage, batteries or high current, point out clearance and creepage, trace width for the current, fusing and isolation, and recommend a qualified review before powering it.\n- Exports: fab (Gerbers and drill files zipped for JLCPCB, PCBWay and others), bom, pos (pick and place), step (3D, also dropped into the 3D inbox for the CAD Designer), pdf (schematic), project (the KiCad files)." },
-  { id: "tutor", name: "Tutor", icon: "🎓", desc: "Learn step by step instead of just getting answers", temperature: 0.5,
-    prompt: "Mode: Tutor. Help the user learn and understand, not just get answers.\n- Explain step by step with simple examples and analogies, building on what they already know.\n- For exercises, guide with hints and questions before giving the full solution, unless they ask for it.\n- Check understanding with a short question now and then. Correct misconceptions kindly and clearly." },
-  { id: "brainstorm", name: "Brainstorm", icon: "💡", desc: "Lots of ideas, from practical to wild", temperature: 1.0, thinking: "off",
-    prompt: "Mode: Brainstorm. Generate many diverse ideas quickly: practical ones and bold, unusual ones.\n- Use short bullet points, one idea each, grouped if that helps. Build on and remix the user's ideas.\n- Don't judge ideas while generating; offer to evaluate or narrow them down afterwards." },
-];
+// Stella's instructions and the built-in modes come from the server (GET /prompts), cached in the browser; until the
+// first answer, only the General mode with a short fallback.
+const FALLBACK_PROMPTS = { instructions: { web: "You are {name}, the user's private AI assistant (StellAI), running on their own computer. Concise and practical." },
+  mode_note: "", summary_intro: "The start of this conversation was summarized to free up memory; continue naturally from it.", voice_style: "Voice conversation: answer in one to three short spoken sentences, no markdown.",
+  modes: [{ id: "general", name: "General", icon: "✦", desc: "Everyday help and quick answers", prompt: "" }] };
+let PROMPTS = store.get("prompts", null) || FALLBACK_PROMPTS;
+let MODES = PROMPTS.modes && PROMPTS.modes.length ? PROMPTS.modes : FALLBACK_PROMPTS.modes;
+function setPrompts(p) {
+  if (!p || !p.instructions || !Array.isArray(p.modes) || !p.modes.length) return;
+  PROMPTS = p; MODES = p.modes.map(m => ({ ...m, temperature: m.temperature == null ? undefined : m.temperature })); store.set("prompts", p);
+}
+setPrompts(PROMPTS);
 const COLORS = { cyan: "#5CE1E6", blue: "#5AA9FF", red: "#FF5C6C", green: "#4DE8A0", purple: "#A77BFF", pink: "#FF7AC6", orange: "#FFA552", yellow: "#FFD84D" };
 
 // ---------------------------------------------------------------- state
@@ -9311,7 +9486,8 @@ function renderSyncState() {
 }
 
 async function loadMeta() {
-  const [t, p, md, mem] = await Promise.allSettled([api("/tools"), api("/projects"), api("/modes"), api("/memories")]);
+  const [t, p, md, mem, pr] = await Promise.allSettled([api("/tools"), api("/projects"), api("/modes"), api("/memories"), api("/prompts")]);
+  if (pr.status === "fulfilled") setPrompts(pr.value);
   if (t.status === "fulfilled") { S.tools = t.value.tools || []; S.approval = new Set(t.value.approval || []); }
   if (p.status === "fulfilled") S.projects = p.value.projects || [];
   if (md.status === "fulfilled") S.customModes = md.value.modes || [];
@@ -9451,20 +9627,11 @@ function withTurnContext(history, extra) {
   const out = history.slice(); out[i] = { ...out[i], content: block + out[i].content }; return out;
 }
 function systemPrompt(projectText, summary, mode, memory) {
-  const name = NAME();
-  let p = `You are ${name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable with a light space-explorer touch; concise and practical.
-The user is in the StellAI desktop web chat. Phone actions (alarms, apps, texts) aren't available here, but reminders still ring on their phones.
-Markdown is fine; always put code in fenced blocks with a language; avoid tables.
-For long code (over ~60 lines), chapters or write-ups, use the document tool: they show beside the chat; refer to them in a line instead of pasting.
-Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows automatically).
-Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then fetch_page, citing links.
-A user message may start with an automatic context block (time, memories, file excerpts); the user didn't write it.
-Working style: be direct and get to the point. If a request is ambiguous in a way that changes the answer, ask one short clarifying question first; otherwise make a sensible assumption and say it. Say plainly when you're not sure or don't know, rather than guessing. Check your work: re-read numbers, units and code before answering, and use run_python or the calculators when it's available instead of doing long arithmetic in your head. If you get something wrong, say so and fix it.
-Pin decisions, names and facts that must stay true in this chat with pin_note when it's available.`;
-  if (mode.prompt) p += `\n\n## Current mode: ${mode.name}\n${mode.prompt}\nThese mode instructions take priority over the general style guidance above (such as keeping replies short).`;
+  let p = (PROMPTS.instructions.web || FALLBACK_PROMPTS.instructions.web).replaceAll("{name}", NAME());
+  if (mode.prompt) p += `\n\n## Current mode: ${mode.name}\n${mode.prompt}` + (PROMPTS.mode_note ? "\n" + PROMPTS.mode_note : "");
   if (memory) p += "\n\n" + memory;
   if (projectText) p += "\n\n" + projectText;
-  if (summary) p += "\n\n## Earlier in this chat\nThe start of this conversation was summarized to free up memory. Continue naturally from it; the user can still see the full chat. When you need its exact words (code, numbers, names), call recall_chat.\n" + summary;
+  if (summary) p += "\n\n## Earlier in this chat\n" + PROMPTS.summary_intro + "\n" + summary;
   return p;
 }
 const PHOTO = /!\[[^\]]*\]\(image:([0-9a-f]{16})\)/g, DIAGRAM = /!\[[^\]]*\]\(diagram:[0-9a-f]+\)/g;
@@ -9508,7 +9675,7 @@ async function prepare(convId, images, voice = false, override = null, auto = fa
     needsRefresh = history.filter(h => h.role === "user").length >= 2 && (start > 0 || used > limit * 0.85);
   } else start = Math.max(0, history.length - 24);
   const tools = S.tools.filter(t => !names || names.includes(t.function.name));
-  if (voice) { extra = (extra ? extra + "\n" : "") + VOICE_STYLE; if (!plan) think = false; }
+  if (voice) { extra = (extra ? extra + "\n" : "") + PROMPTS.voice_style; if (!plan) think = false; }
   const hist = withTurnContext(history.slice(start), extra);
   return { system: systemPrompt(projectText, summary, mode, memory), history: hist, info, needsRefresh, tools, mode, think };
 }
@@ -10201,9 +10368,6 @@ $("#wrap").onclick = e => {
 // when you trail off or say a short "um", and answers quickly after a clear sentence. While you're still talking,
 // finished phrases are already being transcribed, so the text is ready almost as soon as you stop.
 const MIC = { rec: null };
-const VOICE_STYLE = "Voice conversation: the user said this out loud and will hear your reply spoken. Answer the way a person talks: " +
-  "usually one to three short sentences, warm and natural, with contractions. No markdown, lists, headings, tables, code or links. " +
-  "If the answer needs detail, give the key point first and offer to go into more detail or put it on screen.";
 const END_PHRASE = /^(ok(ay)?[, ]+)?(thanks|thank you( very much| so much)?|thanks a lot|cheers|that'?s (all|it)|nothing|no( thanks| thank you)?|never ?mind|stop|good ?bye|bye( bye)?|i'?m good|all good)[.!, ]*(stella)?[.!]*$/i;
 const ACKS = ["One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.", "Let me check."];
 function micHelp() {
@@ -13136,7 +13300,683 @@ SERVER_TOOLS["move_stella"] = (tool_move_stella, _fn(
 
 
 # ----------------------------------------------------------------------------- HTTP API
+class Prefix(str):
+    """A route pattern: any path that starts with this."""
+
+
+def R(pattern):
+    """A route pattern: a regular expression the whole path must match (its groups reach the handler as m)."""
+    return re.compile(pattern)
+
+
+class Routes:
+    """The hub's web addresses, in order. find() gives the first handler whose pattern matches."""
+
+    def __init__(self):
+        self.table = []    # (method, pattern, access, handler)
+
+    def add(self, method, *patterns, access="key"):
+        def register(fn):
+            for p in patterns:
+                self.table.append((method, p, access, fn))
+            return fn
+        return register
+
+    def find(self, method, path, access):
+        for meth, pat, acc, fn in self.table:
+            if meth != method or acc != access:
+                continue
+            if isinstance(pat, Prefix):
+                if path.startswith(pat):
+                    return fn, None
+            elif isinstance(pat, str):
+                if path == pat:
+                    return fn, None
+            else:
+                m = pat.fullmatch(path)
+                if m:
+                    return fn, m
+        return None, None
+
+    def describe(self):
+        """[(method, path pattern, access)] for the API list (python3 stellai_hub.py --list-routes)."""
+        out = []
+        for meth, pat, acc, fn in self.table:
+            shown = pat + "…" if isinstance(pat, Prefix) else pat if isinstance(pat, str) else pat.pattern
+            out.append((meth, shown, {"first": "always", "open": "no key", "key": "API key"}[acc]))
+        return out
+
+
+def routes_markdown():
+    """The route table as a Markdown list, for docs/api.md."""
+    handler = make_http_handler(argparse.Namespace(), None)
+    rows = ["| Method | Path | Access |", "|---|---|---|"]
+    rows += [f"| {m} | `{p}` | {a} |" for m, p, a in handler.routes.describe()]
+    return "\n".join(rows)
+
+
 def make_http_handler(cfg, chats):
+    routes = Routes()
+
+    # ---- Every web address the hub answers, in the order they're checked. --------------------------------------
+    # access="first": answered even after Stella moved away; "open": no API key needed (pages, the avatar's
+    # files); otherwise the API key is required. Each handler gets the request, the path and the regex match.
+
+    @routes.add("POST", "/move/receive", access="first")
+    def post_move_receive(self, path, m):
+        return receive_move(self, cfg)
+
+    @routes.add("POST", "/transcribe")
+    def post_transcribe(self, path, m):
+        rate = int(self.headers.get("X-Sample-Rate") or 16000)
+        pcm = self.read_body(MAX_SECONDS * rate * 2)
+        if pcm is None:
+            return self.send_json(400, {"error": "send 16-bit mono PCM, up to 60 s"})
+        seconds = len(pcm) / (rate * 2)
+        started = time.time()
+        if not has_speech(pcm, rate):
+            log(f"phone: {seconds:.1f}s of silence (Whisper skipped)")
+            return self.send_json(200, {"text": ""})
+        try:
+            text = clean_transcript(transcribe(cfg.whisper, pcm_to_wav(pcm, rate), cfg.language))
+        except (urllib.error.URLError, OSError, RuntimeError) as e:
+            log(f"whisper error: {e}")
+            return self.send_json(503, {"error": "speech recognition unavailable"})
+        log(f'phone: {seconds:.1f}s -> "{text}" ({time.time() - started:.1f}s)')
+        return self.send_json(200, {"text": text})
+
+    @routes.add("POST", "/tts")
+    def post_tts(self, path, m):
+        try:
+            req = json.loads(self.read_body(100_000) or b"{}")
+            ac = avatar_config()
+            voice = req.get("voice") if req.get("voice") in VOICES else ac["voice"]
+            if not os.path.isfile(_avatar_path("voices", voice + ".onnx")):
+                prepare_avatar() if voice == ac["voice"] else threading.Thread(
+                    target=ensure_voice, args=(voice,), daemon=True).start()
+                return self.send_json(503, {"error": "The voice is still downloading", "status": AVATAR["status"]})
+            speed = float(req.get("speed") or ac["speed"])
+            wav = None
+            said = str(req.get("text", ""))
+            kvoice = req.get("kokoro_voice") or ac["kokoro_voice"]
+            short = len(said) <= PhraseCache.MAX_CHARS
+            key = None
+            if (req.get("engine") or ac["engine"]) == "kokoro":
+                if KOKORO.ready():
+                    key = ("kokoro", str(kvoice), round(speed, 2), speakable(said))
+                    wav = PHRASES.get(key) if short else None
+                    try:
+                        wav = wav or KOKORO.say(said, kvoice, speed)
+                    except Exception as e:   # noqa: BLE001 - fall back to Piper rather than going silent
+                        log(f"kokoro failed, using Piper: {e}")
+                        key = None
+                else:
+                    KOKORO.prepare()
+            if wav is None:
+                key = ("piper", voice, round(speed, 2), speakable(said))
+                wav = (PHRASES.get(key) if short else None) or TTS.say(said, voice, speed)
+            if short and key:
+                PHRASES.put(key, wav)
+        except (ValueError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+        except (RuntimeError, OSError) as e:
+            return self.send_json(503, {"error": f"speech failed: {e}"})
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(wav)))
+        self.end_headers()
+        self.wfile.write(wav)
+        return
+
+    @routes.add("POST", "/avatar/event")
+    def post_avatar_event(self, path, m):
+        try:
+            seq = AVATAR_BUS.post(json.loads(self.read_body(100_000) or b"{}"))
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"seq": seq})
+
+    @routes.add("POST", R(r"/avatar/anims/([0-9a-f]{12})"))
+    def post_root(self, path, m):
+        try:
+            return self.send_json(200, {"animations": update_animation(
+                m.group(1), json.loads(self.read_body(10_000) or b"{}"))})
+        except (KeyError, ValueError) as e:
+            return self.send_json(404, {"error": str(e)})
+
+    @routes.add("POST", "/avatar/config")
+    def post_avatar_config(self, path, m):
+        try:
+            return self.send_json(200, save_avatar_config(json.loads(self.read_body(100_000) or b"{}")))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/sync")
+    def post_sync(self, path, m):
+        body = self.read_body(20_000_000)
+        try:
+            req = json.loads(body or b"{}")
+            result = chats.sync(int(req.get("since", 0)),
+                                req.get("conversations") or [], req.get("messages") or [])
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": f"bad sync request: {e}"})
+        return self.send_json(200, result)
+
+    @routes.add("POST", R(r"/chats/([^/]{1,64})/notes"))   # pin a note to a chat, or edit one ({"id", "text"})
+    def post_notes(self, path, m):
+        try:
+            data = json.loads(self.read_body(10_000) or b"{}")
+            note = (chats.update_chat_note(m.group(1), data["id"], data.get("text", "")) if data.get("id")
+                    else chats.add_chat_note(m.group(1), data.get("text", ""), "user"))
+        except (ValueError, KeyError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"note": note, "notes": chats.chat_notes(m.group(1))})
+
+    @routes.add("POST", "/memories")
+    def post_memories(self, path, m):
+        try:
+            data = json.loads(self.read_body(10_000) or b"{}")
+            mid, new = chats.add_memory(data.get("text", ""), "user")
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"id": mid, "new": new})
+
+    @routes.add("POST", R(r"/memories/suggestions/([0-9a-f]{1,12})"))
+    def post_root_2(self, path, m):
+        try:
+            data = json.loads(self.read_body(10_000) or b"{}")
+            chats.resolve_suggestion(m.group(1), bool(data.get("accept")), data.get("text"))
+        except (ValueError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"suggestions": chats.memory_suggestions(), "memories": chats.memories()})
+
+    @routes.add("POST", "/memories/settings")
+    def post_memories_settings(self, path, m):
+        try:
+            return self.send_json(200, save_memory_settings(json.loads(self.read_body(1000) or b"{}")))
+        except (ValueError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", R(r"/chats/([^/]{1,64})/docs"))   # the user starts a document beside a chat
+    def post_docs(self, path, m):
+        try:
+            data = json.loads(self.read_body(2_000_000) or b"{}")
+            lang = str(data.get("language", "")).lower()
+            did = chats.create_doc(m.group(1), data.get("title", ""), data.get("text", ""),
+                                   "code" if lang and lang not in ("markdown", "md", "text") else "text", lang, "user")
+        except (ValueError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, chats.doc(did))
+
+    @routes.add("POST", R(r"/docs/([0-9a-f]{10})"))   # the user's own edit from the side panel (base_version guards against overwriting Stella's)
+    def post_root_3(self, path, m):
+        try:
+            data = json.loads(self.read_body(2_000_000) or b"{}")
+            if "revert" in data:
+                old = chats.doc_version_text(m.group(1), int(data["revert"]))
+                if old is None:
+                    raise ValueError("that version isn't kept")
+                chats.save_doc(m.group(1), old, "user", f"back to v{int(data['revert'])}")
+            else:
+                chats.save_doc(m.group(1), data.get("text", ""), "user", "edited by you",
+                               title=data.get("title") or None, base_version=data.get("base_version"))
+        except (ValueError, TypeError) as e:
+            return self.send_json(409 if "changed meanwhile" in str(e) else 400, {"error": str(e)})
+        return self.send_json(200, chats.doc(m.group(1)))
+
+    @routes.add("POST", R(r"/chats/([^/]{1,64})/continue"))   # a new chat that starts from this one's summary and pinned notes
+    def post_continue(self, path, m):
+        try:
+            return self.send_json(200, continue_in_new_chat(m.group(1)))
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        except (urllib.error.URLError, OSError, RuntimeError) as e:
+            return self.send_json(503, {"error": f"couldn't summarize the chat: {e}"})
+
+    @routes.add("POST", "/memories/learn")
+    def post_memories_learn(self, path, m):
+        try:
+            data = json.loads(self.read_body(2_000_000) or b"{}")
+            started = time.time()
+            result = learn_memories(data.get("messages") or [])
+        except (ValueError, KeyError, urllib.error.URLError, OSError) as e:
+            log(f"memory learning failed: {e}")
+            return self.send_json(503, {"error": f"couldn't learn from this chat: {e}"})
+        if result["added"] or result["removed"]:
+            log(f"learned {result['added']} forgot {result['removed']} ({time.time() - started:.1f}s)")
+        return self.send_json(200, result)
+
+    @routes.add("POST", "/llm/v1/chat/completions")
+    def post_llm_v1_chat_completions(self, path, m):
+        return self.proxy_llm()
+
+    @routes.add("POST", "/quick")
+    def post_quick(self, path, m):
+        # Instant answers for simple requests; {"reply": null} means "ask the model"
+        try:
+            data = json.loads(self.read_body(10_000) or b"{}")
+            hit = quick_reply(data.get("text", ""), data.get("now", ""), bool(data.get("phone")))
+        except (ValueError, TypeError, AttributeError, OverflowError, KeyError) as e:
+            log(f"quick answer failed: {e}")
+            hit = None
+        if hit:
+            log(f"instant answer ({hit['kind']}): no model needed")
+        return self.send_json(200, hit or {"reply": None})
+
+    @routes.add("POST", "/speedtest")
+    def post_speedtest(self, path, m):
+        report = run_speed_test(cfg.whisper if DOCTOR["whisper"] else "", cfg.language)
+        if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
+            body = speed_text(report).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return self.send_json(409 if report.get("error") else 200, report)
+
+    @routes.add("POST", "/route")
+    def post_route(self, path, m):
+        try:
+            data = json.loads(self.read_body(200_000) or b"{}")
+            return self.send_json(200, route_mode(data))
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": f"bad request: {e}"})
+
+    @routes.add("POST", "/context")
+    def post_context(self, path, m):
+        try:
+            data = json.loads(self.read_body(5_000_000) or b"{}")
+            return self.send_json(200, plan_context(data))
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": f"bad request: {e}"})
+
+    @routes.add("POST", "/summarize")
+    def post_summarize(self, path, m):
+        try:
+            data = json.loads(self.read_body(10_000_000) or b"{}")
+            started = time.time()
+            summary = summarize_chat(str(data.get("previous", "")), data.get("messages") or [],
+                                     "story" if data.get("style") == "story" else "work")
+        except (ValueError, TypeError, KeyError, IndexError, RuntimeError, urllib.error.URLError, OSError) as e:
+            log(f"summary failed: {e}")
+            return self.send_json(503, {"error": f"couldn't summarize: {e}"})
+        log(f"refreshed a chat's context ({time.time() - started:.1f}s)")
+        return self.send_json(200, {"summary": summary, "tokens": count_tokens(summary)})
+
+    @routes.add("POST", "/backups", "/backups/config", "/server/model", "/server/download")
+    def post_backups(self, path, m):
+        try:
+            data = json.loads(self.read_body(20_000) or b"{}")
+            if path == "/backups":
+                return self.send_json(200, {"file": os.path.basename(backup_now()), **backups_status()})
+            if path == "/backups/config":
+                return self.send_json(200, save_backup_config(data))
+            if not SERVER_CONTROL:
+                return self.send_json(400, {"error": "this server can't switch models from the app"})
+            if path == "/server/model":
+                return self.send_json(200, {"message": SERVER_CONTROL.switch(str(data.get("key")))})
+            return self.send_json(200, {"message": SERVER_CONTROL.start_download(str(data.get("key")))})
+        except (ValueError, RuntimeError, OSError, TypeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/reminders", Prefix("/reminders/"), Prefix("/lists/"), "/github")
+    def post_reminders(self, path, m):
+        try:
+            data = json.loads(self.read_body(200_000) or b"{}")
+            if path == "/reminders":
+                due = int(data["due_at"]) if data.get("due_at") else _parse_when(data.get("when", ""))
+                return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none")))
+            if path == "/github":
+                return self.send_json(200, save_github_config(data))
+            m = re.fullmatch(r"/reminders/([0-9a-f]{10})", path)
+            if m:
+                r = chats.update_reminder(m.group(1), done=data.get("done"),
+                                          snooze_minutes=data.get("snooze_minutes"), cancel=bool(data.get("cancel")))
+                return self.send_json(200 if r else 404, r or {"error": "no such reminder"})
+            m = re.fullmatch(r"/lists/items/([0-9a-f]{10})", path)
+            if m:
+                return self.send_json(200, {"ok": chats.set_item(m.group(1), done=bool(data.get("done")))})
+            m = re.fullmatch(r"/lists/([^/]{1,60})/clear", path)
+            if m:
+                return self.send_json(200, {"removed": chats.clear_done(urllib.parse.unquote(m.group(1)))})
+            m = re.fullmatch(r"/lists/([^/]{1,60})", path)
+            if m:
+                items = data.get("items") or [data.get("text", "")]
+                name, added = chats.add_items(urllib.parse.unquote(m.group(1)), items)
+                return self.send_json(200, {"list": name, "added": added})
+            return self.send_json(404, {"error": "not found"})
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/modes")
+    def post_modes(self, path, m):
+        try:
+            data = json.loads(self.read_body(100_000) or b"{}")
+            return self.send_json(200, chats.save_mode(data))
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/projects")
+    def post_projects(self, path, m):
+        try:
+            data = json.loads(self.read_body(100_000) or b"{}")
+            return self.send_json(200, chats.save_project(data))
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", R(r"/projects/([0-9a-f]{12})/notes"))
+    def post_notes_2(self, path, m):
+        try:
+            data = json.loads(self.read_body(20_000) or b"{}")
+            return self.send_json(200, chats.add_project_note(m.group(1), data.get("text", ""), "user"))
+        except (ValueError, TypeError, AttributeError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", Prefix("/tools/"))
+    def post_root_4(self, path, m):
+        name = path[len("/tools/"):]
+        body = self.read_body(1_000_000)
+        try:
+            args = json.loads(body or b"{}")
+        except ValueError:
+            return self.send_json(400, {"error": "arguments must be JSON"})
+        started = time.time()
+        result, summary = run_server_tool(name, args)
+        log(f"tool {name}: {summary} ({time.time() - started:.1f}s)")
+        return self.send_json(200, {"result": result, "summary": summary})
+
+    @routes.add("PUT", R(r"/projects/(library|[0-9a-f]{12})/files"))
+    def put_files(self, path, m):
+        name = parse_qs(urlparse(self.path).query).get("name", ["file"])[0]
+        data = self.read_body(MAX_PROJECT_FILE)
+        if not data:
+            return self.send_json(400, {"error": "send a file under 25 MB"})
+        started = time.time()
+        try:
+            fid = add_project_file(m.group(1), name, data)
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            return self.send_json(400, {"error": str(e)})
+        log(f"project file {name}: {len(data) // 1024} KB ({time.time() - started:.1f}s)")
+        return self.send_json(200, {"id": fid, "project": chats.project(m.group(1))})
+
+    @routes.add("PUT", "/avatar/anims")
+    def put_avatar_anims(self, path, m):
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            items = add_animation(self.read_body(60_000_000) or b"", q.get("name", [""])[0],
+                                  q.get("when", ["idle"])[0], q.get("type", [""])[0].lower())
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"animations": items})
+
+    @routes.add("PUT", "/avatar/model")
+    def put_avatar_model(self, path, m):
+        try:
+            fname = add_character(self.read_body(120_000_000),
+                                  parse_qs(urlparse(self.path).query).get("name", ["character"])[0])
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        cfg_now = save_avatar_config({"style": "vrm", "character": fname})
+        log(f"avatar: new character {fname}")
+        return self.send_json(200, cfg_now)
+
+    @routes.add("PUT", R(r"/images/([0-9a-f]{16})\.jpg"))
+    def put_jpg(self, path, m):
+        data = self.read_body(8_000_000)
+        if not data or not data.startswith(b"\xff\xd8"):
+            return self.send_json(400, {"error": "send a JPEG under 8 MB"})
+        file = os.path.join(IMAGE_DIR, m.group(1) + ".jpg")
+        if not os.path.exists(file):
+            with open(file + ".part", "wb") as f:
+                f.write(data)
+            os.replace(file + ".part", file)
+        return self.send_json(200, {"ok": True})
+
+    @routes.add("DELETE", R(r"/modes/(c-[0-9a-f]{10})"))
+    def delete_root(self, path, m):
+        return self.send_json(200, {"deleted": chats.delete_mode(m.group(1))})
+
+    @routes.add("DELETE", R(r"/docs/([0-9a-f]{10})"))
+    def delete_root_2(self, path, m):
+        return self.send_json(200, {"deleted": chats.delete_doc(m.group(1))})
+
+    @routes.add("DELETE", R(r"/chats/([^/]{1,64})/notes/([0-9a-f]{1,12})"))
+    def delete_notes(self, path, m):
+        return self.send_json(200, {"deleted": chats.delete_chat_note(m.group(1), m.group(2)),
+                                    "notes": chats.chat_notes(m.group(1))})
+
+    @routes.add("DELETE", R(r"/lists/items/([0-9a-f]{10})"))
+    def delete_root_3(self, path, m):
+        return self.send_json(200, {"deleted": chats.set_item(m.group(1), delete=True)})
+
+    @routes.add("DELETE", R(r"/projects/(library)/(files)/([0-9a-f]{1,32})"), R(r"/projects/([0-9a-f]{12})(?:/(notes|files)/([0-9a-f]{1,32}))?"))
+    def delete_root_4(self, path, m):
+        pid, what, item = m.groups()
+        if what == "notes":
+            return self.send_json(200, {"deleted": chats.delete_project_note(pid, item)})
+        if what == "files":
+            return self.send_json(200, {"deleted": chats.delete_project_file(pid, item)})
+        return self.send_json(200, {"deleted": chats.delete_project(pid)})
+
+    @routes.add("DELETE", R(r"/memories/([0-9a-f]{1,32})"))
+    def delete_root_5(self, path, m):
+        return self.send_json(200, {"deleted": chats.delete_memory(m.group(1))})
+
+    @routes.add("GET", "/health", access="first")
+    def get_health(self, path, m):
+        return self.send_json(200, {"ok": True})
+
+    @routes.add("GET", "/move/hello", access="first")
+    def get_move_hello(self, path, m):
+        return self.send_json(200, move_hello())
+
+    @routes.add("GET", "/move/status", access="open")
+    def get_move_status(self, path, m):
+        if not self.authorized():
+            return self.send_json(401, {"error": "wrong API key"})
+        return self.send_json(200, {**move_hello(), "target": MOVE["target"], "error": MOVE["error"],
+                                    "moved_to": MOVE["signpost"]})
+
+    @routes.add("GET", "/avatar/avatar.js", access="open")
+    def get_avatar_avatar_js(self, path, m):
+        body = AVATAR_JS.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+        return
+
+    @routes.add("GET", Prefix("/avatar/lib/"), access="open")
+    def get_root(self, path, m):
+        rel = path[len("/avatar/lib/"):]
+        if rel not in AVATAR_LIBS:          # only the files listed above, never anything else
+            return self.send_json(404, {"error": "not found"})
+        return self.send_file(_avatar_path("lib", *rel.split("/")),
+                              LIB_TYPES.get(os.path.splitext(rel)[1], "application/octet-stream"))
+
+    @routes.add("GET", "/", "/index.html", "/chat", "/avatar", access="open")
+    def get_root_2(self, path, m):
+        if path == "/avatar":
+            prepare_avatar()
+        body = WEBCHAT_HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; "
+                         "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+                         "connect-src 'self' blob:; media-src 'self' blob:; worker-src 'self' blob:; "
+                         "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+        return
+
+    @routes.add("GET", "/favicon.ico", access="open")
+    def get_favicon_ico(self, path, m):
+        return self.send_json(404, {"error": "none"})
+
+    @routes.add("GET", "/avatar/config")
+    def get_avatar_config(self, path, m):
+        return self.send_json(200, avatar_config())
+
+    @routes.add("GET", "/avatar/events")
+    def get_avatar_events(self, path, m):
+        try:
+            since = int(parse_qs(urlparse(self.path).query).get("since", ["0"])[0])
+        except ValueError:
+            since = 0
+        return self.send_json(200, dict(AVATAR_BUS.since(since), avatar_rev=avatar_rev()))
+
+    @routes.add("GET", Prefix("/avatar/bin/"))
+    def get_root_3(self, path, m):
+        kind, _, name = urllib.parse.unquote(path[len("/avatar/bin/"):]).partition("/")
+        if kind not in ("characters", "animations") or not _safe_bin_name(name):
+            return self.send_json(404, {"error": "not found"})
+        # revalidated each time (not cached forever), so a replaced file replaces the screen's copy
+        if kind == "characters" and parse_qs(urlparse(self.path).query).get("lite", [""])[0] == "1":
+            lite = lite_character(name)   # phones and light-mode screens: smaller textures
+            if lite:
+                return self.send_file(lite, "application/octet-stream", revalidate=True)
+        return self.send_file(_avatar_path("bin", kind, name), "application/octet-stream", revalidate=True)
+
+    @routes.add("GET", "/avatar/model.vrm")
+    def get_avatar_model_vrm(self, path, m):
+        ch = avatar_config()["character"]
+        return self.send_file(_avatar_path("bin", "characters", ch), "model/gltf-binary", revalidate=True) \
+            if ch else self.send_json(404, {"error": "no character"})
+
+    @routes.add("GET", "/tools")
+    def get_tools(self, path, m):
+        return self.send_json(200, {"tools": [t[1] for t in SERVER_TOOLS.values()],
+                                    "approval": sorted(APPROVAL_TOOLS)})
+
+    @routes.add("GET", "/reminders")
+    def get_reminders(self, path, m):
+        return self.send_json(200, {"reminders": chats.reminders(), "now": int(time.time() * 1000)})
+
+    @routes.add("GET", "/lists")
+    def get_lists(self, path, m):
+        return self.send_json(200, {"lists": chats.lists()})
+
+    @routes.add("GET", "/github")
+    def get_github(self, path, m):
+        return self.send_json(200, github_status())
+
+    @routes.add("GET", "/search")
+    def get_search(self, path, m):
+        q = parse_qs(urlparse(self.path).query)
+        return self.send_json(200, {"results": CHAT_SEARCH.search(q.get("q", [""])[0], k=20,
+                                                                   exclude=q.get("exclude", [""])[0])})
+
+    @routes.add("GET", "/speedtest")   # past results (POST runs a new one)
+    def get_speedtest(self, path, m):
+        return self.send_json(200, {"history": _speed_history()[-10:]})
+
+    @routes.add("GET", "/doctor")
+    def get_doctor(self, path, m):
+        report = run_doctor()
+        if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
+            body = doctor_text(report).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return self.send_json(200, report)
+
+    @routes.add("GET", "/backups")
+    def get_backups(self, path, m):
+        return self.send_json(200, backups_status())
+
+    @routes.add("GET", "/server")
+    def get_server(self, path, m):
+        return self.send_json(200, server_status())
+
+    @routes.add("GET", "/memories")
+    def get_memories(self, path, m):
+        return self.send_json(200, {"memories": chats.memories()})
+
+    @routes.add("GET", R(r"/chats/([^/]{1,64})/notes"))
+    def get_notes(self, path, m):
+        return self.send_json(200, {"notes": chats.chat_notes(m.group(1))})
+
+    @routes.add("GET", "/memories/suggestions")
+    def get_memories_suggestions(self, path, m):
+        return self.send_json(200, {**memory_settings(), "suggestions": chats.memory_suggestions()})
+
+    @routes.add("GET", R(r"/chats/([^/]{1,64})/docs"))
+    def get_docs(self, path, m):
+        return self.send_json(200, {"docs": chats.docs(m.group(1))})
+
+    @routes.add("GET", R(r"/docs/([0-9a-f]{10})"))
+    def get_root_4(self, path, m):
+        d = chats.doc(m.group(1))
+        return self.send_json(200, d) if d else self.send_json(404, {"error": "no such document"})
+
+    @routes.add("GET", R(r"/docs/([0-9a-f]{10})/versions/(\d+)"))
+    def get_versions(self, path, m):
+        t = chats.doc_version_text(m.group(1), int(m.group(2)))
+        return self.send_json(200, {"text": t}) if t is not None else self.send_json(404, {"error": "not kept"})
+
+    @routes.add("GET", "/projects")
+    def get_projects(self, path, m):
+        return self.send_json(200, {"projects": chats.projects()})
+
+    @routes.add("GET", "/prompts")   # Stella's instructions and the built-in modes (the apps cache them)
+    def get_prompts(self, path, m):
+        return self.send_json(200, prompts_payload())
+
+    @routes.add("GET", "/modes")
+    def get_modes(self, path, m):
+        return self.send_json(200, {"modes": chats.modes()})
+
+    @routes.add("GET", "/library")
+    def get_library(self, path, m):
+        return self.send_json(200, chats.library())
+
+    @routes.add("GET", R(r"/projects/(library|[0-9a-f]{12})/files/([0-9a-f]{16})\.txt"))
+    def get_files_txt(self, path, m):
+        return self.send_file(os.path.join(PROJECT_DIR, m.group(2) + ".txt"), "text/plain; charset=utf-8")
+
+    @routes.add("GET", "/wakewords")
+    def get_wakewords(self, path, m):
+        names = sorted(f[:-5] for f in os.listdir(WAKEWORD_DIR) if f.endswith(".onnx")
+                       and WAKEWORD_NAME.fullmatch(f[:-5]) and ".." not in f)
+        return self.send_json(200, {"wakewords": [
+            {"id": n, "label": " ".join(w.capitalize() for w in re.split(r"[_-]+", re.sub(r"_v\d.*$", "", n)) if w)}
+            for n in names]})
+
+    @routes.add("GET", R(r"/wakewords/(.+)\.onnx"))
+    def get_onnx(self, path, m):
+        if not (WAKEWORD_NAME.fullmatch(m.group(1)) and ".." not in m.group(1)):
+            return self.send_json(404, {"error": "not found"})
+        return self.send_file(os.path.join(WAKEWORD_DIR, m.group(1) + ".onnx"), "application/octet-stream")
+
+    @routes.add("GET", R(r"/images/([0-9a-f]{16})\.jpg"))
+    def get_jpg(self, path, m):
+        return self.send_file(os.path.join(IMAGE_DIR, m.group(1) + ".jpg"), "image/jpeg")
+
+    @routes.add("GET", R(r"/diagrams/([0-9a-f]{16})\.png"))
+    def get_png(self, path, m):
+        file = os.path.join(DIAGRAM_DIR, m.group(1) + ".png")
+        if not os.path.exists(file):
+            return self.send_json(404, {"error": "no such diagram"})
+        with open(file, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(data)
+        return
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -13146,311 +13986,6 @@ def make_http_handler(cfg, chats):
                 return None
             return self.rfile.read(n)
 
-        def do_POST(self):
-            path = urlparse(self.path).path
-            if path == "/move/receive":
-                return receive_move(self, cfg)
-            if self.move_gate(path, "POST"):
-                return
-            if not self.authorized():
-                return self.send_json(401, {"error": "wrong API key"})
-
-            if path == "/transcribe":
-                rate = int(self.headers.get("X-Sample-Rate") or 16000)
-                pcm = self.read_body(MAX_SECONDS * rate * 2)
-                if pcm is None:
-                    return self.send_json(400, {"error": "send 16-bit mono PCM, up to 60 s"})
-                seconds = len(pcm) / (rate * 2)
-                started = time.time()
-                if not has_speech(pcm, rate):
-                    log(f"phone: {seconds:.1f}s of silence (Whisper skipped)")
-                    return self.send_json(200, {"text": ""})
-                try:
-                    text = clean_transcript(transcribe(cfg.whisper, pcm_to_wav(pcm, rate), cfg.language))
-                except (urllib.error.URLError, OSError, RuntimeError) as e:
-                    log(f"whisper error: {e}")
-                    return self.send_json(503, {"error": "speech recognition unavailable"})
-                log(f'phone: {seconds:.1f}s -> "{text}" ({time.time() - started:.1f}s)')
-                return self.send_json(200, {"text": text})
-
-            if path == "/tts":
-                try:
-                    req = json.loads(self.read_body(100_000) or b"{}")
-                    ac = avatar_config()
-                    voice = req.get("voice") if req.get("voice") in VOICES else ac["voice"]
-                    if not os.path.isfile(_avatar_path("voices", voice + ".onnx")):
-                        prepare_avatar() if voice == ac["voice"] else threading.Thread(
-                            target=ensure_voice, args=(voice,), daemon=True).start()
-                        return self.send_json(503, {"error": "The voice is still downloading", "status": AVATAR["status"]})
-                    speed = float(req.get("speed") or ac["speed"])
-                    wav = None
-                    said = str(req.get("text", ""))
-                    kvoice = req.get("kokoro_voice") or ac["kokoro_voice"]
-                    short = len(said) <= PhraseCache.MAX_CHARS
-                    key = None
-                    if (req.get("engine") or ac["engine"]) == "kokoro":
-                        if KOKORO.ready():
-                            key = ("kokoro", str(kvoice), round(speed, 2), speakable(said))
-                            wav = PHRASES.get(key) if short else None
-                            try:
-                                wav = wav or KOKORO.say(said, kvoice, speed)
-                            except Exception as e:   # noqa: BLE001 - fall back to Piper rather than going silent
-                                log(f"kokoro failed, using Piper: {e}")
-                                key = None
-                        else:
-                            KOKORO.prepare()
-                    if wav is None:
-                        key = ("piper", voice, round(speed, 2), speakable(said))
-                        wav = (PHRASES.get(key) if short else None) or TTS.say(said, voice, speed)
-                    if short and key:
-                        PHRASES.put(key, wav)
-                except (ValueError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-                except (RuntimeError, OSError) as e:
-                    return self.send_json(503, {"error": f"speech failed: {e}"})
-                self.send_response(200)
-                self.send_header("Content-Type", "audio/wav")
-                self.send_header("Content-Length", str(len(wav)))
-                self.end_headers()
-                self.wfile.write(wav)
-                return
-            if path == "/avatar/event":
-                try:
-                    seq = AVATAR_BUS.post(json.loads(self.read_body(100_000) or b"{}"))
-                except ValueError as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, {"seq": seq})
-            m = re.fullmatch(r"/avatar/anims/([0-9a-f]{12})", path)
-            if m:
-                try:
-                    return self.send_json(200, {"animations": update_animation(
-                        m.group(1), json.loads(self.read_body(10_000) or b"{}"))})
-                except (KeyError, ValueError) as e:
-                    return self.send_json(404, {"error": str(e)})
-            if path == "/avatar/config":
-                try:
-                    return self.send_json(200, save_avatar_config(json.loads(self.read_body(100_000) or b"{}")))
-                except (ValueError, TypeError, OSError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            if path == "/sync":
-                body = self.read_body(20_000_000)
-                try:
-                    req = json.loads(body or b"{}")
-                    result = chats.sync(int(req.get("since", 0)),
-                                        req.get("conversations") or [], req.get("messages") or [])
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": f"bad sync request: {e}"})
-                return self.send_json(200, result)
-
-            m = re.fullmatch(r"/chats/([^/]{1,64})/notes", path)
-            if m:      # pin a note to a chat, or edit one ({"id", "text"})
-                try:
-                    data = json.loads(self.read_body(10_000) or b"{}")
-                    note = (chats.update_chat_note(m.group(1), data["id"], data.get("text", "")) if data.get("id")
-                            else chats.add_chat_note(m.group(1), data.get("text", ""), "user"))
-                except (ValueError, KeyError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, {"note": note, "notes": chats.chat_notes(m.group(1))})
-
-            if path == "/memories":
-                try:
-                    data = json.loads(self.read_body(10_000) or b"{}")
-                    mid, new = chats.add_memory(data.get("text", ""), "user")
-                except ValueError as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, {"id": mid, "new": new})
-
-            m = re.fullmatch(r"/memories/suggestions/([0-9a-f]{1,12})", path)
-            if m:      # keep ({"accept": true, "text": optional edit}) or drop a suggested memory
-                try:
-                    data = json.loads(self.read_body(10_000) or b"{}")
-                    chats.resolve_suggestion(m.group(1), bool(data.get("accept")), data.get("text"))
-                except (ValueError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, {"suggestions": chats.memory_suggestions(), "memories": chats.memories()})
-            if path == "/memories/settings":
-                try:
-                    return self.send_json(200, save_memory_settings(json.loads(self.read_body(1000) or b"{}")))
-                except (ValueError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-            m = re.fullmatch(r"/chats/([^/]{1,64})/docs", path)
-            if m:      # the user starts a document beside a chat
-                try:
-                    data = json.loads(self.read_body(2_000_000) or b"{}")
-                    lang = str(data.get("language", "")).lower()
-                    did = chats.create_doc(m.group(1), data.get("title", ""), data.get("text", ""),
-                                           "code" if lang and lang not in ("markdown", "md", "text") else "text", lang, "user")
-                except (ValueError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, chats.doc(did))
-            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
-            if m:      # the user's own edit from the side panel (base_version guards against overwriting Stella's)
-                try:
-                    data = json.loads(self.read_body(2_000_000) or b"{}")
-                    if "revert" in data:
-                        old = chats.doc_version_text(m.group(1), int(data["revert"]))
-                        if old is None:
-                            raise ValueError("that version isn't kept")
-                        chats.save_doc(m.group(1), old, "user", f"back to v{int(data['revert'])}")
-                    else:
-                        chats.save_doc(m.group(1), data.get("text", ""), "user", "edited by you",
-                                       title=data.get("title") or None, base_version=data.get("base_version"))
-                except (ValueError, TypeError) as e:
-                    return self.send_json(409 if "changed meanwhile" in str(e) else 400, {"error": str(e)})
-                return self.send_json(200, chats.doc(m.group(1)))
-            m = re.fullmatch(r"/chats/([^/]{1,64})/continue", path)
-            if m:      # a new chat that starts from this one's summary and pinned notes
-                try:
-                    return self.send_json(200, continue_in_new_chat(m.group(1)))
-                except ValueError as e:
-                    return self.send_json(400, {"error": str(e)})
-                except (urllib.error.URLError, OSError, RuntimeError) as e:
-                    return self.send_json(503, {"error": f"couldn't summarize the chat: {e}"})
-            if path == "/memories/learn":
-                try:
-                    data = json.loads(self.read_body(2_000_000) or b"{}")
-                    started = time.time()
-                    result = learn_memories(data.get("messages") or [])
-                except (ValueError, KeyError, urllib.error.URLError, OSError) as e:
-                    log(f"memory learning failed: {e}")
-                    return self.send_json(503, {"error": f"couldn't learn from this chat: {e}"})
-                if result["added"] or result["removed"]:
-                    log(f"learned {result['added']} forgot {result['removed']} ({time.time() - started:.1f}s)")
-                return self.send_json(200, result)
-
-            if path == "/llm/v1/chat/completions":
-                return self.proxy_llm()
-
-            if path == "/quick":
-                # Instant answers for simple requests; {"reply": null} means "ask the model"
-                try:
-                    data = json.loads(self.read_body(10_000) or b"{}")
-                    hit = quick_reply(data.get("text", ""), data.get("now", ""), bool(data.get("phone")))
-                except (ValueError, TypeError, AttributeError, OverflowError, KeyError) as e:
-                    log(f"quick answer failed: {e}")
-                    hit = None
-                if hit:
-                    log(f"instant answer ({hit['kind']}): no model needed")
-                return self.send_json(200, hit or {"reply": None})
-
-            if path == "/speedtest":
-                report = run_speed_test(cfg.whisper if DOCTOR["whisper"] else "", cfg.language)
-                if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
-                    body = speed_text(report).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                return self.send_json(409 if report.get("error") else 200, report)
-
-            if path == "/route":
-                try:
-                    data = json.loads(self.read_body(200_000) or b"{}")
-                    return self.send_json(200, route_mode(data))
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": f"bad request: {e}"})
-
-            if path == "/context":
-                try:
-                    data = json.loads(self.read_body(5_000_000) or b"{}")
-                    return self.send_json(200, plan_context(data))
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": f"bad request: {e}"})
-
-            if path == "/summarize":
-                try:
-                    data = json.loads(self.read_body(10_000_000) or b"{}")
-                    started = time.time()
-                    summary = summarize_chat(str(data.get("previous", "")), data.get("messages") or [],
-                                             "story" if data.get("style") == "story" else "work")
-                except (ValueError, TypeError, KeyError, IndexError, RuntimeError, urllib.error.URLError, OSError) as e:
-                    log(f"summary failed: {e}")
-                    return self.send_json(503, {"error": f"couldn't summarize: {e}"})
-                log(f"refreshed a chat's context ({time.time() - started:.1f}s)")
-                return self.send_json(200, {"summary": summary, "tokens": count_tokens(summary)})
-
-            if path in ("/backups", "/backups/config", "/server/model", "/server/download"):
-                try:
-                    data = json.loads(self.read_body(20_000) or b"{}")
-                    if path == "/backups":
-                        return self.send_json(200, {"file": os.path.basename(backup_now()), **backups_status()})
-                    if path == "/backups/config":
-                        return self.send_json(200, save_backup_config(data))
-                    if not SERVER_CONTROL:
-                        return self.send_json(400, {"error": "this server can't switch models from the app"})
-                    if path == "/server/model":
-                        return self.send_json(200, {"message": SERVER_CONTROL.switch(str(data.get("key")))})
-                    return self.send_json(200, {"message": SERVER_CONTROL.start_download(str(data.get("key")))})
-                except (ValueError, RuntimeError, OSError, TypeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            if path == "/reminders" or path.startswith("/reminders/") or path.startswith("/lists/") \
-                    or path == "/github":
-                try:
-                    data = json.loads(self.read_body(200_000) or b"{}")
-                    if path == "/reminders":
-                        due = int(data["due_at"]) if data.get("due_at") else _parse_when(data.get("when", ""))
-                        return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none")))
-                    if path == "/github":
-                        return self.send_json(200, save_github_config(data))
-                    m = re.fullmatch(r"/reminders/([0-9a-f]{10})", path)
-                    if m:
-                        r = chats.update_reminder(m.group(1), done=data.get("done"),
-                                                  snooze_minutes=data.get("snooze_minutes"), cancel=bool(data.get("cancel")))
-                        return self.send_json(200 if r else 404, r or {"error": "no such reminder"})
-                    m = re.fullmatch(r"/lists/items/([0-9a-f]{10})", path)
-                    if m:
-                        return self.send_json(200, {"ok": chats.set_item(m.group(1), done=bool(data.get("done")))})
-                    m = re.fullmatch(r"/lists/([^/]{1,60})/clear", path)
-                    if m:
-                        return self.send_json(200, {"removed": chats.clear_done(urllib.parse.unquote(m.group(1)))})
-                    m = re.fullmatch(r"/lists/([^/]{1,60})", path)
-                    if m:
-                        items = data.get("items") or [data.get("text", "")]
-                        name, added = chats.add_items(urllib.parse.unquote(m.group(1)), items)
-                        return self.send_json(200, {"list": name, "added": added})
-                    return self.send_json(404, {"error": "not found"})
-                except (ValueError, TypeError, KeyError, AttributeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            if path == "/modes":
-                try:
-                    data = json.loads(self.read_body(100_000) or b"{}")
-                    return self.send_json(200, chats.save_mode(data))
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            if path == "/projects":
-                try:
-                    data = json.loads(self.read_body(100_000) or b"{}")
-                    return self.send_json(200, chats.save_project(data))
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            m = re.fullmatch(r"/projects/([0-9a-f]{12})/notes", path)
-            if m:
-                try:
-                    data = json.loads(self.read_body(20_000) or b"{}")
-                    return self.send_json(200, chats.add_project_note(m.group(1), data.get("text", ""), "user"))
-                except (ValueError, TypeError, AttributeError) as e:
-                    return self.send_json(400, {"error": str(e)})
-
-            if path.startswith("/tools/"):
-                name = path[len("/tools/"):]
-                body = self.read_body(1_000_000)
-                try:
-                    args = json.loads(body or b"{}")
-                except ValueError:
-                    return self.send_json(400, {"error": "arguments must be JSON"})
-                started = time.time()
-                result, summary = run_server_tool(name, args)
-                log(f"tool {name}: {summary} ({time.time() - started:.1f}s)")
-                return self.send_json(200, {"result": result, "summary": summary})
-
-            return self.send_json(404, {"error": "not found"})
 
         def proxy_llm(self):
             """Streams a chat request through to llama-server, so the browser only talks to this one address."""
@@ -13562,243 +14097,38 @@ def make_http_handler(cfg, chats):
             self.end_headers()
             self.wfile.write(data)
 
-        def do_PUT(self):
+        def dispatch(self, method):
             path = urlparse(self.path).path
-            if self.move_gate(path, "PUT"):
+            fn, m = routes.find(method, path, "first")
+            if fn:
+                return fn(self, path, m)
+            if self.move_gate(path, method):
                 return
+            fn, m = routes.find(method, path, "open")
+            if fn:
+                return fn(self, path, m)
             if not self.authorized():
                 return self.send_json(401, {"error": "wrong API key"})
-            m = re.fullmatch(r"/projects/(library|[0-9a-f]{12})/files", path)
-            if m:
-                name = parse_qs(urlparse(self.path).query).get("name", ["file"])[0]
-                data = self.read_body(MAX_PROJECT_FILE)
-                if not data:
-                    return self.send_json(400, {"error": "send a file under 25 MB"})
-                started = time.time()
-                try:
-                    fid = add_project_file(m.group(1), name, data)
-                except (ValueError, OSError, subprocess.SubprocessError) as e:
-                    return self.send_json(400, {"error": str(e)})
-                log(f"project file {name}: {len(data) // 1024} KB ({time.time() - started:.1f}s)")
-                return self.send_json(200, {"id": fid, "project": chats.project(m.group(1))})
-            if path == "/avatar/anims":
-                q = parse_qs(urlparse(self.path).query)
-                try:
-                    items = add_animation(self.read_body(60_000_000) or b"", q.get("name", [""])[0],
-                                          q.get("when", ["idle"])[0], q.get("type", [""])[0].lower())
-                except ValueError as e:
-                    return self.send_json(400, {"error": str(e)})
-                return self.send_json(200, {"animations": items})
-            if path == "/avatar/model":
-                try:
-                    fname = add_character(self.read_body(120_000_000),
-                                          parse_qs(urlparse(self.path).query).get("name", ["character"])[0])
-                except ValueError as e:
-                    return self.send_json(400, {"error": str(e)})
-                cfg_now = save_avatar_config({"style": "vrm", "character": fname})
-                log(f"avatar: new character {fname}")
-                return self.send_json(200, cfg_now)
-            m = re.fullmatch(r"/images/([0-9a-f]{16})\.jpg", path)
-            if not m:
-                return self.send_json(404, {"error": "not found"})
-            data = self.read_body(8_000_000)
-            if not data or not data.startswith(b"\xff\xd8"):
-                return self.send_json(400, {"error": "send a JPEG under 8 MB"})
-            file = os.path.join(IMAGE_DIR, m.group(1) + ".jpg")
-            if not os.path.exists(file):
-                with open(file + ".part", "wb") as f:
-                    f.write(data)
-                os.replace(file + ".part", file)
-            return self.send_json(200, {"ok": True})
-
-        def do_DELETE(self):
-            path = urlparse(self.path).path
-            if self.move_gate(path, "DELETE"):
-                return
-            if not self.authorized():
-                return self.send_json(401, {"error": "wrong API key"})
-            m = re.fullmatch(r"/modes/(c-[0-9a-f]{10})", path)
-            if m:
-                return self.send_json(200, {"deleted": chats.delete_mode(m.group(1))})
-            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
-            if m:
-                return self.send_json(200, {"deleted": chats.delete_doc(m.group(1))})
-            m = re.fullmatch(r"/chats/([^/]{1,64})/notes/([0-9a-f]{1,12})", path)
-            if m:
-                return self.send_json(200, {"deleted": chats.delete_chat_note(m.group(1), m.group(2)),
-                                            "notes": chats.chat_notes(m.group(1))})
-            m = re.fullmatch(r"/lists/items/([0-9a-f]{10})", path)
-            if m:
-                return self.send_json(200, {"deleted": chats.set_item(m.group(1), delete=True)})
-            m = re.fullmatch(r"/projects/(library)/(files)/([0-9a-f]{1,32})", path) or \
-                re.fullmatch(r"/projects/([0-9a-f]{12})(?:/(notes|files)/([0-9a-f]{1,32}))?", path)
-            if m:
-                pid, what, item = m.groups()
-                if what == "notes":
-                    return self.send_json(200, {"deleted": chats.delete_project_note(pid, item)})
-                if what == "files":
-                    return self.send_json(200, {"deleted": chats.delete_project_file(pid, item)})
-                return self.send_json(200, {"deleted": chats.delete_project(pid)})
-            m = re.fullmatch(r"/memories/([0-9a-f]{1,32})", path)
-            if not m:
-                return self.send_json(404, {"error": "not found"})
-            return self.send_json(200, {"deleted": chats.delete_memory(m.group(1))})
+            fn, m = routes.find(method, path, "key")
+            if fn:
+                return fn(self, path, m)
+            return self.send_json(404, {"error": "not found"})
 
         def do_GET(self):
-            path = urlparse(self.path).path
-            if path == "/health":
-                return self.send_json(200, {"ok": True})
-            if path == "/move/hello":
-                return self.send_json(200, move_hello())
-            if self.move_gate(path, "GET"):
-                return
-            if path == "/move/status" and self.authorized():
-                return self.send_json(200, {**move_hello(), "target": MOVE["target"], "error": MOVE["error"],
-                                            "moved_to": MOVE["signpost"]})
-            if path == "/avatar/avatar.js":
-                body = AVATAR_JS.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/javascript; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if path.startswith("/avatar/lib/"):
-                rel = path[len("/avatar/lib/"):]
-                if rel not in AVATAR_LIBS:          # only the files listed above, never anything else
-                    return self.send_json(404, {"error": "not found"})
-                return self.send_file(_avatar_path("lib", *rel.split("/")),
-                                      LIB_TYPES.get(os.path.splitext(rel)[1], "application/octet-stream"))
-            if path in ("/", "/index.html", "/chat", "/avatar"):
-                if path == "/avatar":
-                    prepare_avatar()
-                body = WEBCHAT_HTML.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; "
-                                 "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
-                                 "connect-src 'self' blob:; media-src 'self' blob:; worker-src 'self' blob:; "
-                                 "frame-ancestors 'none'")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if path == "/favicon.ico":
-                return self.send_json(404, {"error": "none"})
-            if not self.authorized():
-                return self.send_json(401, {"error": "wrong API key"})
-            if path == "/avatar/config":
-                return self.send_json(200, avatar_config())
-            if path == "/avatar/events":
-                try:
-                    since = int(parse_qs(urlparse(self.path).query).get("since", ["0"])[0])
-                except ValueError:
-                    since = 0
-                return self.send_json(200, dict(AVATAR_BUS.since(since), avatar_rev=avatar_rev()))
-            if path.startswith("/avatar/bin/"):
-                kind, _, name = urllib.parse.unquote(path[len("/avatar/bin/"):]).partition("/")
-                if kind not in ("characters", "animations") or not _safe_bin_name(name):
-                    return self.send_json(404, {"error": "not found"})
-                # revalidated each time (not cached forever), so a replaced file replaces the screen's copy
-                if kind == "characters" and parse_qs(urlparse(self.path).query).get("lite", [""])[0] == "1":
-                    lite = lite_character(name)   # phones and light-mode screens: smaller textures
-                    if lite:
-                        return self.send_file(lite, "application/octet-stream", revalidate=True)
-                return self.send_file(_avatar_path("bin", kind, name), "application/octet-stream", revalidate=True)
-            if path == "/avatar/model.vrm":
-                ch = avatar_config()["character"]
-                return self.send_file(_avatar_path("bin", "characters", ch), "model/gltf-binary", revalidate=True) \
-                    if ch else self.send_json(404, {"error": "no character"})
-            if path == "/tools":
-                return self.send_json(200, {"tools": [t[1] for t in SERVER_TOOLS.values()],
-                                            "approval": sorted(APPROVAL_TOOLS)})
-            if path == "/reminders":
-                return self.send_json(200, {"reminders": chats.reminders(), "now": int(time.time() * 1000)})
-            if path == "/lists":
-                return self.send_json(200, {"lists": chats.lists()})
-            if path == "/github":
-                return self.send_json(200, github_status())
-            if path == "/search":
-                q = parse_qs(urlparse(self.path).query)
-                return self.send_json(200, {"results": CHAT_SEARCH.search(q.get("q", [""])[0], k=20,
-                                                                           exclude=q.get("exclude", [""])[0])})
-            if path == "/speedtest":      # past results (POST runs a new one)
-                return self.send_json(200, {"history": _speed_history()[-10:]})
-            if path == "/doctor":
-                report = run_doctor()
-                if parse_qs(urlparse(self.path).query).get("format", [""])[0] == "text":
-                    body = doctor_text(report).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                return self.send_json(200, report)
-            if path == "/backups":
-                return self.send_json(200, backups_status())
-            if path == "/server":
-                return self.send_json(200, server_status())
-            if path == "/memories":
-                return self.send_json(200, {"memories": chats.memories()})
-            m = re.fullmatch(r"/chats/([^/]{1,64})/notes", path)
-            if m:
-                return self.send_json(200, {"notes": chats.chat_notes(m.group(1))})
-            if path == "/memories/suggestions":
-                return self.send_json(200, {**memory_settings(), "suggestions": chats.memory_suggestions()})
-            m = re.fullmatch(r"/chats/([^/]{1,64})/docs", path)
-            if m:
-                return self.send_json(200, {"docs": chats.docs(m.group(1))})
-            m = re.fullmatch(r"/docs/([0-9a-f]{10})", path)
-            if m:
-                d = chats.doc(m.group(1))
-                return self.send_json(200, d) if d else self.send_json(404, {"error": "no such document"})
-            m = re.fullmatch(r"/docs/([0-9a-f]{10})/versions/(\d+)", path)
-            if m:
-                t = chats.doc_version_text(m.group(1), int(m.group(2)))
-                return self.send_json(200, {"text": t}) if t is not None else self.send_json(404, {"error": "not kept"})
-            if path == "/projects":
-                return self.send_json(200, {"projects": chats.projects()})
-            if path == "/modes":
-                return self.send_json(200, {"modes": chats.modes()})
-            if path == "/library":
-                return self.send_json(200, chats.library())
-            m = re.fullmatch(r"/projects/(library|[0-9a-f]{12})/files/([0-9a-f]{16})\.txt", path)
-            if m:
-                return self.send_file(os.path.join(PROJECT_DIR, m.group(2) + ".txt"), "text/plain; charset=utf-8")
-            if path == "/wakewords":
-                names = sorted(f[:-5] for f in os.listdir(WAKEWORD_DIR) if f.endswith(".onnx")
-                               and WAKEWORD_NAME.fullmatch(f[:-5]) and ".." not in f)
-                return self.send_json(200, {"wakewords": [
-                    {"id": n, "label": " ".join(w.capitalize() for w in re.split(r"[_-]+", re.sub(r"_v\d.*$", "", n)) if w)}
-                    for n in names]})
-            m = re.fullmatch(r"/wakewords/(.+)\.onnx", path)
-            if m and WAKEWORD_NAME.fullmatch(m.group(1)) and ".." not in m.group(1):
-                return self.send_file(os.path.join(WAKEWORD_DIR, m.group(1) + ".onnx"), "application/octet-stream")
-            m = re.fullmatch(r"/images/([0-9a-f]{16})\.jpg", path)
-            if m:
-                return self.send_file(os.path.join(IMAGE_DIR, m.group(1) + ".jpg"), "image/jpeg")
-            m = re.fullmatch(r"/diagrams/([0-9a-f]{16})\.png", path)
-            if m:
-                file = os.path.join(DIAGRAM_DIR, m.group(1) + ".png")
-                if not os.path.exists(file):
-                    return self.send_json(404, {"error": "no such diagram"})
-                with open(file, "rb") as f:
-                    data = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "private, max-age=31536000, immutable")
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            return self.send_json(404, {"error": "not found"})
+            return self.dispatch("GET")
+
+        def do_POST(self):
+            return self.dispatch("POST")
+
+        def do_PUT(self):
+            return self.dispatch("PUT")
+
+        def do_DELETE(self):
+            return self.dispatch("DELETE")
 
     for name in ("do_GET", "do_POST", "do_PUT", "do_DELETE"):
         setattr(Handler, name, _tracked(getattr(Handler, name)))
+    Handler.routes = routes
     return Handler
 
 
@@ -13926,6 +14256,9 @@ def start(cfg):
 def main():
     if "--self-test" in sys.argv:
         self_test()
+        return
+    if "--list-routes" in sys.argv:   # every web address the hub answers (kept in docs/api.md)
+        print(routes_markdown())
         return
     if "--write-shape-script" in sys.argv:   # used by stellai-setup.sh to test the photo-to-3D install
         out = sys.argv[sys.argv.index("--write-shape-script") + 1]

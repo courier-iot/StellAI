@@ -211,7 +211,7 @@ Settings → **GitHub**: add a fine-grained token (Contents read & write, Pull r
 
 ## Modes
 
-Each chat has a **mode**, a mindset that changes how Stella thinks and writes. Tap the chip under the top bar (e.g. **✦ GENERAL ▾**) to switch, before your first message or any time during a chat (it applies from her next reply).
+Each chat has a **mode**, a mindset that changes how Stella thinks and writes. Tap the mode button in the top bar (e.g. **GENERAL ▾**) to switch, before your first message or any time during a chat (it applies from her next reply).
 
 | Mode | For | Feel |
 |---|---|---|
@@ -364,6 +364,14 @@ Android 13+ and "restricted setting": because StellAI is installed from a file, 
 ## Adding your own phone actions
 
 All tools live in `app/src/main/java/com/stellai/app/PhoneTools.kt`: add a definition in `definitions()` and a branch in `execute()`. Push, and GitHub builds a new APK.
+
+## How the code is organized (for changing it)
+
+- **The server** is edited as sections in `server/hub/`: `00_core.py`, `01_chat_store.py`, … `60_http.py`, `70_main.py`, plus `server/webchat.html` (the desktop chat) and `server/avatar.js`. After editing any of them, run `python3 server/build_hub.py`: it joins them into `server/stellai_hub.py`, the one file installed servers download when they update. Upload that file together with the sections you changed. The sections share one namespace, as if they were one file, so they don't import each other.
+- **Stella's instructions and the built-in modes** have one copy, in `server/hub/16_instructions_and_modes.py`. The phone and the desktop chat fetch them from the server (`/prompts`) and keep a copy for when it's briefly unreachable, so changing a line there changes it everywhere.
+- **The web addresses** the server answers are in `server/hub/60_http.py`, each right below its `@routes.add(...)` line. `docs/api.md` lists them all.
+- **The Linux setup** (`server/stellai-setup.sh`) installs `stellai_hub.py` and `stellai_tune.py` from the same folder, or downloads them from GitHub when it's run on its own. The Proxmox script copies all three into the container.
+- **Tests:** `python3 tests/run_tests.py` runs them all (or `python3 tests/run_tests.py documents` for some). Stand-in programs in `tests/fakes` play Blender, FreeCAD, KiCad, the model server and the graphics card, so they run on any Linux PC. GitHub runs them on every upload (the **Tests** workflow): a red cross on the commit means something broke, and the run shows which check.
 
 ## Limits worth knowing
 

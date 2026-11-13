@@ -1,0 +1,61 @@
+"""CAD Designer (fake FreeCAD) and PCB Designer (fake KiCad): steps, guard rails, checks, exports, unsafe zips."""
+import os
+import zipfile
+
+from helpers import FAKES, check, done, start_hub
+
+os.environ["STELLAI_KICAD_PYTHON"] = os.path.join(FAKES, "kpython")
+h, web, tmp, port = start_hub(extra=["--blender", os.path.join(FAKES, "blender")])
+run = h.run_server_tool
+
+r, s = run("cad_project", {"action": "status"})
+check(r["ok"] and r["freecad"].endswith("freecadcmd"), "FreeCAD found", r)
+r, s = run("cad_project", {"action": "new", "name": "fan-duct"})
+check(r["ok"], "new CAD workspace", r)
+r, s = run("cad_step", {"goal": "40x20x5 base", "code": "add('Base', box(40,20,5))"})
+check(r.get("version") == 2 and [o["name"] for o in r["changes"]["added"]] == ["Base0"] and r.get("image"), "a CAD step", r)
+r, s = run("cad_step", {"goal": "x", "code": "boom()"})
+check("NameError" in str(r.get("error")), "a failing CAD step", r)
+r, s = run("cad_step", {"goal": "x", "code": "x=1 # nothing"})
+check(s == "Step changed nothing", "a CAD step that changes nothing", s)
+r, s = run("cad_step", {"goal": "x", "code": "Part.read('/etc/passwd')"})
+check("isn't allowed" in str(r.get("error")), "unsafe CAD code is blocked", r)
+r, s = run("cad_inspect", {"render": True})
+check(r.get("image"), "CAD inspect renders", r)
+r, s = run("cad_project", {"action": "export", "format": "stl"})
+check(os.path.basename(r["file"]) == "fan-duct-v0002.stl", "STL export", r)
+r, s = run("cad_project", {"action": "export", "format": "blender"})
+check(r["file"].startswith(h._inbox()), "export to Blender's inbox", r)
+r, s = run("cad_project", {"action": "revert", "version": 1})
+check(s.startswith("Went back to v1"), "CAD revert", s)
+open(os.path.join(h._inbox(), "part.step"), "w").write("ISO")
+r, s = run("cad_project", {"action": "new", "name": "imp", "file": "part.step"})
+check(r["ok"] and r["design"]["parts"][0]["name"] == "Imported", "import a STEP file", r)
+
+zp = os.path.join(h._inbox(), "board.zip")
+with zipfile.ZipFile(zp, "w") as z:
+    z.writestr("myboard/myboard.kicad_pro", "{}")
+    z.writestr("myboard/myboard.kicad_pcb", "")
+    z.writestr("myboard/myboard.kicad_sch", "")
+r, s = run("pcb_project", {"action": "status"})
+check(r["kicad_version"] == "10.0.7" and r["board_scripting"], "KiCad found", r)
+r, s = run("pcb_project", {"action": "new", "name": "psu", "file": "board.zip"})
+check(r["board"] == "myboard.kicad_pcb" and r["checks"]["drc"]["counts"] == {"error": 1}, "import a KiCad project and check it", r)
+r, s = run("pcb_check", {})
+check(r["board"]["board_mm"] == [50, 30] and len(r["footprints"]) == 1, "board check", r)
+r, s = run("pcb_step", {"goal": "move R1", "code": "move('R1', 22, 10)"})
+check(r.get("changes", {}).get("changed") == [{"ref": "R1", "x_mm": {"from": 10, "to": 22}}], "a PCB step", r)
+r, s = run("pcb_step", {"goal": "x", "code": "pcbnew.SaveBoard('a', board)"})
+check("isn't allowed" in str(r.get("error")), "unsafe board code is blocked", r)
+r, s = run("pcb_project", {"action": "export", "format": "all"})
+check(len(r["files"]) == 6 and not r["problems"], "fab export", r)
+bad = os.path.join(h._inbox(), "evil.zip")
+with zipfile.ZipFile(bad, "w") as z:
+    z.writestr("../x.kicad_pcb", "")
+r, s = run("pcb_project", {"action": "new", "name": "evil", "file": "evil.zip"})
+check("unsafe paths" in s, "zips with unsafe paths are refused", s)
+check([t for t in h.select_tools("design a bracket to 3d print", "") if t.startswith("cad")], "CAD words bring the CAD tools")
+check("pcb_circuit" in h.select_tools("hi", "pcb"), "the PCB mode gets the circuit tools")
+h._blender_stop()
+web.server_close()
+done()

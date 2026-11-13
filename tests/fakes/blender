@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# Fake Blender for protocol tests: speaks the worker protocol with a tiny pretend scene.
+import sys, json, os, struct, zlib
+M="@@STELLAI@@"
+def rep(d): print(M+json.dumps(d), flush=True)
+print("Blender 4.2.0 (fake) noise line", flush=True)
+rep({"id":0,"ok":True,"version":"4.2.0","vrm":False})
+scene={"objects":[]}
+def png(path):
+    raw=b"".join(b"\x00"+b"\x80\x80\x80"*4 for _ in range(4))
+    def chunk(t,d): return struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)&0xffffffff)
+    open(path,"wb").write(b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",4,4,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(raw))+chunk(b"IEND",b""))
+for line in sys.stdin:
+    m=json.loads(line); op=m["op"]; i=m["id"]
+    if op=="quit": break
+    if op=="new": scene={"objects":[]}; rep({"id":i,"ok":True})
+    elif op=="open": scene=json.load(open(m["path"])); rep({"id":i,"ok":True})
+    elif op=="import" and m.get("keep"): scene["objects"].append({"name":m.get("rename","Gen"),"type":"MESH","loc":[0,0,0],"size":[1,1,1],"verts":20000,"tris":40000}); rep({"id":i,"ok":True,"added":[m.get("rename","Gen")]})
+    elif op=="import": scene={"objects":[{"name":"Body","type":"MESH","loc":[0,0,0],"size":[0.5,0.3,1.6],"min":[-.25,-.15,0],"max":[.25,.15,1.6],"verts":5000,"tris":9000}]}; rep({"id":i,"ok":True,"note":""})
+    elif op=="save": json.dump(scene,open(m["path"],"w")); rep({"id":i,"ok":True})
+    elif op=="report": rep({"id":i,"ok":True,"objects":scene["objects"],"issues":{},"tris":sum(o.get("tris",0) for o in scene["objects"]),"scene_size":[1,1,1] if scene["objects"] else None})
+    elif op=="run":
+        c=m["code"]
+        if "boom" in c: rep({"id":i,"ok":False,"error":"NameError: name 'boom' is not defined","where":["line 1: boom()"]}); continue
+        if "nothing" not in c: scene["objects"].append({"name":"Halo%d"%len(scene["objects"]),"type":"MESH","loc":[0,0,1.7],"size":[.3,.3,.02],"verts":64,"tris":128})
+        print("printed by step"); rep({"id":i,"ok":True,"output":"printed by step\n"})
+    elif op=="render": png(m["out"]); rep({"id":i,"ok":True,"layout":"top-left: FRONT, top-right: RIGHT","engine":"BLENDER_WORKBENCH"})
+    elif op=="export": open(m["path"],"w").write("x"); rep({"id":i,"ok":True,"bytes":1})
+    elif op=="ping": rep({"id":i,"ok":True})
+    elif op=="hang":
+        import time; time.sleep(100)

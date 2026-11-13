@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+import sys, json, os
+if len(sys.argv)>2 and sys.argv[1]=="-c": sys.exit(0)
+job=json.load(open(os.environ["STELLAI_JOB"]))
+fps=[{"ref":"R1","value":"10k","footprint":"R_0603","x_mm":10,"y_mm":10,"rot_deg":0,"side":"top"}]
+st={"footprints":fps,"tracks":2,"vias":0,"zones":0,"nets":3,"copper_layers":2,"board_mm":[50,30]}
+b=job["board"]
+if os.path.exists(b) and os.path.getsize(b)>2:
+    try: st=json.load(open(b))
+    except ValueError: pass
+out={"ok":True}
+c=job.get("code","")
+if c:
+    out["before"]=json.loads(json.dumps(st))
+    if "move" in c: st["footprints"][0]["x_mm"]=22
+out["after"]=st
+if job.get("save"): json.dump(st,open(b,"w"))
+print("@@PCB@@"+json.dumps(out))

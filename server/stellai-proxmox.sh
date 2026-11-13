@@ -9,7 +9,7 @@
 # Why a container and not a VM: containers share the host's driver, so no PCIe passthrough is needed (HP ProLiant
 # Gen8 servers block that with their "RMRR" firmware problem), and several containers can use the same cards.
 #
-# Usage:  bash stellai-proxmox.sh            (stellai-setup.sh next to it is used; otherwise it's downloaded)
+# Usage:  bash stellai-proxmox.sh            (the setup files next to it are used; otherwise they're downloaded)
 #         NVIDIA_VERSION=580.159.04 bash stellai-proxmox.sh   (a specific driver version)
 set -euo pipefail
 
@@ -219,13 +219,16 @@ if [[ -n $DRIVER ]]; then
 fi
 # the version the container must match (a fallback for when /proc/driver/nvidia isn't visible inside it)
 [[ -n $DRIVER ]] && pct exec "$CTID" -- bash -c "mkdir -p /home/stellai/llm && echo $DRIVER > /home/stellai/llm/.host-nvidia-version"
-SETUP="$HERE/stellai-setup.sh"
-if [[ ! -s $SETUP ]]; then
-  SETUP="$STATE/stellai-setup.sh"
-  curl -fsSL -o "$SETUP" "https://raw.githubusercontent.com/$STELLAI_REPO/HEAD/server/stellai-setup.sh" \
-    || die "Couldn't get stellai-setup.sh; put it next to this script and run it again."
-fi
-pct push "$CTID" "$SETUP" /home/stellai/stellai-setup.sh
+# The setup and the files it installs (the hub and the model catalog): from next to this script, or from GitHub
+for f in stellai-setup.sh stellai_hub.py stellai_tune.py; do
+  src="$HERE/$f"
+  if [[ ! -s $src ]]; then
+    src="$STATE/$f"
+    curl -fsSL -o "$src" "https://raw.githubusercontent.com/$STELLAI_REPO/HEAD/server/$f" \
+      || die "Couldn't get $f; put the repo's server folder next to this script and run it again."
+  fi
+  pct push "$CTID" "$src" "/home/stellai/$f"
+done
 pct exec "$CTID" -- chown -R stellai:stellai /home/stellai
 
 say "Starting the StellAI setup inside container $CTID"

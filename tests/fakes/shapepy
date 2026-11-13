@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+import sys, json
+a=sys.argv; out=a[a.index("--out")+1]; open(out,"w").write("glb")
+print("noise"); print("@@SHAPE@@"+json.dumps({"ok":True,"out":out,"faces":40000,"model":"tencent/Hunyuan3D-2mini","seconds":3,"args":a[2:]}))

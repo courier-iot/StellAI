@@ -283,6 +283,9 @@ object HubApi {
 
     fun saveGithub(serverUrl: String, apiKey: String, body: JSONObject): JSONObject = postJson(serverUrl, apiKey, "/github", body)
 
+    /** Stella's instructions and the built-in modes: {instructions: {phone, web}, mode_note, summary_intro, voice_style, modes}. */
+    fun prompts(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/prompts")
+
     fun modes(serverUrl: String, apiKey: String): JSONArray =
         JSONObject(execute(authed(serverUrl, apiKey, "/modes").get().build())).optJSONArray("modes") ?: JSONArray()
 
