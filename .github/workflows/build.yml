@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write   # publish the signed APK as a release
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,3 +41,42 @@ jobs:
         with:
           name: stellai-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      # On main, with the signing secrets set: a signed APK, published as the release "vX.Y.Z" (from versionName).
+      # Secrets: SIGNING_KEY_BASE64, SIGNING_KEY_PASSWORD, SIGNING_KEY_ALIAS and optionally SIGNING_STORE_PASSWORD
+      # (when it's missing, the key password is used for the keystore too).
+      - name: Build signed release APK
+        id: release
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_KEY_BASE64" ] || [ -z "$SIGNING_KEY_PASSWORD" ] || [ -z "$SIGNING_KEY_ALIAS" ]; then
+            echo "::warning::No signing secrets set: only the debug APK was built (no release)."
+            exit 0
+          fi
+          export SIGNING_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          echo "$SIGNING_KEY_BASE64" | tr -d ' \r\n' | base64 --decode > "$SIGNING_KEYSTORE_FILE"
+          export SIGNING_STORE_PASSWORD="${SIGNING_STORE_PASSWORD:-$SIGNING_KEY_PASSWORD}"
+          gradle assembleRelease --no-daemon
+          rm -f "$SIGNING_KEYSTORE_FILE"
+          ver=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          cp app/build/outputs/apk/release/app-release.apk "stellai-v$ver.apk"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: steps.release.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.release.outputs.version }}
+        run: |
+          if gh release view "v$VER" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # same version uploaded again: replace the APK in its release
+            gh release upload "v$VER" "stellai-v$VER.apk" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "v$VER" "stellai-v$VER.apk" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "v$VER" --notes ""
+          fi
