@@ -42,27 +42,33 @@ jobs:
           name: stellai-apk
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      # On main, with the signing secrets set: a signed APK, published as the release "vX.Y.Z" (from versionName).
-      # Secrets: SIGNING_KEY_BASE64, SIGNING_KEY_PASSWORD, SIGNING_KEY_ALIAS and optionally SIGNING_STORE_PASSWORD
-      # (when it's missing, the key password is used for the keystore too).
+      # On main: a signed APK, published as the release "vX.Y.Z" (from versionName), which the app store reads.
+      # Secrets in THIS repo (Settings > Secrets and variables > Actions), the same names as Stellar Disc:
+      #   SIGNING_KEYSTORE_BASE64 (or SIGNING_KEY_BASE64), SIGNING_KEY_PASSWORD, SIGNING_KEY_ALIAS,
+      #   SIGNING_STORE_PASSWORD (optional: the key password is used when it's missing)
       - name: Build signed release APK
         id: release
         if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
         env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
         run: |
-          if [ -z "$SIGNING_KEY_BASE64" ] || [ -z "$SIGNING_KEY_PASSWORD" ] || [ -z "$SIGNING_KEY_ALIAS" ]; then
-            echo "::warning::No signing secrets set: only the debug APK was built (no release)."
-            exit 0
+          KEY_TEXT="${SIGNING_KEYSTORE_BASE64:-$SIGNING_KEY_BASE64}"
+          missing=""
+          [ -z "$KEY_TEXT" ] && missing="$missing SIGNING_KEYSTORE_BASE64"
+          [ -z "$SIGNING_KEY_PASSWORD" ] && missing="$missing SIGNING_KEY_PASSWORD"
+          [ -z "$SIGNING_KEY_ALIAS" ] && missing="$missing SIGNING_KEY_ALIAS"
+          if [ -n "$missing" ]; then
+            echo "::error::No release: this repo is missing the secret(s)$missing. Add them under Settings > Secrets and variables > Actions of courier-iot/StellAI (secrets don't carry over from other repos), then re-run this job."
+            exit 1
           fi
           export SIGNING_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
-          echo "$SIGNING_KEY_BASE64" | tr -d ' \r\n' | base64 --decode > "$SIGNING_KEYSTORE_FILE"
+          echo "$KEY_TEXT" | tr -d ' \r\n' | base64 --decode > "$SIGNING_KEYSTORE_FILE"
           export SIGNING_STORE_PASSWORD="${SIGNING_STORE_PASSWORD:-$SIGNING_KEY_PASSWORD}"
-          gradle assembleRelease --no-daemon
-          rm -f "$SIGNING_KEYSTORE_FILE"
+          gradle assembleRelease --no-daemon --stacktrace
           ver=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
           cp app/build/outputs/apk/release/app-release.apk "stellai-v$ver.apk"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
@@ -80,3 +86,7 @@ jobs:
             gh release create "v$VER" "stellai-v$VER.apk" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title "v$VER" --notes ""
           fi
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
