@@ -1,0 +1,30 @@
+name: Tests
+
+# Runs every StellAI test (tests/run_tests.py) on each upload: the hub, the setup scripts, the desktop web chat in a
+# real browser, and the Windows app's logic. Stand-in programs replace Blender, FreeCAD, KiCad and the model, so no
+# graphics card is needed. A red cross on the commit means something broke; open the run to see which check.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy matplotlib playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run the tests
+        run: python tests/run_tests.py

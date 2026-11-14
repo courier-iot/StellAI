@@ -33,6 +33,10 @@ jobs:
           done
           ls -la "$dir"
 
+      # The app's own tests (app/src/test): if any fail, nothing is built or released
+      - name: Run app tests
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
 
