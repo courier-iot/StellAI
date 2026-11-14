@@ -266,8 +266,10 @@ const MODE_ICON = { "⌨": "keyboard", "✒": "pen", "✍": "pen", "✏": "pen",
 const modeIc = sym => icon(MODE_ICON[String(sym || "").trim()] || "sparkle");
 // Stored marks at the start of a line ("✓ Saved", "⇄ Auto: CAD") drawn as icons
 const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""] };
+// The phone saves a Cancel/Undo button at the end of an action line ("[[button:Undo|tool|{…}]]"); only it can press it
+const stripButton = text => String(text || "").replace(/\n?\[\[button:[^\]\n]*\]\]\s*$/, "");
 function markedLine(text) {
-  const t = String(text || "").trimStart(); const m = MARKS[t[0]];
+  const t = stripButton(text).trimStart(); const m = MARKS[t[0]];
   return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()) : esc(t);
 }
 const fileIc = kind => icon(kind === "pdf" ? "doc" : kind === "image" ? "image" : kind === "code" ? "code" : "note");
@@ -356,11 +358,11 @@ const project = id => S.projects.find(p => p.id === id);
 const msgsOf = id => (S.msgs.get(id) || []).filter(m => !m.deleted).sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : 1));
 
 function saveConv(c) { S.convs.set(c.id, c); S.dirtyC.add(c.id); }
-function saveMsg(m) {
+function saveMsg(m, dirty = true) {
   if (!S.msgs.has(m.conv_id)) S.msgs.set(m.conv_id, []);
   const list = S.msgs.get(m.conv_id); const i = list.findIndex(x => x.id === m.id);
   if (i >= 0) list[i] = m; else list.push(m);
-  S.dirtyM.set(m.id, m);
+  if (dirty) S.dirtyM.set(m.id, m); else lastTs = Math.max(lastTs, m.updated_at || 0, m.created_at || 0);
 }
 
 // ---------------------------------------------------------------- sync (same protocol as the phone)
@@ -563,7 +565,7 @@ function buildHistory(list) {
   for (const m of list) {
     if (m.role === "user") { flush(); out.push({ role: "user", content: m.text.replace(PHOTO, "[photo $1]").trim(), _id: m.id, _text: m.text }); }
     else if (m.role === "assistant" && m.text.trim()) pending += m.text + "\n";
-    else if (m.role === "tool" && !m.text.startsWith("⇄")) pending += "(action result: " + m.text.replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
+    else if (m.role === "tool" && !m.text.startsWith("⇄")) pending += "(action result: " + stripButton(m.text).replace(DIAGRAM, "[diagram shown]").trim() + ")\n";
   }
   flush(); return out;
 }
@@ -692,7 +694,82 @@ async function autoMode(convId, fresh) {
   else if (r.suggest) addMsg(convId, "tool", "⇄ Suggest: " + r.suggest_name + " (pick it below to redo)");
   return modeById(r.mode);
 }
+// ---------------------------------------------------------------- replies run on the server
+// The server does the whole reply (quick answers, Auto mode, the model, tools, continuing) and streams events;
+// this page shows them, and answers when the server needs the user (an OK for a GitHub commit).
+const serverRuns = () => (PROMPTS.features || []).includes("server_replies");
+function isoNow() {
+  const now = new Date(), off = -now.getTimezoneOffset(), pad = n => String(Math.abs(n)).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `${off >= 0 ? "+" : "-"}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+}
+async function runOnServer(convId, photos, voice = false, fresh = false) {
+  S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
+  SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });
+  let usedNotes = false, runId = null, last = 0;
+  const forced = S.forced.get(convId) || ""; S.forced.delete(convId);
+  const thinking = store.get("thinkingMode", null) || (store.get("thinking", false) ? "on" : "auto");
+  try {
+    await sync();   // the server reads the chat from its own copy, so send it the newest messages first
+    S.abort = new AbortController();
+    const r = await fetch(`/chats/${encodeURIComponent(convId)}/reply`, { method: "POST", signal: S.abort.signal,
+      headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ client: "web", name: NAME(), voice, fresh, photos: photos.map(p => p.id), thinking, forced,
+        auto_level: store.get("autoModes", "auto"), now: isoNow(), now_line: nowLine() }) });
+    if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+    SPEAK.begin();
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true }); let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1); if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "run") runId = ev.run_id;
+        else if (ev.type === "status") { S.status = ev.text; renderBar(); }
+        else if (ev.type === "tool") {
+          S.status = toolLabel(ev.name) + "…"; S.streaming = null; renderBar(); renderMsgs();
+          if (voice && AVATAR_MODE && SPEAK.enabled && !SPEAK.saidAny) SPEAK.say(ACKS[Math.floor(Math.random() * ACKS.length)]);
+        } else if (ev.type === "delta") {
+          S.streaming = { id: "live", role: "assistant", text: ev.text || "", reasoning: ev.reasoning || "" };
+          S.status = !S.streaming.text && S.streaming.reasoning ? "Thinking…" : "Writing…";
+          if (AVATAR_MODE) SPEAK.feed(S.streaming.text);
+          if (Date.now() - last > 80) { last = Date.now(); renderMsgs(); renderBar(); if (AVATAR_MODE && S.streaming.text) avatarCaption(S.streaming.text); }
+        } else if (ev.type === "message") {
+          const m = ev.message; saveMsg(m, false);
+          if (m.role === "assistant") {
+            S.streaming = null;
+            if (AVATAR_MODE) { SPEAK.feed(m.text, true); avatarCaption(m.text); if (m.text && AV.avatar) AV.avatar.react(m.text); }
+            postAvatar({ state: "reply", text: m.text });
+          }
+          if (m.role === "tool" && m.text.includes("Pinned")) usedNotes = true;
+          if (m.role === "tool" && convId === S.current) { const d = m.text.match(/\[doc:([0-9a-f]{10})\]/); if (d) refreshDocs(d[1], true); }
+          renderMsgs();
+        } else if (ev.type === "mode") S.auto.set(convId, ev.mode);
+        else if (ev.type === "context") { S.context = { used: ev.used, limit: ev.limit }; renderBar(); }
+        else if (ev.type === "changed") loadMeta();
+        else if (ev.type === "approval" || ev.type === "client_tool") {
+          const answer = ev.type === "approval" ? { approved: await approve(ev.name, ev.args || {}) }
+            : { summary: "✗ " + ev.name + " isn't available on the desktop", result: JSON.stringify({ ok: false, error: "That's a phone action; it isn't available in the desktop chat." }) };
+          api(`/replies/${runId}/answer`, { method: "POST", json: { call_id: ev.call_id, answer } }).catch(() => {});
+        } else if (ev.type === "done" && ev.error && !ev.stopped) S.error = ev.error;
+      }
+    }
+  } catch (e) {
+    if (runId && S.stopRequested) api(`/replies/${runId}/stop`, { method: "POST", json: {} }).catch(() => {});
+    if (!S.stopRequested) S.error = e.status === 401 ? "The API key was rejected." : (e.message || String(e));
+  } finally {
+    if (S.stopRequested) S.error = "Stopped.";
+    S.busy = false; S.status = ""; S.abort = null; S.streaming = null;
+    postAvatar({ state: "idle" });
+    if (voice && !S.stopRequested && !S.error) startFollowUp();
+    touch(convId); renderSide(); renderMsgs(); renderBar();
+    sync().then(updateMeter);
+    if (usedNotes) loadMeta();
+  }
+}
 async function run(convId, photos, voice = false, fresh = false) {
+  if (serverRuns()) return runOnServer(convId, photos, voice, fresh);
   S.continued = 0;
   S.busy = true; S.error = null; S.stopRequested = false; S.status = "Contacting server…"; renderBar(); renderMsgs();
   SPEAK.cancel(); SPEAK.newReply(); postAvatar({ state: "thinking", voice });

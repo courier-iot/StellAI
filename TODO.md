@@ -12,8 +12,10 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] **No copies inside other files** (0.27.0): the setup installs the real hub and catalog; the hub is built from its sections by `server/build_hub.py`.
 - [x] **The server in sections** (0.27.0): `server/hub/*.py`, and one route table for its web addresses (`docs/api.md`).
 - [x] **One copy of Stella's instructions and modes** (0.27.0): on the server (`/prompts`), cached by the apps.
-- [ ] **The reply loop on the server** (all, L): the phone and the desktop chat each run tools, Auto mode and auto-continue themselves; the server could do it once for every app.
-- [ ] **Small tidy-ups** (S): one settings folder for the server's state files; split the phone's chat screen into smaller pieces.
+- [x] **The reply loop on the server** (0.29.0): `POST /chats/<id>/reply` runs the whole reply and streams events; the phone runs only phone actions and asks for approvals.
+- [ ] **Remove the apps' old reply loops** (S): once 0.29.0 has run well on the real model for a while, delete the fallback code in ChatEngine.kt and webchat.html.
+- [x] **App cleanup** (0.28.0): app tests before every release, Cancel/Undo buttons on phone actions, up-to-date messages and Check for updates, Settings in folding groups, the chat screen split into five files.
+- [ ] **Small tidy-up** (S): one settings folder for the server's state files.
 
 ### Long chats that don't run out, and working more like Claude (done in 0.24.0 to 0.26.0)
 

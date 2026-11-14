@@ -179,7 +179,7 @@ fun ServerScreen(onDone: () -> Unit) {
                 }
             } else if (server != null) {
                 item {
-                    Text("This server can't switch models from the app yet (re-run its setup to enable it).",
+                    Text("This server can't switch models from the app yet. It gets this with its next update (Check for updates below).",
                         style = MaterialTheme.typography.bodySmall, color = Space.Muted)
                 }
             }
@@ -200,6 +200,10 @@ fun ServerScreen(onDone: () -> Unit) {
                             checking = false
                         }
                     }) { Text("Check everything") }
+                    Spacer(Modifier.size(8.dp))
+                    OutlinedButton(onClick = {
+                        act { withContext(Dispatchers.IO) { HubApi.checkForUpdate(s.serverUrl, s.apiKey) }.optString("message") }
+                    }) { Text("Check for updates") }
                     if (checking) {
                         Spacer(Modifier.size(12.dp))
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Space.Accent)

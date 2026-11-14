@@ -56,6 +56,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -160,208 +164,241 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ---- Connection --------------------------------------------------------------
-            SectionTitle("Server connection")
-            Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) { IconText(Icons.Outlined.QrCodeScanner, "Scan to connect") }
-            Hint("Scan the QR code shown by StellAI Server on your computer (Windows: the server window; Linux: the StellAI Server terminal). Or type the server address and API key it shows. Use the Tailscale address to reach it from anywhere.")
-            OutlinedTextField(
-                value = url,
-                onValueChange = { url = it },
-                label = { Text("Server address") },
-                placeholder = { Text("http://100.101.102.103:8080") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = key,
-                onValueChange = { key = it },
-                label = { Text("API key") },
-                singleLine = true,
-                visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = {
-                    TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "Hide" else "Show") }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedButton(onClick = {
-                testResult = "Connecting…"
-                scope.launch {
-                    val server = AppSettings.normalizeUrl(url)
-                    val ai = try {
-                        val model = withContext(Dispatchers.IO) { LlamaClient().testConnection(server, key) }
-                        "✓ AI connected — model: $model"
-                    } catch (e: Exception) {
-                        "✗ AI: ${app.engine.friendlyError(e)}"
-                    }
-                    val hub = if (withContext(Dispatchers.IO) { HubApi.health(server) }) {
-                        "✓ Voice and sync service connected"
-                    } else {
-                        "✗ Voice/sync service not reachable (re-run the setup script on the server)"
-                    }
-                    testResult = "$ai\n$hub"
-                }
-            }) { Text("Test connection") }
-            testResult?.let { r -> Column { r.lines().forEach { StatusLine(it, okColor = Space.Accent, badColor = Space.Red) } } }
-
-            HorizontalDivider()
-            SectionTitle("Assistant")
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it.take(24) },
-                label = { Text("Assistant name") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text("Theme color", style = MaterialTheme.typography.labelLarge)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                ACCENTS.forEach { a ->
-                    ColorSwatch(a, selected = s.accentColor == a.id) { s.accentColor = a.id }
-                }
-            }
-            Text("Thinking before answering", style = MaterialTheme.typography.labelLarge)
-            Hint("Auto: thinks only when a question looks hard (debugging, maths, design) and answers simple things " +
-                "straight away. Modes like Programmer or Writer can override this.")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("auto" to "Auto", "on" to "Always", "off" to "Never").forEach { (v, label) ->
-                    FilterChip(selected = thinking == v, onClick = { thinking = v }, label = { Text(label) })
-                }
-            }
-            Text("Switching modes by herself", style = MaterialTheme.typography.labelLarge)
-            Hint("In General chats Stella picks the mode that fits each message (CAD for a bracket, PCB for a board) " +
-                "and shows a chip you can tap to change it. Ask: she only suggests. Off: modes are only what you pick. " +
-                "Picking a mode for a chat keeps it there.")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("auto" to "Auto", "ask" to "Ask first", "off" to "Off").forEach { (v, label) ->
-                    FilterChip(selected = autoModes == v, onClick = { autoModes = v }, label = { Text(label) })
-                }
-            }
-
-            HorizontalDivider()
-            SectionTitle("Memory")
-            SettingSwitch(
-                "Learn from conversations",
-                "After a chat goes quiet, the server picks out lasting facts (projects, tools, preferences) and suggests them in Memory for you to keep or drop.",
-                learn,
-            ) { learn = it }
-            Text(
-                "${app.memory.items.size} thing${if (app.memory.items.size == 1) "" else "s"} remembered",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            OutlinedButton(onClick = onOpenMemory) { Text("View and edit memories") }
-
-            HorizontalDivider()
-            SectionTitle("Voice assistant")
-            SettingSwitch(
-                "Wake word",
-                "Listen in the background for the wake word. Android shows a permanent notification, and it uses some battery.",
-                wake,
-            ) { on ->
-                wake = on
-                if (on && !micAllowed) {
-                    val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
-                    if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
-                    permissions.launch(perms.toTypedArray())
-                }
-            }
-            if (wake) {
-                Text("Wake word", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppSettings.WAKE_WORDS.forEach { (id, label) ->
-                        FilterChip(selected = wakeWord == id, onClick = { wakeWord = id }, label = { Text(label) })
-                    }
-                    customWakeWords.forEach { (id, label) ->
-                        val key = AppSettings.CUSTOM_PREFIX + id
-                        FilterChip(selected = wakeWord == key, onClick = { wakeWord = key }, label = { Text(label) },
-                            trailingIcon = { Icon(LineIcons.Sparkle, contentDescription = "Your own", modifier = Modifier.size(14.dp)) })
-                    }
-                }
-                Hint("Trained your own (like \"Hey Stella\")? Put the .onnx file in the server's wake word folder and it appears here, marked with a star.")
-                Text("Sensitivity", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Low" to 0, "Normal" to 1, "High" to 2).forEach { (label, v) ->
-                        FilterChip(selected = sensitivity == v, onClick = { sensitivity = v }, label = { Text(label) })
-                    }
-                }
-                Hint("Raise sensitivity if it misses you; lower it if it wakes up by itself.")
-            }
-            SettingSwitch("Speak replies", "Read answers aloud when you asked by voice.", speak) { speak = it }
-            SettingSwitch("Keep listening after she answers",
-                "Reply without the wake word for a few seconds after she speaks. Saying \"thanks\" or \"that's all\" ends it.",
-                followUp) { followUp = it }
-            SettingSwitch("Stay connected in the background",
-                "Keeps Stella connected when you switch apps, so replies still arrive and reminders keep syncing. Shows a quiet notification while it's on.",
-                stayConnected) { on ->
-                stayConnected = on
-                if (on && Build.VERSION.SDK_INT >= 33 && !NotificationManagerCompat.from(context).areNotificationsEnabled())
-                    permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
-            }
-            if ((stayConnected || wake) && !batteryFree) {
-                Hint("Some phones still stop apps in the background to save battery. If Stella keeps disconnecting, let StellAI run without battery limits.")
-                OutlinedButton(onClick = {
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName)))
-                    } catch (_: Exception) {
-                        try { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
-                    }
-                }) { Text("Allow running without battery limits") }
-            }
-
-            Text("Default assistant", style = MaterialTheme.typography.labelLarge)
-            Hint("Make StellAI your phone's assistant, so long-pressing the power or home button starts listening. Choose \"StellAI\" under Digital assistant app.")
-            OutlinedButton(onClick = {
-                val intents = listOf(
-                    Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
-                    Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
-                    Intent(Settings.ACTION_SETTINGS),
+            // Each group folds open with a tap; the page starts short. Connection is open until it's set up.
+            SettingsSection("Connection", Icons.Outlined.QrCodeScanner, if (s.apiKey.isBlank()) "Not set up yet" else url.removePrefix("http://").removePrefix("https://"), startOpen = s.apiKey.isBlank()) {
+                Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) { IconText(Icons.Outlined.QrCodeScanner, "Scan to connect") }
+                Hint("Scan the QR code shown by StellAI Server on your computer (Windows: the server window; Linux: the StellAI Server terminal). Or type the server address and API key it shows. Use the Tailscale address to reach it from anywhere.")
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("Server address") },
+                    placeholder = { Text("http://100.101.102.103:8080") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth(),
                 )
-                for (i in intents) {
-                    try {
-                        context.startActivity(i)
-                        break
-                    } catch (_: Exception) {
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = { key = it },
+                    label = { Text("API key") },
+                    singleLine = true,
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "Hide" else "Show") }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedButton(onClick = {
+                    testResult = "Connecting…"
+                    scope.launch {
+                        val server = AppSettings.normalizeUrl(url)
+                        val ai = try {
+                            val model = withContext(Dispatchers.IO) { LlamaClient().testConnection(server, key) }
+                            "✓ AI connected — model: $model"
+                        } catch (e: Exception) {
+                            "✗ AI: ${app.engine.friendlyError(e)}"
+                        }
+                        val hub = if (withContext(Dispatchers.IO) { HubApi.health(server) }) {
+                            "✓ Voice and sync service connected"
+                        } else {
+                            "✗ Stella's server program (port 8092) isn't answering. Check that it's running on the server."
+                        }
+                        testResult = "$ai\n$hub"
+                    }
+                }) { Text("Test connection") }
+                testResult?.let { r -> Column { r.lines().forEach { StatusLine(it, okColor = Space.Accent, badColor = Space.Red) } } }
+            }
+            SettingsSection("Stella", LineIcons.Sparkle, name.ifBlank { "Stella" }, startOpen = false) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(24) },
+                    label = { Text("Assistant name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("Theme color", style = MaterialTheme.typography.labelLarge)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    ACCENTS.forEach { a ->
+                        ColorSwatch(a, selected = s.accentColor == a.id) { s.accentColor = a.id }
                     }
                 }
-            }) { Text("Open assistant settings") }
-
-            Text("Background actions", style = MaterialTheme.typography.labelLarge)
-            if (overlayAllowed) {
-                Hint("Allowed: voice commands can open apps, maps and the dialer even when the app isn't on screen.")
-            } else {
-                Hint("Android blocks apps from opening other apps from the background. Allow \"Display over other apps\" so voice commands can open apps, maps and the dialer.")
-                OutlinedButton(onClick = {
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
-                    } catch (_: Exception) {
+                Text("Thinking before answering", style = MaterialTheme.typography.labelLarge)
+                Hint("Auto: thinks only when a question looks hard (debugging, maths, design) and answers simple things " +
+                    "straight away. Modes like Programmer or Writer can override this.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("auto" to "Auto", "on" to "Always", "off" to "Never").forEach { (v, label) ->
+                        FilterChip(selected = thinking == v, onClick = { thinking = v }, label = { Text(label) })
                     }
-                }) { Text("Allow background actions") }
+                }
+                Text("Switching modes by herself", style = MaterialTheme.typography.labelLarge)
+                Hint("In General chats Stella picks the mode that fits each message (CAD for a bracket, PCB for a board) " +
+                    "and shows a chip you can tap to change it. Ask: she only suggests. Off: modes are only what you pick. " +
+                    "Picking a mode for a chat keeps it there.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("auto" to "Auto", "ask" to "Ask first", "off" to "Off").forEach { (v, label) ->
+                        FilterChip(selected = autoModes == v, onClick = { autoModes = v }, label = { Text(label) })
+                    }
+                }
             }
+            SettingsSection("Voice", LineIcons.Mic, if (wake) "Wake word on" else "Wake word off", startOpen = false) {
+                SettingSwitch(
+                    "Wake word",
+                    "Listen in the background for the wake word. Android shows a permanent notification, and it uses some battery.",
+                    wake,
+                ) { on ->
+                    wake = on
+                    if (on && !micAllowed) {
+                        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                        if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+                        permissions.launch(perms.toTypedArray())
+                    }
+                }
+                if (wake) {
+                    Text("Wake word", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AppSettings.WAKE_WORDS.forEach { (id, label) ->
+                            FilterChip(selected = wakeWord == id, onClick = { wakeWord = id }, label = { Text(label) })
+                        }
+                        customWakeWords.forEach { (id, label) ->
+                            val key = AppSettings.CUSTOM_PREFIX + id
+                            FilterChip(selected = wakeWord == key, onClick = { wakeWord = key }, label = { Text(label) },
+                                trailingIcon = { Icon(LineIcons.Sparkle, contentDescription = "Your own", modifier = Modifier.size(14.dp)) })
+                        }
+                    }
+                    Hint("Trained your own (like \"Hey Stella\")? Put the .onnx file in the server's wake word folder and it appears here, marked with a star.")
+                    Text("Sensitivity", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Low" to 0, "Normal" to 1, "High" to 2).forEach { (label, v) ->
+                            FilterChip(selected = sensitivity == v, onClick = { sensitivity = v }, label = { Text(label) })
+                        }
+                    }
+                    Hint("Raise sensitivity if it misses you; lower it if it wakes up by itself.")
+                }
+                SettingSwitch("Speak replies", "Read answers aloud when you asked by voice.", speak) { speak = it }
+                SettingSwitch("Keep listening after she answers",
+                    "Reply without the wake word for a few seconds after she speaks. Saying \"thanks\" or \"that's all\" ends it.",
+                    followUp) { followUp = it }
+            }
+            SettingsSection("Memory", LineIcons.Memory, "${app.memory.items.size} remembered", startOpen = false) {
+                SettingSwitch(
+                    "Learn from conversations",
+                    "After a chat goes quiet, the server picks out lasting facts (projects, tools, preferences) and suggests them in Memory for you to keep or drop.",
+                    learn,
+                ) { learn = it }
+                Text(
+                    "${app.memory.items.size} thing${if (app.memory.items.size == 1) "" else "s"} remembered",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(onClick = onOpenMemory) { Text("View and edit memories") }
+            }
+            SettingsSection("Phone access", LineIcons.Phone, "What Stella may do on this phone", startOpen = false) {
+                PhoneAccessSettings()
+                SettingSwitch("Stay connected in the background",
+                    "Keeps Stella connected when you switch apps, so replies still arrive and reminders keep syncing. Shows a quiet notification while it's on.",
+                    stayConnected) { on ->
+                    stayConnected = on
+                    if (on && Build.VERSION.SDK_INT >= 33 && !NotificationManagerCompat.from(context).areNotificationsEnabled())
+                        permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                }
+                if ((stayConnected || wake) && !batteryFree) {
+                    Hint("Some phones still stop apps in the background to save battery. If Stella keeps disconnecting, let StellAI run without battery limits.")
+                    OutlinedButton(onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + context.packageName)))
+                        } catch (_: Exception) {
+                            try { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
+                        }
+                    }) { Text("Allow running without battery limits") }
+                }
 
-            HorizontalDivider()
-            PhoneAccessSettings()
+                Text("Default assistant", style = MaterialTheme.typography.labelLarge)
+                Hint("Make StellAI your phone's assistant, so long-pressing the power or home button starts listening. Choose \"StellAI\" under Digital assistant app.")
+                OutlinedButton(onClick = {
+                    val intents = listOf(
+                        Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
+                        Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+                        Intent(Settings.ACTION_SETTINGS),
+                    )
+                    for (i in intents) {
+                        try {
+                            context.startActivity(i)
+                            break
+                        } catch (_: Exception) {
+                        }
+                    }
+                }) { Text("Open assistant settings") }
 
-            HorizontalDivider()
-            SectionTitle("Sync")
-            Hint("Chats are stored on the server and shared by every phone or tablet set up with the same server and key.")
-            Text(app.sync.status, style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(onClick = { app.sync.request() }) { Text("Sync now") }
-
-            HorizontalDivider()
-            GitHubSettings()
+                Text("Background actions", style = MaterialTheme.typography.labelLarge)
+                if (overlayAllowed) {
+                    Hint("Allowed: voice commands can open apps, maps and the dialer even when the app isn't on screen.")
+                } else {
+                    Hint("Android blocks apps from opening other apps from the background. Allow \"Display over other apps\" so voice commands can open apps, maps and the dialer.")
+                    OutlinedButton(onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
+                        } catch (_: Exception) {
+                        }
+                    }) { Text("Allow background actions") }
+                }
+            }
+            SettingsSection("Sync", LineIcons.Sync, app.sync.status, startOpen = false) {
+                Hint("Chats are stored on the server and shared by every phone or tablet set up with the same server and key.")
+                Text(app.sync.status, style = MaterialTheme.typography.bodyMedium)
+                OutlinedButton(onClick = { app.sync.request() }) { Text("Sync now") }
+            }
+            SettingsSection("Advanced", LineIcons.Code, "GitHub", startOpen = false) {
+                GitHubSettings()
+            }
 
             Button(onClick = { save() }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
 }
 
+/** A group of settings that folds open when its header is tapped. */
 @Composable
-private fun SectionTitle(text: String) {
-    IconText(LineIcons.Sparkle, text.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Accent,
-        size = 15.dp)
+private fun SettingsSection(
+    title: String,
+    icon: ImageVector,
+    summary: String,
+    startOpen: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    var open by rememberSaveable(title) { mutableStateOf(startOpen) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Space.Accent.copy(alpha = if (open) 0.45f else 0.2f), RoundedCornerShape(14.dp)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, tint = Space.Accent, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.size(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title.uppercase(), style = HudLabel.copy(fontSize = 13.sp, letterSpacing = 2.5.sp), color = Space.Accent)
+                if (summary.isNotBlank() && !open) {
+                    Text(summary, style = MaterialTheme.typography.bodySmall, color = Space.Muted, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Icon(if (open) LineIcons.Close else LineIcons.Open,
+                contentDescription = if (open) "Close" else "Open", tint = Space.Muted)
+        }
+        if (open) {
+            Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                content()
+            }
+        }
+    }
 }
 
 @Composable
@@ -447,7 +484,7 @@ private fun GitHubSettings() {
         }
     }
 
-    SectionTitle("GitHub")
+    Text("GitHub", style = MaterialTheme.typography.labelLarge)
     Hint(
         "Lets ${app.settings.assistantName.ifBlank { "Stella" }} read your repositories, check failed builds and commit fixes " +
             "to a new branch (you approve every commit). Create a fine-grained token on github.com → Settings → Developer settings " +
@@ -508,7 +545,6 @@ private fun PhoneAccessSettings() {
         }
     }
 
-    SectionTitle("Phone access")
     Hint("What Stella may do on this phone. Everything is off until you allow it, and nothing leaves your own server.")
     AccessRow("Notifications & music",
         "Read your notifications, see what's playing, and control and choose music in apps like Spotify. Without it she can still play, pause and skip.",

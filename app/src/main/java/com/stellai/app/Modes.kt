@@ -85,6 +85,10 @@ class ModeManager(private val app: App) {
     var prompts: Prompts = Prompts.FALLBACK
         private set
 
+    /** The server runs whole replies itself (newer servers); otherwise the phone runs them. */
+    var serverReplies = false
+        private set
+
     init {
         try {
             custom.addAll(parse(JSONArray(app.settings.modeCache)))
@@ -110,6 +114,8 @@ class ModeManager(private val app: App) {
         val modes = parse(o.optJSONArray("modes") ?: JSONArray(), builtIn = true)
         if (modes.none { it.id == GENERAL_MODE.id }) return false
         prompts = p
+        val features = o.optJSONArray("features")
+        serverReplies = features != null && (0 until features.length()).any { features.optString(it) == "server_replies" }
         builtIn.clear()
         builtIn.addAll(modes)
         return true

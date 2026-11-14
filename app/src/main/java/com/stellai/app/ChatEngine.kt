@@ -10,6 +10,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -358,11 +359,201 @@ class ChatEngine(private val app: App) {
     fun stop() {
         stopRequested = true
         client.cancel()
+        pendingApproval?.decline()   // a waiting OK can't hold up Stop
+        replyCall?.cancel()
+        val run = replyRunId
+        if (run.isNotEmpty()) app.scope.launch(Dispatchers.IO) {
+            try {
+                HubApi.replyStop(app.settings.serverUrl, app.settings.apiKey, run)
+            } catch (_: Exception) {
+            }
+        }
         job?.cancel()
+    }
+
+    // ---- Replies run on the server -------------------------------------------------------------------------
+    // The server does the whole reply (instant answers, Auto mode, the model, its tools, continuing a long reply)
+    // and streams events. The phone shows them, speaks the reply, runs phone actions when asked, and asks for the
+    // user's OK when needed. Older servers (no "server_replies" in /prompts) use runConversation's own loop.
+    @Volatile
+    private var replyCall: okhttp3.Call? = null
+    @Volatile
+    private var replyRunId = ""
+
+    private suspend fun runOnServer(convId: String, fromVoice: Boolean, newPhotos: List<String>, fresh: Boolean) {
+        val gen = generation
+        var memoryChanged = false
+        var projectChanged = false
+        var remindersChanged = false
+        var finalReply = ""
+        status = "Contacting server…"
+        val projectId = conversations.firstOrNull { it.id == convId }?.projectId.orEmpty()
+        val mode = modeOf(convId)
+        app.avatarEvent("thinking", voice = fromVoice)
+        val speakOut = fromVoice && app.settings.speakReplies && !app.avatarSpeaking
+        val feeder = SentenceFeeder { piece -> main.post { app.speaker.enqueue(piece) } }
+        if (speakOut) main.post { app.speaker.stop() }
+        val streamId = STREAMING_PREFIX + UUID.randomUUID()
+
+        fun noteTool(name: String) {
+            if (name == "remember" || name == "forget") memoryChanged = true
+            if (name == "project_note") projectChanged = true
+            if (name == "set_reminder" || name == "cancel_reminder") remindersChanged = true
+        }
+
+        suspend fun answer(ev: JSONObject, answer: JSONObject) {
+            try {
+                withContext(Dispatchers.IO) {
+                    HubApi.replyAnswer(app.settings.serverUrl, app.settings.apiKey, replyRunId, ev.optString("call_id"), answer)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+
+        suspend fun handle(ev: JSONObject) {
+            if (gen != generation) return
+            when (ev.optString("type")) {
+                "run" -> replyRunId = ev.optString("run_id")
+                "status" -> status = ev.optString("text")
+                "tool" -> {
+                    val name = ev.optString("name")
+                    noteTool(name)
+                    status = (if (ServerTools.has(name)) ServerTools.displayName(name) else PhoneTools.displayName(name)) + "…"
+                    messages.removeAll { it.id == streamId }
+                    // checking something takes a moment: say so instead of going quiet
+                    if (speakOut && !feeder.saidAny) {
+                        feeder.saidAny = true
+                        app.speaker.enqueue(ACKS.random())
+                    }
+                }
+                "delta" -> {
+                    val visible = ev.optString("text")
+                    val reasoning = ev.optString("reasoning")
+                    if (speakOut) feeder.feed(visible)
+                    status = if (visible.isBlank() && reasoning.isNotBlank()) "Thinking…" else "Writing…"
+                    if (messages.none { it.id == streamId }) messages.add(UiMessage(streamId, Role.ASSISTANT, ""))
+                    updateMessage(streamId) { it.copy(text = visible, reasoning = reasoning) }
+                }
+                "message" -> {
+                    val m = ev.optJSONObject("message")?.let { StoredMessage.fromJson(it) } ?: return
+                    app.store.saveMessage(m, dirty = false)   // already on the server
+                    lastTs = maxOf(lastTs, m.updatedAt, m.createdAt)
+                    messages.removeAll { it.id == streamId }
+                    if (convId == currentId) loadMessages(convId)
+                    if (m.role == Role.ASSISTANT) {
+                        finalReply = m.text
+                        if (speakOut) feeder.feed(m.text, finish = true)
+                    }
+                    if (m.role == Role.TOOL && DOC_REF.containsMatchIn(m.text) && convId == currentId) docsChanged++
+                }
+                "mode" -> autoActive[convId] = ev.optString("mode")
+                "context" -> context = ContextInfo(ev.optInt("used"), ev.optInt("limit"),
+                    context?.nCtx ?: ev.optInt("limit"), context?.projectTokens ?: 0)
+                "changed" -> remindersChanged = true
+                "client_tool" -> {
+                    val name = ev.optString("name")
+                    noteTool(name)
+                    status = PhoneTools.displayName(name) + "…"
+                    val o = PhoneTools.execute(app, name, ev.optString("arguments"))
+                    answer(ev, JSONObject().put("summary", ActionButtons.attach(o.summary, o.button)).put("result", o.result))
+                }
+                "approval" -> {
+                    val ok = askApproval(ev.optString("name"), ev.optJSONObject("args") ?: JSONObject())
+                    answer(ev, JSONObject().put("approved", ok))
+                }
+                "done" -> if (!ev.isNull("error") && ev.optString("error").isNotBlank() && !ev.optBoolean("stopped") &&
+                    !stopRequested) {
+                    messages.add(UiMessage(UUID.randomUUID().toString(), Role.ERROR, ev.optString("error")))
+                }
+            }
+        }
+
+        try {
+            withContext(Dispatchers.IO) {
+                // the server reads the photos from its own folder (and shares them with your other devices)
+                for (id in newPhotos) {
+                    try {
+                        HubApi.uploadImage(app.settings.serverUrl, app.settings.apiKey, id, MediaCache.bytes(app, "image:$id"))
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            // the server reads the chat from its own copy, so send it the newest messages first
+            try {
+                app.sync.syncNow()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+            val sticky = synchronized(stickyTools) { stickyTools[convId]?.toSet().orEmpty() }
+            val lastText = messages.lastOrNull { it.role == Role.USER }?.text.orEmpty()
+            val phoneNames = phoneToolsFor(lastText, fromVoice)?.let { it + sticky }
+            val phoneTools = toolDefinitions(projectId.isNotEmpty(), mode, selected = emptyList(), phone = phoneNames)
+            rememberTools(convId, phoneTools)
+            val now = ZonedDateTime.now()
+            val body = JSONObject()
+                .put("client", "phone")
+                .put("name", app.settings.assistantName.ifBlank { "Stella" })
+                .put("voice", fromVoice)
+                .put("fresh", fresh)
+                .put("photos", JSONArray(newPhotos))
+                .put("thinking", app.settings.thinkingMode)
+                .put("auto_level", app.settings.autoModes)
+                .put("forced", forcedMode.remove(convId).orEmpty())
+                .put("now", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+                .put("now_line", "Current time: " +
+                    now.format(DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm 'UTC'xxx (VV)", Locale.ENGLISH)))
+                .put("client_tools", phoneTools)
+            feeder.begin()
+            withContext(Dispatchers.IO) {
+                HubApi.streamReply(app.settings.serverUrl, app.settings.apiKey, convId, body, onCall = { replyCall = it }) { ev ->
+                    runBlocking(Dispatchers.Main) { handle(ev) }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!stopRequested && gen == generation) {
+                messages.add(UiMessage(UUID.randomUUID().toString(), Role.ERROR, friendlyError(e)))
+            }
+            if (fromVoice && !stopRequested && app.settings.speakReplies) {
+                app.speaker.speak("Sorry, I couldn't get an answer from the server.")
+            }
+        } finally {
+            replyCall = null
+            replyRunId = ""
+            if (gen == generation) {
+                messages.removeAll { it.id.startsWith(STREAMING_PREFIX) }
+                if (stopRequested) messages.add(UiMessage(UUID.randomUUID().toString(), Role.ERROR, "Stopped."))
+                busy = false
+                status = ""
+            }
+            app.store.touchConversation(convId, nextTs())
+            reloadConversations()
+            app.sync.request()
+            if (memoryChanged) app.scope.launch { app.memory.refresh() }
+            if (projectChanged) app.scope.launch { app.projects.refresh() }
+            if (remindersChanged) app.scope.launch { app.reminders.refresh() }
+            if (gen == generation) updateMeter()
+            if (finalReply.isNotEmpty() && !stopRequested) app.avatarEvent("reply", finalReply, fromVoice)
+            app.avatarEvent("idle")
+            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.followUp) {
+                when {
+                    speakOut -> main.post { app.speaker.whenDone { app.voice.listenNow(followUp = true) } }
+                    app.avatarSpeaking && app.settings.speakReplies ->
+                        main.postDelayed({ app.voice.listenNow(followUp = true) },
+                            2500L + finalReply.split(Regex("\\s+")).size * 380L)
+                    else -> app.voice.listenNow(followUp = true)
+                }
+            }
+        }
     }
 
     /** fresh: the user just sent this message (not Retry), so the server may answer simple requests at once. */
     private suspend fun runConversation(convId: String, fromVoice: Boolean, newPhotos: List<String>, fresh: Boolean = false) {
+        if (app.modes.serverReplies) return runOnServer(convId, fromVoice, newPhotos, fresh)
         val gen = generation
         var memoryChanged = false
         var projectChanged = false
@@ -388,7 +579,7 @@ class ChatEngine(private val app: App) {
                 val tool = quick.optJSONObject("phone_tool")
                 if (tool != null) {
                     val outcome = PhoneTools.execute(app, tool.optString("name"), (tool.optJSONObject("args") ?: JSONObject()).toString())
-                    addStored(convId, Role.TOOL, outcome.summary)
+                    addStored(convId, Role.TOOL, ActionButtons.attach(outcome.summary, outcome.button))
                     if (outcome.summary.startsWith("✗")) reply = "Sorry, that didn't work: " + outcome.summary.removePrefix("✗").trim()
                 }
                 addStored(convId, Role.ASSISTANT, reply)
@@ -533,7 +724,7 @@ class ChatEngine(private val app: App) {
                             rememberTools(convId, tools)
                         }
                     } else {
-                        addStored(convId, Role.TOOL, outcome.summary)
+                        addStored(convId, Role.TOOL, ActionButtons.attach(outcome.summary, outcome.button))
                     }
                     turn.add(JSONObject()
                         .put("role", "tool")
@@ -590,6 +781,19 @@ class ChatEngine(private val app: App) {
         if (convId == currentId) messages.add(m.toUi())
     }
 
+    /** The Cancel/Undo button under a phone action: runs it, then notes on the line what happened (synced). */
+    fun pressAction(messageId: String) {
+        val convId = currentId ?: return
+        val stored = app.store.messages(convId).firstOrNull { it.id == messageId } ?: return
+        val (_, button) = ActionButtons.split(stored.text)
+        if (button == null) return
+        val outcome = PhoneTools.execute(app, button.tool, button.args)
+        val text = ActionButtons.afterPress(stored.text, button, outcome.summary)
+        app.store.saveMessage(stored.copy(text = text, updatedAt = nextTs()))
+        updateMessage(messageId) { it.copy(text = text) }
+        app.sync.request()
+    }
+
     private fun updateMessage(id: String, change: (UiMessage) -> UiMessage) {
         val i = messages.indexOfFirst { it.id == id }
         if (i >= 0) messages[i] = change(messages[i])
@@ -627,7 +831,7 @@ class ChatEngine(private val app: App) {
                     pending.append(m.text).append('\n')
                 }
                 Role.TOOL -> if (!m.text.startsWith("⇄")) pending.append("(action result: ")
-                    .append(m.text.replace(DIAGRAM_REF, "[diagram shown]").trim())
+                    .append(ActionButtons.strip(m.text).replace(DIAGRAM_REF, "[diagram shown]").trim())
                     .append(")\n")
                 Role.ERROR, Role.SUMMARY -> {}
             }
@@ -814,13 +1018,7 @@ class ChatEngine(private val app: App) {
      * Phone actions this message might need. Voice commands get all of them (they're usually actions);
      * typed messages only the ones whose keywords appear, since every tool description costs context.
      */
-    private fun phoneToolsFor(text: String, fromVoice: Boolean): Set<String>? {
-        if (fromVoice) return null
-        val t = text.lowercase()
-        val out = mutableSetOf<String>()
-        for ((name, rx) in PHONE_TRIGGERS) if (rx.containsMatchIn(t)) out.add(name)
-        return out
-    }
+    private fun phoneToolsFor(text: String, fromVoice: Boolean): Set<String>? = PhoneToolPicker.pick(text, fromVoice)
 
     private fun rememberTools(convId: String, tools: JSONArray) {
         val names = (0 until tools.length()).mapNotNull { tools.optJSONObject(it)?.optJSONObject("function")?.optString("name") }
@@ -1018,20 +1216,7 @@ class ChatEngine(private val app: App) {
         return if (oneLine.length <= 48) oneLine else oneLine.take(47).trimEnd() + "…"
     }
 
-    fun friendlyError(e: Exception): String {
-        val msg = e.message.orEmpty()
-        return when {
-            e is java.net.ConnectException || msg.contains("Failed to connect") ->
-                "Can't reach the server at ${app.settings.serverUrl}. Is the server running, and is the phone on the same Wi-Fi or Tailscale?"
-            e is java.net.SocketTimeoutException -> "The server took too long to respond."
-            e is java.net.UnknownHostException -> "That server address doesn't look right. Check Settings."
-            msg.contains("HTTP 401") -> "The API key was rejected. Copy it again from the server's terminal into Settings."
-            msg.contains("HTTP 404") -> "The server is out of date. Re-run the setup script on it."
-            msg.contains("image input is not supported", ignoreCase = true) || msg.contains("mmproj", ignoreCase = true) ->
-                "Photo understanding isn't set up on the server. Re-run the setup script and say yes to the vision add-on."
-            else -> msg.ifBlank { e.javaClass.simpleName }
-        }
-    }
+    fun friendlyError(e: Exception): String = friendlyErrorText(e, app.settings.serverUrl)
 
     companion object {
         private val ACKS = listOf("One sec, let me check.", "Let me look that up.", "On it, one moment.", "Just a moment.")
@@ -1049,33 +1234,6 @@ class ChatEngine(private val app: App) {
         /** Refresh the context automatically once it is this full. */
         private const val REFRESH_AT = 0.85f
         val PROJECT_TOOLS = setOf("project_note", "project_search")
-        private val PHONE_TRIGGERS = mapOf(
-            "set_alarm" to Regex("alarm|wake me"),
-            "set_timer" to Regex("timer|countdown|count down"),
-            "open_app" to Regex("\\bopen\\b|launch|\\bstart\\b|\\bplay\\b|\\bapp\\b|spotify|youtube|camera"),
-            "open_url" to Regex("https?://|website|\\burl\\b|\\blink\\b|go to "),
-            "navigate_to" to Regex("navigat|direction|drive to|route|\\bmaps?\\b|take me|how do i get"),
-            "draft_text_message" to Regex("\\btext\\b|\\bsms\\b|message (to|for)|send .* (a )?message|tell \\w+ that"),
-            "dial_number" to Regex("\\bcall\\b|\\bdial\\b|phone (number|him|her|them)"),
-            "create_calendar_event" to Regex("calendar|event|meeting|appointment|schedule"),
-            "set_flashlight" to Regex("flash ?light|torch|\\blight\\b"),
-            "set_media_volume" to Regex("volume|louder|quieter|\\bmute|turn (it )?(up|down)"),
-            "get_battery_status" to Regex("battery|charg(e|ing) level|how much charge"),
-            "cancel_alarm" to Regex("alarm"),
-            "alarm_info" to Regex("alarm"),
-            "open_clock" to Regex("alarm|timer"),
-            "cancel_timer" to Regex("timer"),
-            "media_control" to Regex("\\bplay|pause|resume|skip|next (song|track)|previous|\\bsong|track|music|podcast|stop (the )?(music|song|video)"),
-            "now_playing" to Regex("\\bsong|track|playing|music|listening|what'?s this"),
-            "play_music" to Regex("\\bplay\\b|\\bsong|music|album|playlist|artist|put on"),
-            "uplink_download" to Regex("download|uplink|save (this|that|the) (song|video|track)|grab (this|that|the)"),
-            "set_sound_mode" to Regex("silent|vibrat|do not disturb|\\bdnd\\b|ringer|\\bmute|sound (on|off)|quiet mode"),
-            "set_brightness" to Regex("bright|\\bdim\\b|darker|screen light"),
-            "open_settings" to Regex("wi-?fi|bluetooth|mobile data|airplane|flight mode|hotspot|\\bnfc\\b|location|\\bgps\\b|settings"),
-            "read_notifications" to Regex("notification|\\bmessages?\\b|e-?mails?|whatsapp|unread|anyone (text|message)|did .* (text|message)"),
-            "find_contact" to Regex("\\bcall\\b|\\btext\\b|\\bnumber|contact|message (to|for)"),
-            "upcoming_events" to Regex("calendar|schedule|appointment|meeting|what'?s on|agenda|\\bbusy\\b|free (on|this|tomorrow|today)"),
-        )
         /** Server tools kept in "minimal" modes such as Writer. */
         private val MINIMAL_SERVER_TOOLS = setOf("remember", "forget", "project_note", "project_search", "library_search",
             "set_reminder", "add_to_list", "web_search", "fetch_page")

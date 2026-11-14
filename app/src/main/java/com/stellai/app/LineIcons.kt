@@ -15,7 +15,14 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -112,6 +119,15 @@ object LineIcons {
     val Reminder get() = Icons.Outlined.Alarm
     val Pin get() = Icons.Outlined.PushPin
     val Document get() = Icons.Outlined.Description
+    val Undo get() = Icons.AutoMirrored.Outlined.Undo
+    val Cancel get() = Icons.Outlined.Cancel
+    val Mic get() = Icons.Outlined.Mic
+    val Memory get() = Icons.Outlined.Psychology
+    val Phone get() = Icons.Outlined.PhoneAndroid
+    val Sync get() = Icons.Outlined.Sync
+    val Code get() = Icons.Outlined.Code
+    val Open get() = Icons.Outlined.ExpandMore
+    val Close get() = Icons.Outlined.ExpandLess
 }
 
 /** A small line icon followed by text, in one colour. */

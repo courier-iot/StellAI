@@ -96,6 +96,47 @@ object HubApi {
         .url("${url(serverUrl)}$path")
         .header("Authorization", "Bearer ${apiKey.trim()}")
 
+    // ---- Replies run on the server ------------------------------------------------------------------------------
+    /** Long-lived: a reply streams for as long as Stella writes, runs tools or waits for a phone action. */
+    private val replyHttp = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.MINUTES)
+        .build()
+
+    /**
+     * Runs one reply on the server (POST /chats/<id>/reply): calls [onEvent] for each event it streams back
+     * (status, delta, message, client_tool, approval, done …), on this thread. [onCall] gets the request so Stop
+     * can cancel it.
+     */
+    fun streamReply(serverUrl: String, apiKey: String, convId: String, body: JSONObject,
+                    onCall: (okhttp3.Call) -> Unit, onEvent: (JSONObject) -> Unit) {
+        val request = authed(serverUrl, apiKey, "/chats/$convId/reply")
+            .post(body.toString().toRequestBody(JSON)).build()
+        val call = replyHttp.newCall(request)
+        onCall(call)
+        call.execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty().take(300)}")
+            val source = response.body?.source() ?: throw IOException("The server sent nothing")
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isBlank()) continue
+                val event = try {
+                    JSONObject(line)
+                } catch (_: Exception) {
+                    continue
+                }
+                onEvent(event)
+            }
+        }
+    }
+
+    /** The app's answer to a reply's question (a phone action's result, or the user's OK). */
+    fun replyAnswer(serverUrl: String, apiKey: String, runId: String, callId: String, answer: JSONObject): JSONObject =
+        postJson(serverUrl, apiKey, "/replies/$runId/answer", JSONObject().put("call_id", callId).put("answer", answer))
+
+    fun replyStop(serverUrl: String, apiKey: String, runId: String): JSONObject =
+        postJson(serverUrl, apiKey, "/replies/$runId/stop", JSONObject())
+
     /** A chat's pinned notes: {"notes": [{id, text, source}]}. */
     fun chatNotes(serverUrl: String, apiKey: String, convId: String): JSONObject =
         getJson(serverUrl, apiKey, "/chats/$convId/notes")
@@ -243,6 +284,10 @@ object HubApi {
 
     // ---- Server status, models, health check, backups, chat search --------------------------
     fun server(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/server")
+
+    /** "Check for updates": {started, message}. The server restarts by itself if it finds a new version. */
+    fun checkForUpdate(serverUrl: String, apiKey: String): JSONObject =
+        postJson(serverUrl, apiKey, "/server/update", JSONObject())
 
     fun switchModel(serverUrl: String, apiKey: String, key: String): String =
         postJson(serverUrl, apiKey, "/server/model", JSONObject().put("key", key)).optString("message")

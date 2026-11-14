@@ -312,16 +312,48 @@ object PhoneExtras {
     }
 
     // ---- Sound ---------------------------------------------------------------------------------
+    /** The setting an action is about to change, as it is now (for its Undo button); null if there's nothing to undo. */
+    fun snapshot(ctx: Context, tool: String, args: JSONObject): JSONObject? = when (tool) {
+        "set_media_volume" -> {
+            val (stream, _) = volumeStream(args)
+            val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = audio.getStreamMaxVolume(stream).coerceAtLeast(1)
+            JSONObject().put("percent", Math.round(100f * audio.getStreamVolume(stream) / max))
+                .put("stream", args.optString("stream", "media"))
+        }
+        "set_brightness" -> {
+            val cr = ctx.contentResolver
+            val auto = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, 0) ==
+                Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+            JSONObject().put("auto", auto)
+                .put("percent", Math.round(100f * Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128) / 255))
+        }
+        "set_sound_mode" -> {
+            val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            JSONObject()
+                .put("ringer", when (audio.ringerMode) {
+                    AudioManager.RINGER_MODE_SILENT -> "silent"
+                    AudioManager.RINGER_MODE_VIBRATE -> "vibrate"
+                    else -> "normal"
+                })
+                .put("dnd", nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL)
+        }
+        else -> null
+    }
+
+    private fun volumeStream(args: JSONObject): Pair<Int, String> = when (args.optString("stream", "media").lowercase()) {
+        "ring", "ringer", "ringtone" -> AudioManager.STREAM_RING to "Ring"
+        "alarm", "alarms" -> AudioManager.STREAM_ALARM to "Alarm"
+        "notification", "notifications" -> AudioManager.STREAM_NOTIFICATION to "Notification"
+        "call", "voice" -> AudioManager.STREAM_VOICE_CALL to "Call"
+        else -> AudioManager.STREAM_MUSIC to "Media"
+    }
+
     fun setVolume(ctx: Context, args: JSONObject): Res {
         val percent = args.optInt("percent", -1)
         if (percent !in 0..100) return Res(false, "Volume must be 0-100")
-        val (stream, name) = when (args.optString("stream", "media").lowercase()) {
-            "ring", "ringer", "ringtone" -> AudioManager.STREAM_RING to "Ring"
-            "alarm", "alarms" -> AudioManager.STREAM_ALARM to "Alarm"
-            "notification", "notifications" -> AudioManager.STREAM_NOTIFICATION to "Notification"
-            "call", "voice" -> AudioManager.STREAM_VOICE_CALL to "Call"
-            else -> AudioManager.STREAM_MUSIC to "Media"
-        }
+        val (stream, name) = volumeStream(args)
         val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val max = audio.getStreamMaxVolume(stream)
         try {

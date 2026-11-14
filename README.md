@@ -1,13 +1,13 @@
 # StellAI
 
-Meet **Stella**, your personal voice assistant and chat app, powered by the AI model on your own computer (llama.cpp + Whisper). Nothing goes to the cloud. You can rename her in Settings → Assistant.
+Meet **Stella**, your personal voice assistant and chat app, powered by the AI model on your own computer (llama.cpp + Whisper). Nothing goes to the cloud. You can rename her in Settings → Stella.
 
 - **Wake word**: say "Hey Jarvis" (or "Alexa" / "Hey Mycroft") and give a command, hands-free.
 - **Default assistant**: long-press the power or home button to talk, instead of Google.
 - **Phone actions**: set and turn off alarms and timers, play/pause/skip music and play songs by name, what's playing, volumes, silent and Do Not Disturb, brightness, reading notifications, contacts and calendar, quick settings panels, opening apps, maps, flashlight, battery, plus drafting texts, dialing and calendar events (which you confirm). See [Phone access](#phone-access).
 - **Spoken replies** through the phone's text-to-speech voice.
 - **Chats sync** across every phone and tablet, stored on your server.
-- **Space theme**: starfield background, HUD-style chat, glowing mic, and 8 accent colors (Settings → Assistant → Theme color).
+- **Space theme**: starfield background, HUD-style chat, glowing mic, and 8 accent colors (Settings → Stella → Theme color).
 
 ## Get the APK (no PC tools needed)
 
@@ -90,7 +90,7 @@ The context window (how much of a chat Stella holds at once) is sized for the co
 
 Both servers keep themselves up to date from this GitHub repo, checking every 30 minutes. They only install an update when Stella has been idle for a couple of minutes, and your chats, memories, projects, models and settings are never touched.
 
-- **Linux**: the server program (`stellai_hub.py`) downloads the new version, tests it, then restarts itself. If a new version fails to start, it goes back to the previous one automatically and skips that version. To turn updates off: `touch ~/llm/no-auto-update`. Changes to the setup script itself (new engine builds, launchers) still need a re-run of `stellai-setup.sh`.
+- **Linux**: the server program (`stellai_hub.py`) downloads the new version, tests it, then restarts itself. If a new version fails to start, it goes back to the previous one automatically and skips that version. To turn updates off: `touch ~/llm/no-auto-update`. To check right away, tap **Check for updates** on the phone's Server screen. Changes to the setup script itself (new engine builds, launchers) still need a re-run of `stellai-setup.sh`.
 - **Windows**: every build on the main branch is published as a release (`windows-v0.1.N`). The app downloads it, checks its checksum, and reinstalls itself silently, without an admin prompt. See *Options* in the app to check now or turn automatic installs off.
 
 ## Set up
@@ -101,7 +101,7 @@ Both servers keep themselves up to date from this GitHub repo, checking every 30
 
 ### Make it your voice assistant
 
-In Settings → **Voice assistant**:
+In Settings → **Voice**:
 
 1. Turn on **Wake word**, pick a phrase, and allow microphone and notifications.
 2. Tap **Allow background actions** and allow "Display over other apps". Without it, Android stops voice commands from opening apps while StellAI isn't on screen.
@@ -151,7 +151,7 @@ Drawer → **Server** on the phone, or **Server** at the bottom of the desktop c
 
 Stella gets a face and a voice: a full-screen page with an animated **space orb** or your own **3D character**, which listens, thinks, talks with a natural voice and moves her mouth while speaking. Each screen speaks only the conversations held on it, so a reply is never said twice; in gear → Voice you can let a screen also speak replies to the StellAI phone app, or to every device (handy for a Pi screen in the kitchen). Subtitles show in a small window below her (or beside her, over her film-style, or off — also per screen).
 
-**Phone app in the background:** StellAI stays connected when you switch apps (Settings → "Stay connected in the background", on by default), with a quiet notification while it's on. If your phone still cuts it off, use the "Allow running without battery limits" button under that switch.
+**Phone app in the background:** StellAI stays connected when you switch apps (Settings → Phone access → "Stay connected in the background", on by default), with a quiet notification while it's on. If your phone still cuts it off, use the "Allow running without battery limits" button under that switch.
 
 - **On the server PC**: menu → **StellAI Avatar** (Linux) or **Avatar screen** in the Windows app.
 - **Spare phone or tablet**: install the StellAI app, connect it, then drawer → **✦ Avatar screen**. The screen stays on; talk with the big mic button or the app's wake word.
@@ -207,7 +207,7 @@ Stella can look things up online (docs, part availability, error messages) and r
 
 ## GitHub
 
-Settings → **GitHub**: add a fine-grained token (Contents read & write, Pull requests read & write, Actions read, Issues read) and a default repository. Then ask things like "why did my last build fail?", "explain ChatScreen.kt" or "fix it". Stella can read code, search it, read commits, issues and **build logs**, and **commit fixes to a new branch and open a pull request**. Every commit and pull request shows you the exact changes first and only happens if you tap **Approve**; she never commits to your main branch. The token is stored on your server, not on the phone.
+Settings → **Advanced** → GitHub: add a fine-grained token (Contents read & write, Pull requests read & write, Actions read, Issues read) and a default repository. Then ask things like "why did my last build fail?", "explain ChatScreen.kt" or "fix it". Stella can read code, search it, read commits, issues and **build logs**, and **commit fixes to a new branch and open a pull request**. Every commit and pull request shows you the exact changes first and only happens if you tap **Approve**; she never commits to your main branch. The token is stored on your server, not on the phone.
 
 ## Modes
 
@@ -232,7 +232,7 @@ In a **General** chat Stella picks the mode that fits each message by herself, s
 - **Sticky**: she stays in the current mode for follow-ups and only switches when she's sure. In the 3D Modeler, CAD Designer and PCB Designer she won't leave a job half-done unless you clearly change topic ("different project", "now let's…").
 - **Learns from you**: when you correct her with the chip, she remembers the phrase for next time. She can also switch herself mid-answer when she realises another mode fits.
 - **Focused**: earlier topics in other modes are folded into a short note that keeps exact numbers and decisions, so a long mixed chat doesn't confuse her. Say "back to the app" to pick an earlier topic up again.
-- **Settings → Switching modes by herself**: *Auto* (switch when sure), *Ask first* (only suggest), or *Off*. Picking a mode yourself always wins.
+- **Settings → Stella → Switching modes by herself**: *Auto* (switch when sure), *Ask first* (only suggest), or *Off*. Picking a mode yourself always wins.
 
 Make your own in the mode picker → **Manage modes** (or copy a built-in one and change it): instructions, creativity, whether she thinks first, fewer tools, and *story memory*, which makes context refreshes keep characters, plot and style instead of tasks. Your modes and each chat's mode sync to all your devices.
 
@@ -342,7 +342,7 @@ Long-press any message to **Copy**, **Share**, **Retry** (Stella's last reply) o
 
 ## Custom wake word ("Hey Stella")
 
-Train a model (see below), then copy the `.onnx` file into `~/llm/wakewords/` on the server. It shows up with a ✦ in Settings → Voice assistant → Wake word, and the app downloads it the first time you use it.
+Train a model (see below), then copy the `.onnx` file into `~/llm/wakewords/` on the server. It shows up with a ✦ in Settings → Voice → Wake word, and the app downloads it the first time you use it.
 
 Training: open the [openwakeword-colab-2026 notebook](https://colab.research.google.com/github/alfiedennen/openwakeword-colab-2026/blob/main/train_wakeword.ipynb) in Google Colab, set `TARGET_PHRASE = "hey stella"` and `MODEL_NAME = "hey_stella"`, choose a GPU runtime and **Run all**. It takes about 1.5 hours on Colab Pro, or about 2.5 hours on the free tier (keep the tab open), and downloads `hey_stella.onnx` at the end.
 
@@ -357,6 +357,8 @@ Some phone actions need an access that Android keeps off until you allow it: **S
 | Brightness ("Modify system settings") | change the screen brightness |
 | Contacts & calendar | find numbers by name ("text Mom"), read upcoming events |
 
+**Cancel and Undo:** after Stella sets a timer or an alarm, its line in the chat has a **Cancel** button; after she changes the volume, brightness, sound mode or flashlight, an **Undo** button puts it back as it was. The line then says *cancelled* or *undone*.
+
 What Android doesn't let any app do, so Stella can't either: **list or delete alarms** (she turns them off through the clock app, which may ask you to confirm; she can tell you when the next one rings), and **switch Wi-Fi, Bluetooth, mobile data or airplane mode** (she opens the panel and you tap the switch). Playing a song by name works with music apps that accept play requests (Spotify, YouTube Music and most others). With **Stellar Disc** 3.4.0 or newer installed, "play ..." goes there unless another app is already playing or you name one, and "download Midnight City by M83" sends it to Stellar Disc's Uplink (as music or video, at your Autopilot quality). Uplink opens filled in for you to tap Download, unless you switch on *Let assistants start downloads* in Stellar Disc's settings.
 
 Android 13+ and "restricted setting": because StellAI is installed from a file, Android greys out Notification access at first. Open **App info → ⋮ → Allow restricted settings**, then allow it (the app links there).
@@ -368,9 +370,11 @@ All tools live in `app/src/main/java/com/stellai/app/PhoneTools.kt`: add a defin
 ## How the code is organized (for changing it)
 
 - **The server** is edited as sections in `server/hub/`: `00_core.py`, `01_chat_store.py`, … `60_http.py`, `70_main.py`, plus `server/webchat.html` (the desktop chat) and `server/avatar.js`. After editing any of them, run `python3 server/build_hub.py`: it joins them into `server/stellai_hub.py`, the one file installed servers download when they update. Upload that file together with the sections you changed. The sections share one namespace, as if they were one file, so they don't import each other.
+- **Replies run on the server** (`server/hub/32_server_replies.py`): the phone and the desktop chat send the message to `/chats/<id>/reply`, and the server does the rest — instant answers, Auto mode, making room in a long chat, the model, its tools, continuing a long reply — streaming events back. When Stella wants a phone action or your OK for a GitHub commit, the server asks the app and waits for its answer. So a change to how she replies is made once, on the server, and every app gets it. (An older server without this makes the apps use their own reply code, which is still there as a fallback.)
 - **Stella's instructions and the built-in modes** have one copy, in `server/hub/16_instructions_and_modes.py`. The phone and the desktop chat fetch them from the server (`/prompts`) and keep a copy for when it's briefly unreachable, so changing a line there changes it everywhere.
 - **The web addresses** the server answers are in `server/hub/60_http.py`, each right below its `@routes.add(...)` line. `docs/api.md` lists them all.
 - **The Linux setup** (`server/stellai-setup.sh`) installs `stellai_hub.py` and `stellai_tune.py` from the same folder, or downloads them from GitHub when it's run on its own. The Proxmox script copies all three into the container.
+- **App tests:** `app/src/test` holds the phone app's own tests (`gradle testDebugUnitTest`). GitHub runs them before building the APK, and a failure stops the release, so a broken app never reaches your store.
 - **Tests:** `python3 tests/run_tests.py` runs them all (or `python3 tests/run_tests.py documents` for some). Stand-in programs in `tests/fakes` play Blender, FreeCAD, KiCad, the model server and the graphics card, so they run on any Linux PC. GitHub runs them on every upload (the **Tests** workflow): a red cross on the commit means something broke, and the run shows which check.
 
 ## Limits worth knowing

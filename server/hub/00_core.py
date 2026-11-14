@@ -24,6 +24,7 @@ import io
 import json
 import re
 import socket
+import base64
 import sqlite3
 import sys
 import threading

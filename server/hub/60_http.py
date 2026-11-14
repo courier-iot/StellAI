@@ -628,6 +628,45 @@ def make_http_handler(cfg, chats):
     def get_projects(self, path, m):
         return self.send_json(200, {"projects": chats.projects()})
 
+    @routes.add("POST", R(r"/chats/([^/]{1,64})/reply"))   # the server runs the whole reply, streamed as events
+    def post_chat_reply(self, path, m):
+        try:
+            data = json.loads(self.read_body(2_000_000) or b"{}")
+        except ValueError as e:
+            return self.send_json(400, {"error": f"bad request: {e}"})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        lock = threading.Lock()
+
+        def send(event):
+            with lock:
+                self.wfile.write((json.dumps(event) + "\n").encode())
+                self.wfile.flush()
+        start_reply(m.group(1), data, send)
+
+    @routes.add("POST", R(r"/replies/([0-9a-f]{12})/answer"))   # the app's answer: a phone action's result, an OK
+    def post_reply_answer(self, path, m):
+        try:
+            data = json.loads(self.read_body(2_000_000) or b"{}")
+        except ValueError as e:
+            return self.send_json(400, {"error": f"bad request: {e}"})
+        return self.send_json(200, {"ok": reply_answer(m.group(1), data.get("call_id"), data.get("answer"))})
+
+    @routes.add("POST", R(r"/replies/([0-9a-f]{12})/stop"))
+    def post_reply_stop(self, path, m):
+        return self.send_json(200, {"ok": reply_stop(m.group(1))})
+
+    @routes.add("POST", "/server/update")   # "Check for updates": wakes the update loop now
+    def post_server_update(self, path, m):
+        started, message = request_update_check()
+        return self.send_json(200, {"started": started, "message": message, "last_check": UPDATER["last_check"],
+                                    "last_result": UPDATER["last_result"]})
+
     @routes.add("GET", "/prompts")   # Stella's instructions and the built-in modes (the apps cache them)
     def get_prompts(self, path, m):
         return self.send_json(200, prompts_payload())

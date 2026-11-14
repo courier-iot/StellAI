@@ -121,6 +121,8 @@ def self_test():
     assert h.find("GET", "/docs/0123456789/versions/3", "key")[1].group(2) == "3"
     assert h.find("POST", "/tools/web_search", "key")[0] and not h.find("GET", "/nope", "key")[0]
     assert h.find("GET", "/health", "first")[0] and h.find("GET", "/chat", "open")[0]
+    started, msg = request_update_check()
+    assert not started and msg and not UPDATE_WAKE.is_set()
     print("self-test ok")
 
 
@@ -192,12 +194,31 @@ UPDATE_INTERVAL = int(os.environ.get("STELLAI_UPDATE_INTERVAL", "1800"))   # 30 
 IDLE_QUIET = int(os.environ.get("STELLAI_IDLE_QUIET", "120"))             # no requests for 2 minutes
 
 
+# The update check runs every UPDATE_INTERVAL; "Check for updates" in the apps (POST /server/update) wakes it early.
+UPDATER = {"repo": "", "last_check": 0, "last_result": ""}
+UPDATE_WAKE = threading.Event()
+
+
+def request_update_check():
+    """Asks the update loop to check GitHub now. Returns (started, message for the user)."""
+    if not UPDATER["repo"]:
+        if getattr(sys, "frozen", False):
+            return False, "The Windows app updates itself; use its Check for updates."
+        return False, "This server isn't set to update from GitHub (re-run the setup and turn updates on)."
+    UPDATE_WAKE.set()
+    return True, "Checking GitHub now. If there's a new version, Stella restarts in about a minute (chats are kept)."
+
+
 def updater_loop(repo, token="", interval=None):
     interval = interval or UPDATE_INTERVAL
-    time.sleep(min(90, interval))
+    UPDATER["repo"] = repo
+    UPDATE_WAKE.wait(min(90, interval))
     while True:
+        UPDATE_WAKE.clear()
+        UPDATER["last_check"] = int(time.time() * 1000)
         try:
             update_companions(repo, token)
+            UPDATER["last_result"] = "up to date"
             if check_for_update(repo, token):
                 log("installed an update from GitHub; restarting the hub (chats and settings are kept)")
                 global EXIT_CODE
@@ -206,8 +227,9 @@ def updater_loop(repo, token="", interval=None):
                     WEB.shutdown()
                 return
         except Exception as e:  # never let a failed check stop the hub
+            UPDATER["last_result"] = f"check failed: {e}"
             log(f"update check failed: {e}")
-        time.sleep(interval)
+        UPDATE_WAKE.wait(interval)
 
 
 OPTIONAL_PACKAGES = {"pypdf": "pypdf"}   # import name -> pip package; installed into the hub's venv if missing

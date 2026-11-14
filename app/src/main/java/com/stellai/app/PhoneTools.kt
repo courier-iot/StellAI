@@ -22,7 +22,8 @@ import java.time.ZoneId
  */
 object PhoneTools {
 
-    data class Outcome(val summary: String, val result: String)
+    /** summary = the chat line ("✓ …" or "✗ …"); result = what the model is told; button = Cancel/Undo, if any. */
+    data class Outcome(val summary: String, val result: String, val button: ActionButton? = null)
 
     fun definitions(): JSONArray = JSONArray().apply {
         put(tool("set_alarm", "Wake-up alarm in the clock app.",
@@ -142,6 +143,16 @@ object PhoneTools {
         } catch (e: Exception) {
             JSONObject()
         }
+        val before = try {
+            PhoneExtras.snapshot(ctx, name, args)   // the setting as it was, so it can be undone
+        } catch (_: Exception) {
+            null
+        }
+        val out = perform(ctx, name, args)
+        return if (out.summary.startsWith("✓")) out.copy(button = ActionButtons.forAction(name, args, before)) else out
+    }
+
+    private fun perform(ctx: Context, name: String, args: JSONObject): Outcome {
         return try {
             when (name) {
                 "set_alarm" -> {

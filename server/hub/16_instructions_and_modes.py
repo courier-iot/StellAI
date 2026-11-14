@@ -168,7 +168,8 @@ def instructions_for(client):
 def prompts_payload():
     """GET /prompts: everything the apps need to build Stella's instructions, plus a version to cache by."""
     body = {"instructions": {c: instructions_for(c) for c in ("phone", "web")}, "mode_note": MODE_NOTE,
-            "summary_intro": SUMMARY_INTRO, "voice_style": VOICE_STYLE, "modes": BUILT_IN_MODES}
+            "summary_intro": SUMMARY_INTRO, "voice_style": VOICE_STYLE, "modes": BUILT_IN_MODES,
+            "features": ["server_replies"]}   # what this server can do for the apps (they fall back without it)
     import hashlib
     body["version"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:12]
     return body

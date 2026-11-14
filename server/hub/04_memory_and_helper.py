@@ -226,6 +226,10 @@ def _summarize_once(previous, convo, max_tokens=800, style="work"):
     return out
 
 
+# The phone keeps a Cancel/Undo button at the end of an action line; it's not part of what happened
+BUTTON_MARK = re.compile(r"\n?\[\[button:[^\]\n]*\]\]\s*$")
+
+
 def summarize_chat(previous, messages, style="work"):
     """Rolling summary: long chats are summarized in pieces that fit the model's context."""
     n_ctx = context_size()
@@ -233,7 +237,7 @@ def summarize_chat(previous, messages, style="work"):
     lines = []
     for m in messages:
         role = str(m.get("role", "user"))
-        text = str(m.get("content", "")).strip()
+        text = BUTTON_MARK.sub("", str(m.get("content", ""))).strip()
         if not text or role not in ("user", "assistant", "tool", "summary"):
             continue
         label = {"user": "USER", "assistant": "ASSISTANT", "tool": "ACTION RESULT", "summary": "EARLIER SUMMARY"}[role]
