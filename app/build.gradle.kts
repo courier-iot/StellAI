@@ -12,8 +12,8 @@ android {
         applicationId = "com.stellai.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.27.0"
+        versionCode = 40
+        versionName = "0.27.1"
 
         // ONNX Runtime (wake word) ships native code; phones only need ARM.
         ndk {
@@ -21,9 +21,24 @@ android {
         }
     }
 
+    // Release signing: GitHub Actions decodes the SIGNING_KEY_BASE64 secret to a file and passes its path and
+    // passwords here (see .github/workflows/build.yml). Without them, only the debug APK can be built.
+    val keystore = System.getenv("SIGNING_KEYSTORE_FILE")
+    signingConfigs {
+        if (!keystore.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (!keystore.isNullOrBlank()) signingConfig = signingConfigs.getByName("release")
         }
     }
 
