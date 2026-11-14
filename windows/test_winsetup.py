@@ -370,6 +370,23 @@ def test_tuned_plans():
         assert ws.helper_args(cfg, pl) and "--helper" in ws.hub_args(cfg)
 
 
+def test_mermaid():
+    sums = ("aa11  node-v22.12.0-darwin-arm64.tar.gz\nBB22  node-v22.12.0-win-x64.zip\n"
+            "cc33  node-v22.12.0-win-x86.zip\ndd44  node-v22.12.0-win-x64.7z\n")
+    assert ws.node_zip_entry(sums) == ("bb22", "node-v22.12.0-win-x64.zip")
+    assert ws.node_zip_entry("nothing here") is None
+    tmp = tempfile.mkdtemp()
+    cfg = ws.Config(tmp)
+    assert ws.mermaid_exe(cfg) is None
+    assert "mmdc.cmd" not in " ".join(ws.hub_args(cfg))
+    bin_dir = cfg.p("mermaid", "node_modules", ".bin")
+    os.makedirs(bin_dir)
+    open(os.path.join(bin_dir, "mmdc.cmd"), "w").close()
+    args = ws.hub_args(cfg)
+    assert args[args.index("--mmdc") + 1] == os.path.join(bin_dir, "mmdc.cmd")
+    assert ws.install_mermaid(cfg, lambda m: None) == os.path.join(bin_dir, "mmdc.cmd")   # already there: no download
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

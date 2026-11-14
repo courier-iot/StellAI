@@ -985,6 +985,12 @@ def install(cfg, pl, status, progress, cancel):
     except (RuntimeError, urllib.error.URLError, OSError) as e:
         status(f"File search will use keywords only: {e}")
 
+    try:
+        install_mermaid(cfg, status, cancel)
+    except RuntimeError as e:
+        status(f"Mermaid diagrams skipped ({e}); flowcharts are drawn with schemdraw instead")
+    cfg.set(mermaid_tried=time.time())
+
     for d in ("diagrams", "images", "wakewords", "logs"):
         os.makedirs(cfg.p(d), exist_ok=True)
     api_key(cfg)
@@ -1162,11 +1168,99 @@ def embed_args(cfg):
             "-np", "1", "-t", "2", "--host", "127.0.0.1", "--port", str(EMBED_PORT)]
 
 
+# ============================================================================ Mermaid (block diagrams)
+# Mermaid's renderer runs on Node.js. Like the Linux setup, the app keeps its own copy of Node.js (the official
+# Windows zip, checked against nodejs.org's checksums) and installs mermaid-cli into its folder, so nothing is added
+# to the rest of the PC. Existing installs get it in the background the next time the server starts.
+NODE_DIST = "https://nodejs.org/dist/latest-v22.x/"
+MERMAID_RETRY_DAYS = 3
+
+
+def node_zip_entry(sums_text):
+    """(sha256, file name) of the 64-bit Windows Node.js zip listed in a SHASUMS256.txt, or None."""
+    for line in sums_text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r"node-v[\d.]+-win-x64\.zip", parts[1]):
+            return parts[0].lower(), parts[1]
+    return None
+
+
+def mermaid_exe(cfg):
+    path = cfg.p("mermaid", "node_modules", ".bin", "mmdc.cmd")
+    return path if os.path.isfile(path) else None
+
+
+def node_on_path(cfg):
+    """Puts the app's Node.js first on PATH (mmdc.cmd runs "node")."""
+    node = cfg.p("node")
+    if os.path.isfile(os.path.join(node, "node.exe")) and node not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = node + os.pathsep + os.environ.get("PATH", "")
+
+
+def install_mermaid(cfg, status, cancel=None):
+    """Node.js and mermaid-cli in the app's folder. Returns mmdc's path; raises RuntimeError if it can't."""
+    import hashlib
+    if mermaid_exe(cfg):
+        return mermaid_exe(cfg)
+    node = cfg.p("node")
+    if not os.path.isfile(os.path.join(node, "node.exe")):
+        status("Getting Node.js for Mermaid diagrams…")
+        try:
+            with urllib.request.urlopen(urllib.request.Request(NODE_DIST + "SHASUMS256.txt", headers={"User-Agent": UA}),
+                                        timeout=30) as r:
+                entry = node_zip_entry(r.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError) as e:
+            raise RuntimeError(f"couldn't reach nodejs.org ({e})")
+        if not entry:
+            raise RuntimeError("nodejs.org didn't list a Windows build")
+        digest, name = entry
+        zp = os.path.join(cfg.p("downloads"), name)
+        download(NODE_DIST + name, zp, None, cancel)
+        h = hashlib.sha256()
+        with open(zp, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != digest:
+            os.remove(zp)
+            raise RuntimeError("the Node.js download didn't match its checksum")
+        tmp = node + ".part"
+        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(zp) as z:
+            for info in z.infolist():
+                rel = info.filename.split("/", 1)[1] if "/" in info.filename else ""   # drop node-vX-win-x64/
+                if not rel or info.is_dir() or ".." in rel.split("/"):
+                    continue
+                dest = os.path.join(tmp, *rel.split("/"))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with z.open(info) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        shutil.rmtree(node, ignore_errors=True)
+        os.replace(tmp, node)
+        try:
+            os.remove(zp)
+        except OSError:
+            pass
+    status("Installing Mermaid diagrams (about 250 MB, with the browser it draws in)…")
+    env = dict(os.environ, PATH=node + os.pathsep + os.environ.get("PATH", ""))
+    npm = os.path.join(node, "node_modules", "npm", "bin", "npm-cli.js")
+    try:
+        r = subprocess.run([os.path.join(node, "node.exe"), npm, "install", "--prefix", cfg.p("mermaid"), "--no-fund",
+                            "--no-audit", "@mermaid-js/mermaid-cli"], env=env, capture_output=True, text=True,
+                           timeout=1800, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"npm didn't run ({e})")
+    if r.returncode != 0 or not mermaid_exe(cfg):
+        last = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["unknown error"]
+        raise RuntimeError(f"npm couldn't install mermaid-cli: {last[0][:200]}")
+    node_on_path(cfg)
+    return mermaid_exe(cfg)
+
+
 def hub_args(cfg):
     args = ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
             "--image-dir", cfg.p("images"), "--wakeword-dir", cfg.p("wakewords"),
             "--llama", f"http://127.0.0.1:{LLAMA_PORT}", "--whisper", f"http://127.0.0.1:{WHISPER_PORT}",
-            "--mmdc", shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT), "--avatar-dir", cfg.p("avatar")]
+            "--mmdc", mermaid_exe(cfg) or shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT), "--avatar-dir", cfg.p("avatar")]
     if os.path.isfile(cfg.p("models", EMBED_FILE)):
         args += ["--embed", f"http://127.0.0.1:{EMBED_PORT}"]
     if helper_args(cfg, cfg.get("plan") or {}):
@@ -1287,10 +1381,24 @@ class Servers:
                 self.hub.DIAGRAM_RUNNER_CMD = [sys.executable, "--schemdraw-runner"]
                 self.hub.CODE_RUNNER_CMD = [sys.executable, "--python-runner"]
             self.hub.LOG_HOOK = self.log
+            node_on_path(self.cfg)
             self.web = self.hub.start(self.hub.parse_args(hub_args(self.cfg)))
             self.hub.SERVER_CONTROL = WinServerControl(self)   # lets the phone app switch models
             self._move_hooks()
+            if not mermaid_exe(self.cfg) and time.time() - float(self.cfg.get("mermaid_tried") or 0) > MERMAID_RETRY_DAYS * 86400:
+                threading.Thread(target=self._add_mermaid, daemon=True, name="mermaid").start()
             threading.Thread(target=self.web.serve_forever, daemon=True, name="hub").start()
+
+    def _add_mermaid(self):
+        """Installs Mermaid for an existing install, in the background; the server uses it as soon as it's ready."""
+        self.cfg.set(mermaid_tried=time.time())
+        try:
+            path = install_mermaid(self.cfg, self.log)
+            self.hub.MMDC = path
+            self.log("Mermaid diagrams are ready")
+        except RuntimeError as e:
+            self.log(f"Mermaid diagrams couldn't be installed ({e}); flowcharts use schemdraw. Trying again in "
+                     f"{MERMAID_RETRY_DAYS} days.")
 
     # ---- moving Stella to another server, and back ------------------------------------------------------------
     on_moved = None        # set by the app: called with the new server's info after Stella moved away

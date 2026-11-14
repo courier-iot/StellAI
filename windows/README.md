@@ -67,7 +67,7 @@ Under *Options* you can see the version, **Check now** / **Install now**, and tu
 ## Differences from Linux
 
 - Uses prebuilt engines instead of compiling them, so there's no build step.
-- Mermaid flowcharts work only if you install Node.js and then `npm install -g @mermaid-js/mermaid-cli`. Without it, Stella draws flowcharts with schemdraw instead. Schematics and timing diagrams work out of the box.
+- Mermaid flowcharts: the app installs them itself, with its own copy of Node.js in `%LOCALAPPDATA%\StellAI\node` (about 250 MB including the browser Mermaid draws in). Existing installs get it in the background the next time the server starts; the log says *Mermaid diagrams are ready*. If it can't (no internet, say), it tries again after 3 days, and Stella draws flowcharts with schemdraw meanwhile. Schematics and timing diagrams work out of the box.
 - Diagram code is limited by a 40-second time limit rather than Linux's CPU and memory limits.
 
 ## Build or run from source
