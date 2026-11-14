@@ -83,6 +83,10 @@ This list is made by `python3 server/stellai_hub.py --list-routes`; the tests fa
 | GET | `/docs/([0-9a-f]{10})` | API key |
 | GET | `/docs/([0-9a-f]{10})/versions/(\d+)` | API key |
 | GET | `/projects` | API key |
+| POST | `/chats/([^/]{1,64})/reply` | API key |
+| POST | `/replies/([0-9a-f]{12})/answer` | API key |
+| POST | `/replies/([0-9a-f]{12})/stop` | API key |
+| POST | `/server/update` | API key |
 | GET | `/prompts` | API key |
 | GET | `/modes` | API key |
 | GET | `/library` | API key |

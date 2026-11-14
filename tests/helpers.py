@@ -22,6 +22,17 @@ sys.path.insert(0, SERVER)
 FAILURES = []
 
 
+def _crash(kind, value, tb):
+    """An unexpected error ends the test file at once (background threads and helper programs can't keep it alive)."""
+    import traceback
+    traceback.print_exception(kind, value, tb)
+    sys.stdout.flush()
+    os._exit(1)
+
+
+sys.excepthook = _crash
+
+
 def check(cond, what, detail=None):
     """Records a failed check (with what was seen) instead of stopping, so one run shows every problem."""
     if cond:

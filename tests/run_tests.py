@@ -38,6 +38,7 @@ def main():
             ok, out = p.returncode == 0, p.stdout + p.stderr
         except subprocess.TimeoutExpired as e:
             ok, out = False, f"timed out after 600 s\n{e.stdout or ''}{e.stderr or ''}"
+        subprocess.run(["pkill", "-f", os.path.join(bin_dir, "fake_llama.py")], capture_output=True)   # left by a crash
         secs = time.time() - started
         skipped = ok and "SKIPPED" in out
         results.append((name, ok, skipped))

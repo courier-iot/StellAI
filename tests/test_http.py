@@ -23,6 +23,10 @@ check(ids[0] == "general" and {"programmer", "writer", "cad", "pcb"} <= set(ids)
 writer = next(m for m in p["modes"] if m["id"] == "writer")
 check(writer["tools"] == "minimal" and writer["style"] == "story" and writer["prompt"].startswith("Mode: Writer."), "mode settings", writer)
 check(p["voice_style"].startswith("Voice conversation") and "recall_chat" in p["summary_intro"], "voice and summary text")
+st, u = call(port, "POST", "/server/update", {})
+check(st == 200 and u["started"] is False and "update" in u["message"].lower(), "Check for updates explains when updates are off", u)
+check(h.BUTTON_MARK.sub("", "✓ Timer started: 5m\n[[button:Cancel timer|cancel_timer|{}]]") == "✓ Timer started: 5m",
+      "summaries leave out the phone's Cancel/Undo buttons")
 routes = [r[1] for r in web.RequestHandlerClass.routes.describe()]
 check(len(routes) == len(set((r[0], r[1]) for r in web.RequestHandlerClass.routes.describe())), "no address is listed twice")
 web.server_close()
