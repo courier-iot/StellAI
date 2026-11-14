@@ -715,6 +715,7 @@ async function runOnServer(convId, photos, voice = false, fresh = false) {
     const r = await fetch(`/chats/${encodeURIComponent(convId)}/reply`, { method: "POST", signal: S.abort.signal,
       headers: { Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ client: "web", name: NAME(), voice, fresh, photos: photos.map(p => p.id), thinking, forced,
+        conversation: S.convs.get(convId), messages: (S.msgs.get(convId) || []).slice(-400),
         auto_level: store.get("autoModes", "auto"), now: isoNow(), now_line: nowLine() }) });
     if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
     const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";

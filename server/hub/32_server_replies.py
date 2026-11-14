@@ -358,9 +358,14 @@ def _reply_quick(run):
 
 def run_reply(run):
     d = run.data
+    # The app sends the chat with the request, so a reply never depends on an earlier sync having gone through
+    # (the server keeps whichever copy of each message is newer, as in a sync).
+    if isinstance(d.get("conversation"), dict) and str(d["conversation"].get("id")) == run.conv:
+        msgs = [m for m in (d.get("messages") or []) if isinstance(m, dict) and str(m.get("conv_id")) == run.conv][-400:]
+        CHATS.sync(0, [d["conversation"]], msgs)
     conv = _reply_conversation(run.conv)
     if conv is None:
-        raise ValueError("this chat isn't on the server yet; sync first")
+        raise ValueError("this chat isn't on the server yet; check the app is connected, then try again")
     run.project_id, run.chat_mode = conv
     run.client = "phone" if d.get("client") == "phone" else "web"
     run.name = " ".join(str(d.get("name") or "Stella").split())[:24] or "Stella"

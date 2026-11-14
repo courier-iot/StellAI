@@ -124,9 +124,16 @@ ev = reply("r9", stop_after_delta=True)
 check(ev[-1]["type"] == "done" and ev[-1]["stopped"], "Stop ends the reply", ev[-1])
 check(saved("r9")[-1][0] == "assistant" and saved("r9")[-1][1].count("word") < 60, "what she'd written so far is kept", saved("r9")[-1])
 
+# a chat that never synced: the request carries it, so the reply still works
+ts = int(time.time() * 1000)
+ev = reply("r10", conversation={"id": "r10", "title": "new", "created_at": ts, "updated_at": ts, "mode": "writer"},
+           messages=[{"id": "r10-u", "conv_id": "r10", "role": "user", "text": "hi", "created_at": ts, "updated_at": ts}])
+check(not ev[-1]["error"] and saved("r10") == [("user", "hi"), ("assistant", "Hello from the model.")],
+      "a reply brings its chat along when sync hasn't run", saved("r10"))
+
 # errors
 ev = reply("nope")
-check(ev[-1]["type"] == "done" and "sync first" in str(ev[-1]["error"]), "an unknown chat is explained", ev[-1])
+check(ev[-1]["type"] == "done" and "isn't on the server yet" in str(ev[-1]["error"]), "an unknown chat is explained", ev[-1])
 check(call(port, "POST", "/replies/000000000000/answer", {"call_id": "x", "answer": {}})[1] == {"ok": False},
       "an answer for a finished reply is ignored")
 st, p = call(port, "GET", "/prompts")

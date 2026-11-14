@@ -6,6 +6,9 @@ fun friendlyErrorText(e: Exception, serverUrl: String): String {
     return when {
         e is java.net.ConnectException || msg.contains("Failed to connect") ->
             "Can't reach the server at $serverUrl. Is the server running, and is the phone on the same Wi-Fi or Tailscale?"
+        // "connect timed out": nothing answered at that address at all (on a phone, usually Tailscale being off)
+        e is java.net.SocketTimeoutException && msg.contains("connect", ignoreCase = true) ->
+            "Can't reach the server at $serverUrl. Is Tailscale on (or the phone on the same Wi-Fi), and is the server running?"
         e is java.net.SocketTimeoutException -> "The server took too long to respond."
         e is java.net.UnknownHostException -> "That server address doesn't look right. Check Settings."
         msg.contains("HTTP 401") -> "The API key was rejected. Copy it again from the server's terminal into Settings."

@@ -506,6 +506,11 @@ class ChatEngine(private val app: App) {
                 .put("now_line", "Current time: " +
                     now.format(DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm 'UTC'xxx (VV)", Locale.ENGLISH)))
                 .put("client_tools", phoneTools)
+            // the chat itself, so the reply doesn't depend on the sync above having gone through
+            val chatMsgs = (app.store.messages(convId) + app.store.dirtyMessages().filter { it.convId == convId })
+                .associateBy { it.id }.values.sortedBy { it.createdAt }.takeLast(400)
+            app.store.conversations().firstOrNull { it.id == convId }?.let { body.put("conversation", it.toJson()) }
+            body.put("messages", JSONArray().apply { chatMsgs.forEach { put(it.toJson()) } })
             feeder.begin()
             withContext(Dispatchers.IO) {
                 HubApi.streamReply(app.settings.serverUrl, app.settings.apiKey, convId, body, onCall = { replyCall = it }) { ev ->

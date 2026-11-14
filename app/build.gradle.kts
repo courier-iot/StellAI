@@ -12,8 +12,8 @@ android {
         applicationId = "com.stellai.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 45
-        versionName = "0.29.2"
+        versionCode = 46
+        versionName = "0.29.3"
 
         // ONNX Runtime (wake word) ships native code; phones only need ARM.
         ndk {

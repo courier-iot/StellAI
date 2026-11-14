@@ -29,6 +29,8 @@ class ChatLogicTest {
     fun errorsSayWhatToDo() {
         assertTrue(friendlyErrorText(java.net.ConnectException("refused"), "http://x:8092").contains("Can't reach the server at http://x:8092"))
         assertTrue(friendlyErrorText(Exception("HTTP 404: not found"), "").contains("Check for updates"))
+        assertTrue(friendlyErrorText(java.net.SocketTimeoutException("connect timed out"), "http://x").contains("Tailscale"))
+        assertEquals("The server took too long to respond.", friendlyErrorText(java.net.SocketTimeoutException("timeout"), ""))
         assertTrue(friendlyErrorText(Exception("HTTP 401"), "").contains("API key"))
         assertEquals("boom", friendlyErrorText(Exception("boom"), ""))
         val old = listOf("re-run the setup script", "out of date")
