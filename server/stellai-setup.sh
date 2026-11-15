@@ -989,8 +989,11 @@ write_model_conf() {
     printf 'MMPROJ_FILE="%s"\nWHISPER_GPU="%s"\nSPEC_ARGS="%s"\nCACHE_RAM_MB="%s"\nRAM_BUDGET_GB="%s"\n' \
       "$([[ -s "$MMPROJ_FILE" ]] && echo "$MMPROJ_FILE")" "${WHISPER_GPU:-0}" "$SPEC_ARGS" "$CACHE_RAM_MB" "$RAM_BUDGET_GB"
     printf 'HELPER_FILE="%s"\nHELPER_GPU="%s"\n' "$HELPER_FILE" "$HELPER_GPU"
-    [[ -n $LLAMA_GPUS_CONF ]] && printf 'LLAMA_GPUS="%s"\n' "$([[ $LLAMA_GPUS_CONF == none ]] && echo "-1" || echo "$LLAMA_GPUS_CONF")"
-    [[ -n $keep ]] && printf '%s\n' "$keep"
+    if [[ -n $LLAMA_GPUS_CONF ]]; then
+      printf 'LLAMA_GPUS="%s"\n' "$([[ $LLAMA_GPUS_CONF == none ]] && echo "-1" || echo "$LLAMA_GPUS_CONF")"
+    fi
+    # (an if, not "[[ ]] && ...": with nothing to keep that line "fails", and set -e stopped the whole setup here)
+    if [[ -n $keep ]]; then printf '%s\n' "$keep"; fi
   } > "$LLM_DIR/model.conf"
 }
 write_model_conf
