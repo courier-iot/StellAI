@@ -1671,18 +1671,36 @@ LEARN_SCHEMA = {
     "type": "object",
     "properties": {
         "add": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+        "update": {"type": "array", "maxItems": 5, "items": {
+            "type": "object", "properties": {"id": {"type": "string"}, "fact": {"type": "string"}},
+            "required": ["id", "fact"]}},
         "remove": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
     },
-    "required": ["add", "remove"],
+    "required": ["add", "update", "remove"],
 }
 
-LEARN_PROMPT = """You maintain a short list of long-term facts about the user, so their assistant can help them better over time.
-Read the conversation and decide what is worth remembering for weeks or months: stable preferences, projects they are working on,
-tools/boards/parts/software they use, people and pets in their life, routines and schedules, goals, and explicit "remember" requests.
-Do NOT save: one-off questions, small talk, things already in the list, temporary states ("I'm tired"), or anything the assistant said.
-Write each fact as one short sentence in third person, e.g. "Uses an ESP32-S3 for most projects." or "Works 8-4 on weekdays."
-If the conversation shows an existing fact is now wrong, put its id in "remove" (and the corrected fact in "add").
-Reply with JSON only: {"add": [...], "remove": [...]}. Empty lists are fine and are the usual answer."""
+LEARN_PROMPT = """You keep a short list of long-term facts about the user, so their assistant can help them better over time.
+Read the conversation and pick out what the USER said that will still be true and useful in a month: who they are,
+people and pets in their life, where they live and work, their projects and what they decided about them, the tools,
+boards, parts and software they use, their routines, and how they like the assistant to answer. Also anything they
+asked to be remembered.
+Rules:
+- Only what the user said themselves. Never the assistant's suggestions, research or guesses, even if the user agreed
+  with a "sounds good" (save the decision they made, not the assistant's details).
+- Not one-off questions, small talk, moods, today's errands, or things the list already says in other words.
+- Never passwords, keys, card or account numbers, ID numbers, or health details.
+- One short third-person sentence each, as specific as the user was, e.g. "Uses an ESP32-S3 for most projects."
+- When the conversation changes a known fact, put it in "update" with that fact's id and the new sentence (keep
+  useful history, e.g. "Works on the infra team (previously search).") instead of adding a near-copy.
+- "remove" only facts the user said are wrong or asked to forget.
+Reply with JSON only: {"add": [...], "update": [{"id": "...", "fact": "..."}], "remove": [...]}. Empty lists are the
+usual answer."""
+
+
+def _same_fact(a, b):
+    """True when two facts say nearly the same thing (so a near-copy isn't added)."""
+    ta, tb = set(_terms(a)), set(_terms(b))
+    return bool(ta and tb) and len(ta & tb) / max(1, min(len(ta), len(tb))) >= 0.8
 
 
 def learn_memories(messages, conv_id=""):
@@ -1704,7 +1722,7 @@ def learn_memories(messages, conv_id=""):
             {"role": "user", "content": f"Known facts:\n{known}\n\nConversation:\n{convo}"},
         ],
         "temperature": 0.2,
-        "max_tokens": 400,
+        "max_tokens": 500,
         "response_format": {"type": "json_schema", "json_schema": {"name": "memory_update", "schema": LEARN_SCHEMA}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -1712,24 +1730,38 @@ def learn_memories(messages, conv_id=""):
     m = re.search(r"\{[\s\S]*\}", content)
     update = json.loads(m.group(0)) if m else {}
     removed, added, suggested = [], [], []
-    ids = {x["id"] for x in existing}
-    gone = [str(mid).strip("[] ") for mid in update.get("remove", [])[:5] if str(mid).strip("[] ") in ids]
-    facts = [" ".join(f.split()) for f in update.get("add", [])[:5] if isinstance(f, str) and len(f.strip()) >= 3]
+    by_id = {x["id"]: x["text"] for x in existing}
+    gone = [str(mid).strip("[] ") for mid in (update.get("remove") or [])[:5] if str(mid).strip("[] ") in by_id]
+    changes = []   # (old id, new fact)
+    for u in (update.get("update") or [])[:5]:
+        if isinstance(u, dict) and str(u.get("id", "")).strip("[] ") in by_id:
+            fact = " ".join(str(u.get("fact") or "").split())
+            if len(fact) >= 3 and fact.lower() != by_id[str(u["id"]).strip("[] ")].lower():
+                changes.append((str(u["id"]).strip("[] "), fact))
+    facts = []
+    for f in (update.get("add") or [])[:5]:
+        if not isinstance(f, str) or len(f.strip()) < 3:
+            continue
+        f = " ".join(f.split())
+        if any(_same_fact(f, t) for t in by_id.values()) or any(_same_fact(f, x) for x in facts):
+            continue
+        facts.append(f)
     if mode == "review":
-        # a removal paired with a new fact is shown as "replace X with Y"; a lone removal as "forget X?"
-        for i, fact in enumerate(facts):
-            sid = CHATS.suggest_memory(fact, gone[i] if i < len(gone) else "", conv_id)
-            if sid:
+        # an update is shown as "replace X with Y"; a lone removal as "forget X?"
+        for mid, fact in changes:
+            if CHATS.suggest_memory(fact, mid, conv_id):
                 suggested.append(fact)
-        for mid in gone[len(facts):]:
-            old = next((x["text"] for x in existing if x["id"] == mid), "")
-            if old and CHATS.suggest_memory("(forget) " + old, mid, conv_id):
-                suggested.append("(forget) " + old)
+        for fact in facts:
+            if CHATS.suggest_memory(fact, "", conv_id):
+                suggested.append(fact)
+        for mid in gone:
+            if CHATS.suggest_memory("(forget) " + by_id[mid], mid, conv_id):
+                suggested.append("(forget) " + by_id[mid])
         return {"added": [], "removed": [], "suggested": suggested, "mode": mode}
-    for mid in gone:
+    for mid in gone + [mid for mid, _ in changes]:
         if CHATS.delete_memory(mid):
             removed.append(mid)
-    for fact in facts:
+    for fact in facts + [fact for _, fact in changes]:
         _, new = CHATS.add_memory(fact, "learned")
         if new:
             added.append(fact)
@@ -2692,13 +2724,18 @@ def save_memory_settings(data):
     return memory_settings()
 
 
+LEARN_WAKE = threading.Event()   # set after each reply: learn from that chat once it has been quiet a few minutes
+LEARN_QUIET_MINUTES = 4
+
+
 def learner_loop():
-    """Every few minutes, while Stella is idle: learn from chats that have been quiet for 20 minutes."""
+    """While Stella is idle: learn from chats that have been quiet for a few minutes (checked after each reply,
+    and every five minutes)."""
     time.sleep(180)
     while True:
         try:
-            if memory_settings()["mode"] != "off" and server_idle(120) and _llama_up():
-                quiet = int((time.time() - 20 * 60) * 1000)
+            if memory_settings()["mode"] != "off" and server_idle(60) and _llama_up():
+                quiet = int((time.time() - LEARN_QUIET_MINUTES * 60) * 1000)
                 oldest = int((time.time() - 3 * 86400) * 1000)
                 with CHATS.lock:
                     rows = CHATS.db.execute(
@@ -2706,7 +2743,7 @@ def learner_loop():
                         "GROUP BY conv_id HAVING MAX(updated_at) BETWEEN ? AND ? ORDER BY 2 DESC LIMIT 20",
                         (oldest, quiet)).fetchall()
                 for cid, last in rows:
-                    if not server_idle(120):
+                    if not server_idle(60):
                         break
                     with CHATS.lock:
                         done = CHATS.db.execute("SELECT v FROM meta WHERE k=?", ("learned:" + cid,)).fetchone()
@@ -2724,7 +2761,11 @@ def learner_loop():
         except Exception as e:
             LEARNER["error"] = str(e)[:200]
             log(f"memory learning skipped: {e}")
-        time.sleep(300)
+        # after a reply, look again just after that chat goes quiet; otherwise every five minutes
+        woke = LEARN_WAKE.wait(300)
+        LEARN_WAKE.clear()
+        if woke:
+            time.sleep(LEARN_QUIET_MINUTES * 60 + 20)
 
 
 # ---- Code runner: Python on the server ---------------------------------------------------------------------------
@@ -3368,8 +3409,11 @@ def tool_fetch_page(args):
         i = text.lower().index(find)
         text = text[max(0, i - limit // 3):]
     truncated = len(text) > limit
-    return {"url": final, "title": title, "text": text[:limit], "truncated": truncated}, \
-        f"Read {title or final}"[:200]
+    out = {"url": final, "title": title, "text": text[:limit], "truncated": truncated}
+    if len(text.strip()) < 400 and "html" in ctype:
+        out["note"] = ("This page came back nearly empty: it's probably built with JavaScript. Read it with browse_page "
+                       "(load_tools groups=['browser'] if you don't have it).")
+    return out, f"Read {title or final}"[:200]
 
 
 SERVER_TOOLS["web_search"] = (tool_web_search, _fn(
@@ -4969,7 +5013,7 @@ def quick_reply(text, now_text="", phone=False):
 # changes it everywhere. {name} is the assistant's name. The apps add the mode, memories, project and summary parts.
 INSTRUCTION_LINES = [   # (which apps, line)
     ("all", "You are {name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable "
-            "with a light space-explorer touch; concise and practical."),
+            "with a light space-explorer touch; concise and practical."),   # = PERSONALITY_DEFAULT (keep in step)
     ("phone", "The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm "
               "briefly afterwards; never claim success if a tool failed."),
     ("phone", "Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and "
@@ -4995,6 +5039,9 @@ INSTRUCTION_LINES = [   # (which apps, line)
             "answering, and use run_python or the calculators when it's available instead of doing long arithmetic in "
             "your head. If you get something wrong, say so and fix it."),
     ("all", "Pin decisions, names and facts that must stay true in this chat with pin_note when it's available."),
+    ("all", "If a program or tool the user asked for isn't available, say so and ask before using a different one "
+            "(for example Blender instead of FreeCAD). Whenever you ask the user a question or offer a choice, end your "
+            "reply there and wait for the answer: don't call tools in the same reply."),
 ]
 # Put after the mode's own instructions; then the summary of earlier messages starts with SUMMARY_INTRO
 MODE_NOTE = "These mode instructions take priority over the general style guidance above (such as keeping replies short)."
@@ -5125,19 +5172,271 @@ BUILT_IN_MODES = [
 ]
 
 
+# ---- Personality: the user's own description of Stella --------------------------------------------------------
+# Settings → Stella → Personality. Replaces the character part of the first line on every device; empty = the default.
+PERSONALITY_MAX = 600
+PERSONALITY_DEFAULT = "Warm and capable with a light space-explorer touch; concise and practical."
+
+
+def personality():
+    try:
+        with open(os.path.join(MOVE["base"] or ".", "personality.json"), encoding="utf-8") as f:
+            text = str(json.load(f).get("text") or "")
+    except (OSError, ValueError, AttributeError):
+        text = ""
+    return " ".join(text.split())[:PERSONALITY_MAX]
+
+
+def save_personality(data):
+    text = " ".join(str((data or {}).get("text") or "").split())
+    if len(text) > PERSONALITY_MAX:
+        raise ValueError(f"keep the personality under {PERSONALITY_MAX} characters")
+    path = os.path.join(MOVE["base"] or ".", "personality.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"text": text}, f)
+    os.replace(path + ".tmp", path)
+    return {"text": text, "default": PERSONALITY_DEFAULT, "max": PERSONALITY_MAX}
+
+
 def instructions_for(client):
     """The base instructions for one app ("phone" or "web"), with {name} left for the app to fill in."""
-    return "\n".join(line for who, line in INSTRUCTION_LINES if who in ("all", client))
+    lines = [line for who, line in INSTRUCTION_LINES if who in ("all", client)]
+    own = personality()
+    if own and lines:
+        lines[0] = lines[0].replace(PERSONALITY_DEFAULT, own.replace("{", "(").replace("}", ")"))
+    return "\n".join(lines)
 
 
 def prompts_payload():
     """GET /prompts: everything the apps need to build Stella's instructions, plus a version to cache by."""
     body = {"instructions": {c: instructions_for(c) for c in ("phone", "web")}, "mode_note": MODE_NOTE,
             "summary_intro": SUMMARY_INTRO, "voice_style": VOICE_STYLE, "modes": BUILT_IN_MODES,
-            "features": ["server_replies"]}   # what this server can do for the apps (they fall back without it)
+            "personality": personality(),
+            "features": ["server_replies", "personality", "skills", "deep", "ratings", "evals", "lessons", "jobs"]}   # what this server can do for the apps (they fall back without it)
     import hashlib
     body["version"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:12]
     return body
+# ---- Skills: short how-to guides Stella loads when she needs them ---------------------------------------------------
+# A small model with a good recipe beats a bigger one guessing. Only each skill's name and one line go in her
+# instructions; she calls use_skill to read the whole guide before that kind of work. Built-in skills ship here; your
+# own live as Markdown files in the skills folder next to the chat database (Settings → Skills, or ask Stella to save
+# one). A skill of yours with a built-in's name replaces it.
+SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,39}")
+SKILL_MAX = 6000
+BUILT_IN_SKILLS = {
+    "cad-part": {
+        "description": "Designing a part in FreeCAD (brackets, mounts, enclosures, plates) for 3D printing or CAD",
+        "triggers": r"freecad|\bcad\b|bracket|enclosure|\bmount\b|baseplate|base plate|3d print|\bstl\b|\bstep file",
+        "body": """1. Sizes first. If a size that changes the design is missing (overall size, hole size or spacing, wall
+   thickness), ask for it in one short message and stop until the user answers. Otherwise pick sensible values and
+   say which ones you assumed.
+2. cad_project action=new with a short name for the part (it's also the workspace name).
+3. Build in small cad_step calls, one feature each: the main body first, then pockets and cut-outs, then holes,
+   then fillets and chamfers last (they fail most often, so they go on a finished shape).
+4. After every step read the measured sizes in the result and compare them with the goal. If a size is wrong or the
+   check reports broken geometry, fix it in the next step before adding anything else.
+5. Finish with cad_inspect render=true and check the whole part against what the user asked for.
+6. Export: stl for 3D printing, step for other CAD programs. Tell the user the file name and where it is.
+Handy numbers: clearance holes M2 2.4, M3 3.2, M4 4.3, M5 5.3 mm. For 3D printing keep walls at least 1.2 mm
+and add 0.2 mm to holes that must fit a part. Millimetres, Z up, the front faces -Y.""",
+    },
+    "blender-model": {
+        "description": "Making or changing a 3D model in Blender (props, characters, avatar parts)",
+        "triggers": r"blender|\b3d model|\bmesh\b|\bvrm\b|\bglb\b|sculpt|\brig",
+        "body": """1. blender_inspect first (render=true if you haven't seen the model) so you use the real object names and sizes.
+2. If the user gave pictures, keep them with blender_project action=add_reference; every check then compares
+   against them.
+3. One blender_step per change, with a goal that has numbers (metres, Z up, front faces -Y). Big shapes first,
+   details later; name every object you make.
+4. Read each step's measurements and the visual check. If they disagree with the goal, fix that before moving on.
+   If a step fails twice the same way, try a different approach or ask the user.
+5. blender_generate makes a rough mesh from photos; it's slow, so offer it before using it.
+6. Export when the user is happy: glb for apps and the avatar, vrm for avatars, stl for printing.""",
+    },
+    "pcb-board": {
+        "description": "Designing a circuit board in KiCad from a description (schematic, layout, Gerbers)",
+        "triggers": r"kicad|\bpcb\b|circuit board|gerber|footprint",
+        "body": """1. Agree the circuit first: the parts, power (voltage and current) and connectors. Ask if something that
+   changes the board is unclear, and stop until the user answers.
+2. pcb_library action=list: reuse saved recipes and confirmed pinouts instead of guessing.
+3. pcb_circuit with the whole circuit as SKiDL code. Every part needs a real KiCad footprint (prefer through-hole);
+   name the nets and give power nets a connector or a power flag. Start simple, then add parts.
+4. Read the ERC and DRC results. Fix every error before anything else; explain any warning you leave.
+5. pcb_step for small layout changes (moving a part, a track, the outline).
+6. pcb_project action=export format=fab for the board maker (plus bom and pos for assembly).
+7. When a sub-circuit built cleanly, offer to keep it with pcb_library action=save_recipe.""",
+    },
+    "research": {
+        "description": "Finding current facts online (prices, versions, news, how-tos) and citing them",
+        "triggers": r"\b(latest|current|price|cost|news|today|newest|release|compare)\b",
+        "body": """1. web_search with a short, specific query (2-6 words). Search again with different words if the results miss.
+2. fetch_page the two or three best results; snippets alone are often outdated or wrong.
+3. Answer from what the pages say, with the links. If sources disagree, say so; if nothing answers it, say that
+   rather than guessing.""",
+    },
+    "debug-code": {
+        "description": "Finding and fixing a bug or an error message in code",
+        "triggers": r"\bbug\b|\berror\b|exception|traceback|doesn'?t work|won'?t compile|crash",
+        "body": """1. Work from the exact error message and the code. If either is missing, ask for it and stop.
+2. Say what you think the cause is and why, in a sentence or two.
+3. When you can, reproduce it with run_python before changing anything, then check that the fix works.
+4. Make the smallest change that fixes the cause, and show the whole changed function.
+5. Mention any other bug you noticed on the way, but don't fix things the user didn't ask about.""",
+    },
+    "github-fix": {
+        "description": "Fixing a failed GitHub build or changing code in the user's repository",
+        "triggers": r"github|\brepo\b|build fail|failed build|actions|workflow|pull request",
+        "body": """1. github_builds to read the failed build's error, or github_issues for the problem.
+2. github_read the files involved, the whole relevant part, before deciding on a fix.
+3. Explain the fix in a few lines.
+4. github_commit the full changed files to a new branch (never the main branch); the user approves it.
+5. Offer github_pull_request, then suggest checking the build of that branch.""",
+    },
+}
+SKILLS_STATE = {"dir": ""}
+
+
+def _skills_dir():
+    d = SKILLS_STATE["dir"] or os.path.join(MOVE["base"] or ".", "skills")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _read_skill_file(path):
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    meta, body = {}, text
+    m = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n?", text)
+    if m:
+        body = text[m.end():]
+        for line in m.group(1).splitlines():
+            k, _, v = line.partition(":")
+            if k.strip() and v.strip():
+                meta[k.strip().lower()] = v.strip()
+    return meta, body.strip()
+
+
+def skills_list():
+    """[{name, description, source, triggers, body}]: yours (they replace built-ins of the same name), then built-in."""
+    out = {}
+    for name, s in BUILT_IN_SKILLS.items():
+        out[name] = {"name": name, "description": s["description"], "source": "built-in", "triggers": s["triggers"],
+                     "body": s["body"]}
+    try:
+        files = sorted(os.listdir(_skills_dir()))
+    except OSError:
+        files = []
+    for fn in files:
+        if not fn.endswith(".md") or not SKILL_NAME.fullmatch(fn[:-3]):
+            continue
+        try:
+            meta, body = _read_skill_file(os.path.join(_skills_dir(), fn))
+        except (OSError, UnicodeDecodeError):
+            continue
+        name = fn[:-3]
+        out[name] = {"name": name, "description": meta.get("description", "")[:160], "source": meta.get("source", "user"),
+                     "triggers": meta.get("triggers", ""), "body": body[:SKILL_MAX],
+                     "replaces_built_in": name in BUILT_IN_SKILLS}
+    return sorted(out.values(), key=lambda s: (s["source"] == "built-in", s["name"]))
+
+
+def skill_get(name):
+    name = str(name or "").strip().lower().replace(" ", "-")
+    return next((s for s in skills_list() if s["name"] == name), None)
+
+
+def skill_save(data, source="user"):
+    name = str(data.get("name") or "").strip().lower().replace(" ", "-")
+    if not SKILL_NAME.fullmatch(name):
+        raise ValueError("a skill name is 2-40 lowercase letters, digits and dashes, e.g. solder-smd")
+    desc = " ".join(str(data.get("description") or "").split())[:160]
+    body = str(data.get("body") or data.get("steps") or "").strip()
+    if not desc or not body:
+        raise ValueError("a skill needs a one-line description and its steps")
+    if len(body) > SKILL_MAX:
+        raise ValueError(f"keep a skill under {SKILL_MAX} characters")
+    triggers = " ".join(str(data.get("triggers") or "").split())[:200]
+    if triggers and not re.search(r"[|\\()\[\]]", triggers):   # plain words ("solder, smd") → a pattern
+        triggers = r"\b(" + "|".join(re.escape(w) for w in re.split(r"\s*,\s*|\s+", triggers) if w) + ")"
+    if triggers:
+        try:
+            re.compile(triggers)
+        except re.error:
+            triggers = ""
+    head = f"---\ndescription: {desc}\nsource: {source}\n" + (f"triggers: {triggers}\n" if triggers else "") + "---\n"
+    path = os.path.join(_skills_dir(), name + ".md")
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        f.write(head + body + "\n")
+    os.replace(path + ".tmp", path)
+    return skill_get(name)
+
+
+def skill_delete(name):
+    """Deletes your skill (a built-in one you replaced comes back). False if there was nothing to delete."""
+    name = str(name or "").strip().lower()
+    if not SKILL_NAME.fullmatch(name):
+        return False
+    path = os.path.join(_skills_dir(), name + ".md")
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    return True
+
+
+def skills_section():
+    """The few lines in Stella's instructions that tell her which skills exist."""
+    skills = skills_list()
+    if not skills:
+        return ""
+    return ("## Skills\nStep-by-step guides. Before starting that kind of task, call use_skill with its name and "
+            "follow it:\n" + "\n".join(f"- {s['name']}: {s['description']}" for s in skills))
+
+
+def skills_for(text):
+    """Skills whose trigger words match this message (suggested to Stella in the message's context)."""
+    hits = []
+    for s in skills_list():
+        try:
+            if s.get("triggers") and re.search(s["triggers"], text or "", re.I):
+                hits.append(s["name"])
+        except re.error:
+            continue
+    return hits[:2]
+
+
+def tool_use_skill(args):
+    s = skill_get(args.get("name"))
+    if not s:
+        names = ", ".join(x["name"] for x in skills_list())
+        raise ValueError(f"no skill called '{args.get('name')}'. Skills: {names}")
+    learned = skill_lessons(s["name"])
+    steps = s["body"] + ("\n\nLessons from past mistakes:\n" + "\n".join(f"- {t}" for t in learned) if learned else "")
+    return {"skill": s["name"], "steps": steps}, f"Using the {s['name']} skill"
+
+
+def tool_save_skill(args):
+    if skill_get(args.get("name")) and skill_get(args.get("name"))["source"] == "built-in" and not args.get("replace"):
+        raise ValueError("that's a built-in skill's name: pick another name, or set replace=true if the user wants "
+                         "to replace it")
+    s = skill_save(args, source="stella")
+    return {"saved": s["name"], "note": "The user can edit or delete it in Settings → Skills."}, \
+        f"Saved the {s['name']} skill"
+
+
+SERVER_TOOLS["use_skill"] = (tool_use_skill, _fn(
+    "use_skill", "Read a skill (a step-by-step guide from the Skills list) before doing that kind of task.",
+    {"name": _p("The skill's name, e.g. cad-part")}, ["name"]))
+SERVER_TOOLS["save_skill"] = (tool_save_skill, _fn(
+    "save_skill",
+    "Save a new skill: a short numbered how-to for a kind of task, so it goes better next time. Only when the user "
+    "asks you to (e.g. 'save how we did this as a skill').",
+    {"name": _p("lowercase-with-dashes, e.g. solder-smd"), "description": _p("One line: when to use it"),
+     "steps": _p("Numbered steps, short and specific, with the numbers and tools that worked"),
+     "triggers": _p("Optional words that suggest it, e.g. 'solder, smd, reflow'"),
+     "replace": _p("true only if the user wants to replace a built-in skill of that name", "boolean")},
+    ["name", "description", "steps"]))
+TOOL_GROUPS["skills"] = ["save_skill"]   # use_skill is always offered in server replies when there are skills
+TOOL_TRIGGERS["skills"] = re.compile(r"\bskills?\b", re.I)
 # ---- 3D Modeler: Blender on the server -------------------------------------------------------------
 # Stella edits 3D models in a hidden Blender that stays running. Every change is one small bpy script: the
 # server opens the newest saved version, runs it, saves a new numbered version (nothing is overwritten), renders
@@ -5154,6 +5453,33 @@ BLENDER_IDLE_S = 15 * 60          # Blender leaves memory after this long withou
 BLENDER_KEEP = 40                 # newest versions kept per workspace (plus the first)
 MODEL_EXTS = ("blend", "glb", "gltf", "vrm", "fbx", "obj", "stl")
 WS_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+NAME_SKIP = {"a", "an", "the", "and", "or", "for", "of", "to", "in", "on", "with", "my", "me", "can", "you", "could",
+             "please", "make", "design", "create", "build", "new", "start", "hey", "hi", "it", "that", "this", "i",
+             "want", "need", "would", "like", "some", "using", "use", "let", "lets", "s", "mode", "cad", "blender",
+             "freecad", "kicad", "workspace", "model", "3d", "print", "printing", "help", "is", "be", "so", "just"}
+
+
+def auto_workspace_name(name, args, exists):
+    """A workspace name: the one given (made lowercase-and-dashes if needed), else one made from the file or the
+    user's newest message ("can-baseplate"), with -2, -3 … if taken. A small model often forgets to give one."""
+    raw = str(name or "").strip().lower()
+    if WS_NAME.fullmatch(raw):
+        return raw
+    source = raw or os.path.splitext(os.path.basename(str((args or {}).get("file") or "")))[0]
+    conv = str((args or {}).get("conversation_id") or "")
+    if not source and conv:
+        try:
+            row = CHATS.db.execute("SELECT text FROM messages WHERE conv_id=? AND role='user' AND deleted=0 "
+                                   "ORDER BY created_at DESC LIMIT 1", (conv,)).fetchone()
+            source = row[0] if row else ""
+        except (sqlite3.Error, AttributeError):
+            source = ""
+    words = [w for w in re.findall(r"[a-z0-9]+", source.lower()) if w not in NAME_SKIP and not w.isdigit()]
+    base = "-".join(words[:3])[:32].strip("-") or "design"
+    out, n = base, 2
+    while exists(out):
+        out, n = f"{base}-{n}", n + 1
+    return out
 BLENDER_VIEWS = ("front", "right", "back", "left", "top", "three_quarter")
 
 BLENDER_WORKER_PY = r'''# StellAI Blender worker. Runs inside Blender ("blender -b -P this_file") and takes one JSON command per line
@@ -6087,9 +6413,7 @@ def tool_blender_project(args):
         out["can_pause_stella_for_shape_jobs"] = _can_pause_model()
         return out, "Checked 3D workspaces"
     if action == "new":
-        name = str(args.get("name", "")).strip().lower()
-        if not WS_NAME.fullmatch(name):
-            raise ValueError("give a name: lowercase letters, digits and dashes, e.g. vela-halo")
+        name = auto_workspace_name(args.get("name"), args, _ws_versions)
         if _ws_versions(name):
             raise ValueError(f"workspace {name} already exists; use action open, or pick another name")
         os.makedirs(_ws_dir(name, "versions"), exist_ok=True)
@@ -6793,10 +7117,8 @@ class Workspaces:
         return [{"name": n, "latest_version": self.versions(n)[-1]}
                 for n in names if WS_NAME.fullmatch(n) and self.versions(n)]
 
-    def start(self, name):
-        name = str(name or "").strip().lower()
-        if not WS_NAME.fullmatch(name):
-            raise ValueError("give a name: lowercase letters, digits and dashes, e.g. fan-duct")
+    def start(self, name, args=None):
+        name = auto_workspace_name(name, args, self.versions)
         if self.versions(name):
             raise ValueError(f"workspace {name} already exists; use action open, or pick another name")
         for sub in ("versions", "exports", "refs"):
@@ -7173,7 +7495,7 @@ def tool_cad_project(args):
                                          if f.rsplit(".", 1)[-1].lower() in CAD_FILE_EXTS][:40],
                 "workspaces": CAD.list(), "active": _safe(lambda: CAD.name(""))}, "Checked CAD workspaces"
     if action == "new":
-        name = CAD.start(args.get("name"))
+        name = CAD.start(args.get("name"), args)
         v, path = CAD.next(name)
         job = {"save": path}
         if args.get("file"):
@@ -7825,7 +8147,7 @@ def tool_pcb_project(args):
                     (".zip", ".kicad_pcb")) or os.path.isdir(os.path.join(_inbox(), f))][:40],
                 "workspaces": PCB.list(), "active": _safe(lambda: PCB.name(""))}, "Checked PCB workspaces"
     if action == "new":
-        name = PCB.start(args.get("name"))
+        name = PCB.start(args.get("name"), args)
         v, path = PCB.next(name)
         try:
             if args.get("file"):
@@ -9116,7 +9438,8 @@ def ensure_packages():
 # context {used, limit} · done {error, stopped}
 REPLY_RUNS = {}
 REPLY_LOCK = threading.Lock()
-REPLY_MAX_ROUNDS = 6
+REPLY_MAX_ROUNDS = 8
+REPLY_MAX_ROUNDS_PLAN = 16   # multi-step work with a plan gets more steps
 REPLY_MAX_CONTINUES = 2
 REPLY_CONTINUE = ("(Automatic: your previous reply was cut off because your memory filled up. Continue it exactly "
                   "where it stopped, without repeating anything or adding a preamble.)")
@@ -9125,7 +9448,7 @@ REPLY_DIAGRAM = re.compile(r"!\[[^\]]*\]\(diagram:[0-9a-f]+\)")
 REPLY_THINK = re.compile(r"<think>[\s\S]*?(</think>|$)")
 REPLY_CODE_MODES = {"programmer", "electronics", "modeler", "cad", "pcb"}
 REPLY_QUICK_MODES = {"general", "programmer", "electronics"}
-REPLY_STICKY = {}          # chat -> tools used so far (kept offered, so the model's cache stays warm)
+REPLY_STICKY = {}          # chat -> tools used or loaded so far (kept offered until the mode changes)
 _REPLY_TS = {"last": 0}
 
 
@@ -9150,6 +9473,10 @@ class ReplyRun:
         self._send = send
         self.stop = threading.Event()
         self.waiting = {}
+        self.plan = None     # update_plan's checklist for this reply
+        self.fails = {}      # failed tool calls, to stop after the same failure twice
+        self.checked = False # a long answer is checked once
+        self.lane = "fast"
 
     def emit(self, event):
         """Sends one event to the app. If the app has gone (stopped, closed), the reply stops."""
@@ -9251,6 +9578,12 @@ def _reply_system(client, name, project_text, summary, mode, memory):
     p = instructions_for(client).replace("{name}", name)
     if mode.get("prompt"):
         p += f"\n\n## Current mode: {mode['name']}\n{mode['prompt']}" + (f"\n{MODE_NOTE}" if MODE_NOTE else "")
+    skills = skills_section()
+    if skills:
+        p += "\n\n" + skills
+    learned = lessons_section()
+    if learned:
+        p += "\n\n" + learned
     if memory:
         p += "\n\n" + memory
     if project_text:
@@ -9306,7 +9639,27 @@ def _reply_prepare(run, mode, auto, n_images):
         refresh = sum(1 for h in history if h["role"] == "user") >= 2 and (start > 0 or used > limit * 0.85)
     else:
         start = max(0, len(history) - 24)
-    tools = [SERVER_TOOLS[n][1] for n in (names if names is not None else SERVER_TOOLS) if n in SERVER_TOOLS]
+    names = [n for n in (names if names is not None else SERVER_TOOLS) if n in SERVER_TOOLS]
+    last_text = REPLY_PHOTO.sub("", users[-1]) if users else ""
+    if not d.get("voice"):
+        if skills_list() and "use_skill" not in names:
+            names.append("use_skill")
+        hits = skills_for(last_text)
+        if hits:
+            extra = (extra + "\n" if extra else "") + "Skills that fit this request: " + ", ".join(hits) + \
+                " (call use_skill first)."
+        if getattr(run, "plan", None) or wants_plan(mode["id"], last_text):
+            if not getattr(run, "plan", None):
+                extra = (extra + "\n" if extra else "") + PLAN_HINT
+    tools = [SERVER_TOOLS[n][1] for n in names]
+    if not d.get("voice") and (getattr(run, "plan", None) or wants_plan(mode["id"], last_text)):
+        tools.append(UPDATE_PLAN_DEF)
+    loader = load_tools_def(set(names)) if mode.get("tools") != "minimal" and not d.get("voice") else None
+    if loader:
+        tools.append(loader)
+    if info:   # the planner counted the chosen server tools; these few extra ones count too
+        info["used"] += sum(count_tokens(json.dumps(t)) for t in tools if t is loader or t is UPDATE_PLAN_DEF
+                            or t["function"]["name"] == "use_skill")
     tools += [t for t in run.client_tools if t.get("function", {}).get("name") not in SERVER_TOOLS]
     if d.get("voice"):
         extra = (extra + "\n" if extra else "") + VOICE_STYLE
@@ -9350,9 +9703,9 @@ def _reply_compact(run, keep_user_turns, style):
     return True
 
 
-def _reply_stream(run, body):
+def _reply_stream(run, body, url=None):
     """One model call, streamed: {content, reasoning, tool_calls, finish}. Sends delta events as it goes."""
-    req = urllib.request.Request(LLAMA_URL.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
+    req = urllib.request.Request((url or LLAMA_URL).rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  method="POST", headers={"Content-Type": "application/json",
                                                          "Authorization": f"Bearer {API_KEY}"})
     res = {"content": "", "reasoning": "", "tool_calls": [], "finish": ""}
@@ -9426,6 +9779,7 @@ def _reply_auto(run, fresh):
     r = route_mode({"chat_id": run.conv, "text": text, "level": d.get("auto_level") or "auto", "forced": forced})
     run.emit({"type": "mode", "mode": r["mode"]})
     if r.get("switched") or forced:
+        REPLY_STICKY.pop(run.conv, None)   # the new mode brings its own tools; the old mode's ones go
         _reply_save(run, "tool", "⇄ Auto: " + _reply_mode(r["mode"])["name"] + (f" ({r['reason']})" if r.get("reason") else ""))
     elif r.get("suggest"):
         _reply_save(run, "tool", f"⇄ Suggest: {r.get('suggest_name')} (pick it below to redo)")
@@ -9491,7 +9845,6 @@ def run_reply(run):
             log(f"reply: couldn't refresh the context ({e})")
     if p["info"]:
         run.emit({"type": "context", **p["info"]})
-    REPLY_STICKY.setdefault(run.conv, set()).update(t["function"]["name"] for t in p["tools"])
     hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
     images = _reply_photos(photos)
     users = [i for i, h in enumerate(p["history"]) if h["role"] == "user"]
@@ -9504,11 +9857,17 @@ def run_reply(run):
             " ".join(f"[photo {x}]" for x in REPLY_PHOTO.findall(raw["_text"]))
         hist[i] = {"role": "user", "content": [{"type": "text", "text": block + text.strip()}] +
                    [{"type": "image_url", "image_url": {"url": u}} for u in images]}
-    turn, continued = [], 0
-    for _ in range(REPLY_MAX_ROUNDS):
+    run.lane, deep_at = "fast", None
+    last_user = next((REPLY_PHOTO.sub("", h["_text"]) for h in reversed(p["history"]) if h["role"] == "user"), "")
+    if not voice and not images and choose_lane(p["mode"]["id"], last_user, p["think"]) == "deep":
+        deep_at = _reply_go_deep(run, p)
+    pinned = run.lane == "fast" and slot_switch(run.conv, (p["info"] or {}).get("used", 0))
+    turn, continued, rounds = [], 0, 0
+    while rounds < (REPLY_MAX_ROUNDS_PLAN if run.plan else REPLY_MAX_ROUNDS):
+        rounds += 1
         if run.stop.is_set():
             return
-        mode, think = p["mode"], p["think"]
+        mode, think = p["mode"], p["think"] or run.lane == "deep"
         code = mode["id"] in REPLY_CODE_MODES
         body = {"model": "local", "stream": True, "messages": [{"role": "system", "content": p["system"]}, *hist, *turn],
                 "tools": p["tools"], "chat_template_kwargs": {"enable_thinking": think},
@@ -9517,17 +9876,34 @@ def run_reply(run):
                 "top_p": 0.95 if think else 0.8, "top_k": 20, "min_p": 0, "presence_penalty": 0 if code else 1.5}
         if voice and not think:
             body["max_tokens"] = 700
+        if pinned and run.lane == "fast":
+            body["id_slot"] = 0      # the slot whose chat memory is saved and restored (38_slot_cache.py)
         if not p["tools"]:
             body.pop("tools")
-        run.emit({"type": "status", "text": "Contacting the model…"})
-        res = _reply_stream(run, body)
+        run.emit({"type": "status", "text": "Thinking it through with the bigger model…" if run.lane == "deep"
+                   else "Contacting the model…"})
+        try:
+            res = _reply_stream(run, body, deep_at if run.lane == "deep" else None)
+        except (urllib.error.URLError, ConnectionError, TimeoutError, RuntimeError) as e:
+            if run.lane != "deep":
+                raise
+            log(f"reply: the bigger model failed ({e}); the quick one carries on")
+            run.emit({"type": "status", "text": "The bigger model couldn't answer; carrying on with the quick one…"})
+            run.lane, deep_at = "fast", None
+            body["chat_template_kwargs"] = {"enable_thinking": p["think"]}
+            res = _reply_stream(run, body)
         text = REPLY_THINK.sub("", res["content"]).strip()
         if run.stop.is_set():
             if text:
                 _reply_save(run, "assistant", text, res["reasoning"])
             return
+        if res["tool_calls"] and asks_user(text):
+            # Ask, then wait: she asked the user something, so the tools she also called don't run
+            log(f"reply: she asked a question, so {len(res['tool_calls'])} tool call(s) were held back")
+            res["tool_calls"] = []
+        saved = None
         if text or not res["tool_calls"]:
-            _reply_save(run, "assistant", text or "(no reply)", res["reasoning"])
+            saved = _reply_save(run, "assistant", text or "(no reply)", res["reasoning"])
         assistant = {"role": "assistant", "content": text}
         if res["tool_calls"]:
             assistant["tool_calls"] = [{"id": c["id"], "type": "function",
@@ -9537,6 +9913,7 @@ def run_reply(run):
         if not res["tool_calls"]:
             if res["finish"] == "length" and text and continued < REPLY_MAX_CONTINUES:
                 continued += 1
+                rounds -= 1
                 _reply_save(run, "tool", "↪ Long reply: making room and continuing")
                 run.emit({"type": "status", "text": "Continuing…"})
                 try:
@@ -9547,19 +9924,49 @@ def run_reply(run):
                 hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
                 turn = [{"role": "user", "content": REPLY_CONTINUE}]
                 continue
+            if saved and not run.checked and res["finish"] != "length" and wants_check(text, mode["id"], voice) \
+                    and self_check_settings()["enabled"]:
+                _reply_self_check(run, body, saved, last_user, deep_at if run.lane == "deep" else None)
             return
+        defs = {t["function"]["name"]: t for t in p["tools"] if isinstance(t, dict) and t.get("function")}
         for tc in res["tool_calls"]:
             if run.stop.is_set():
                 return
-            try:
-                args = json.loads(tc["arguments"] or "{}")
-                if not isinstance(args, dict):
-                    args = {}
-            except ValueError:
-                args = {}
-            args.pop("approved", None)
             name = tc["name"]
-            result_text = None
+            args, problem = parse_tool_args(tc["arguments"])
+            args.pop("approved", None)
+            if not problem and name in defs:
+                args, problem = check_tool_args(defs[name], args)
+            if problem:   # never run a tool with arguments it can't use: tell her exactly what's wrong instead
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": json.dumps(
+                    {"ok": False, "error": f"Not run: {problem}.",
+                     "note": "Call it again with every required argument filled in correctly."})})
+                continue
+            result_text, line, switched = None, None, None
+            if name == "load_tools":
+                asked, unknown = load_tool_groups(args)
+                REPLY_STICKY.setdefault(run.conv, set()).update(asked)   # kept for the rest of this chat
+                loaded = [n for n in asked if n not in defs]
+                p["tools"] = [t for t in p["tools"] if t.get("function", {}).get("name") != "load_tools"]
+                p["tools"] += [SERVER_TOOLS[n][1] for n in loaded]
+                more = load_tools_def({t["function"]["name"] for t in p["tools"]})
+                if more:
+                    p["tools"].append(more)
+                result_text = json.dumps({"ok": bool(asked), "loaded": asked,
+                                          **({"unknown": unknown} if unknown else {}),
+                                          "note": "These tools are available now." if asked else "Nothing loaded."})
+                run.emit({"type": "status", "text": "Loading tools…"})
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+                continue
+            if name == "update_plan":
+                try:
+                    result_text = json.dumps(update_plan(run, args))
+                except ValueError as e:
+                    result_text = json.dumps({"ok": False, "error": str(e)})
+                if UPDATE_PLAN_DEF not in p["tools"]:
+                    p["tools"].append(UPDATE_PLAN_DEF)
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+                continue
             if name in SERVER_TOOLS:
                 ok_to_run = True
                 if name in APPROVAL_TOOLS:
@@ -9584,6 +9991,13 @@ def run_reply(run):
                     run.emit({"type": "tool", "name": name})
                     result, summary = run_server_tool(name, args)
                     line = _reply_tool_line(name, result, summary)
+                    if not result.get("ok"):
+                        note = failure_note(run, name, result)
+                        if note == STOP_NOTE and run.lane == "fast" and deep_available():
+                            deep_at = _reply_go_deep(run, p, escalate=True)   # failed twice: the bigger model tries
+                            if deep_at:
+                                note = ESCALATE_NOTE
+                        result = {**result, "note": note}
                     result_text = json.dumps(result)
             elif name in client_names:
                 run.emit({"type": "tool", "name": name})
@@ -9594,7 +10008,6 @@ def run_reply(run):
                 where = "on the desktop" if run.client == "web" else "here"
                 line = f"✗ {name} isn't available {where}"
                 result_text = json.dumps({"ok": False, "error": f"{name} isn't available in this app."})
-            switched = None
             if name == "switch_mode" and auto:
                 try:
                     switched = json.loads(result_text).get("switched_to")
@@ -9602,14 +10015,68 @@ def run_reply(run):
                     switched = None
             if switched:   # Stella switched herself: her next step uses that mode's instructions and tools
                 amode = _reply_mode(switched)
+                REPLY_STICKY.pop(run.conv, None)   # the old mode's tools go
                 run.emit({"type": "mode", "mode": switched})
                 _reply_save(run, "tool", f"⇄ Auto: {amode['name']} (Stella switched)")
                 p = _reply_prepare(run, amode, True, 0)
                 hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
             else:
                 _reply_save(run, "tool", line)
-            REPLY_STICKY.setdefault(run.conv, set()).add(name)
+                REPLY_STICKY.setdefault(run.conv, set()).add(name)
             turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+    if not run.stop.is_set():
+        _reply_save(run, "tool", f"⚠ Paused after {rounds} steps: say “continue” to let {run.name} carry on")
+
+
+def _reply_self_check(run, body, saved, request, url=None):
+    """Checks a long answer once; if it has concrete problems, she fixes them and the message is replaced in place."""
+    run.checked = True
+    run.emit({"type": "status", "text": "Checking the answer…"})
+    try:
+        problems = check_reply(request, saved["text"])
+    except (urllib.error.URLError, OSError, ValueError, RuntimeError, KeyError) as e:
+        log(f"self-check skipped: {e}")
+        return
+    if not problems or run.stop.is_set():
+        return
+    run.emit({"type": "status", "text": "Fixing what the check found…"})
+    fix = {**body, "messages": body["messages"] + [
+        {"role": "assistant", "content": saved["text"]},
+        {"role": "user", "content": "(Automatic check of your reply, not from the user. Problems: " + "; ".join(problems)
+                                    + ". Give the corrected complete reply now, without mentioning this check.)"}]}
+    fix.pop("tools", None)
+    try:
+        res = _reply_stream(run, fix, url)
+    except (urllib.error.URLError, ConnectionError, TimeoutError, RuntimeError) as e:
+        log(f"self-check fix failed: {e}")
+        return
+    new = REPLY_THINK.sub("", res["content"]).strip()
+    if run.stop.is_set() or len(new) < 20 or res["finish"] == "length" or res["tool_calls"]:
+        run.emit({"type": "message", "message": saved})   # keep the first answer (the fix was cut short)
+        return
+    m = {**saved, "text": new, "updated_at": _reply_ts(run.conv)}
+    CHATS.sync(0, [], [m])
+    run.emit({"type": "message", "message": m})
+    _reply_save(run, "tool", "✓ Checked and fixed: " + "; ".join(problems)[:240])
+
+
+def _reply_go_deep(run, p, escalate=False):
+    """Switches this reply to the bigger model when it's available and the chat fits its window. Its URL, or None."""
+    s = deep_settings()
+    if p.get("info") and s.get("context") and p["info"]["used"] + 2048 > int(s["context"]):
+        log("reply: the chat is too long for the bigger model's window; the quick one answers")
+        return None
+    try:
+        url = deep_ensure(lambda t: run.emit({"type": "status", "text": t}))
+    except RuntimeError as e:
+        log(f"reply: bigger model unavailable ({e})")
+        run.emit({"type": "status", "text": "The bigger model isn't available; using the quick one…"})
+        return None
+    run.lane = "deep"
+    run.emit({"type": "lane", "lane": "deep", "label": s.get("label") or "bigger model", "escalated": escalate})
+    if escalate:
+        run.fails.clear()
+    return url
 
 
 def start_reply(conv_id, data, send):
@@ -9622,6 +10089,8 @@ def start_reply(conv_id, data, send):
         ACTIVITY["active"] += 1
     try:
         run_reply(run)
+        if not run.stop.is_set() and not run.data.get("voice"):
+            note_correction(run)
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read() or b"{}").get("error")
@@ -9639,8 +10108,1378 @@ def start_reply(conv_id, data, send):
             ACTIVITY["active"] -= 1
             ACTIVITY["last"] = time.time()
         REPLY_RUNS.pop(run.id, None)
+        LEARN_WAKE.set()
     run.emit({"type": "done", "error": error, "stopped": run.stop.is_set()})
     return run
+# ---- Working habits for server-run replies --------------------------------------------------------------------------
+# Small local models do much better with a few firm rules around them than with longer instructions:
+#  · tools on demand: only the tools this message needs go with it, plus load_tools to fetch a group by name, so a
+#    chat that touched CAD, Blender and KiCad doesn't carry all three (they cost thousands of tokens of context)
+#  · checked tool calls: arguments are parsed, repaired and checked against the tool's own schema before it runs, and
+#    a call that can't be fixed goes back to her with the exact problem instead of running half-filled
+#  · ask, then wait: a reply that asks the user something ends the turn, even if she also tried to call tools
+#  · plan, act, check: multi-step work gets a short plan in the chat that ticks off as she goes, failed steps come
+#    back with a "fix the cause, retry once" note, and the same failure twice tells her to stop and explain
+TOOL_GROUP_LABELS = {   # what load_tools offers, in the words the model sees
+    "electronics": "electronics calculators and diagrams",
+    "lists": "managing reminders, lists and memories (list, cancel, tick off, forget)",
+    "github": "the user's GitHub repositories (read code, builds, commits)",
+    "code": "run_python (run code, plots, data)",
+    "blender": "3D Modeler in Blender",
+    "cad": "CAD Designer in FreeCAD (parts for 3D printing)",
+    "pcb": "PCB Designer in KiCad",
+    "history": "searching earlier chats",
+    "skills": "saving a new skill",
+}
+
+
+def load_tools_def(loaded_names):
+    """load_tools, listing only the groups that aren't fully offered yet (None when every group is)."""
+    missing = [g for g in TOOL_GROUP_LABELS if g in TOOL_GROUPS
+               and any(n in SERVER_TOOLS and n not in loaded_names for n in TOOL_GROUPS[g])]
+    if not missing:
+        return None
+    return _fn("load_tools",
+               "Load more tools when the task needs ones you don't have yet: " +
+               "; ".join(f"{g} ({TOOL_GROUP_LABELS[g]})" for g in missing) + ". They're usable from your next step.",
+               {"groups": {"type": "array", "items": {"type": "string", "enum": [g for g in TOOL_GROUP_LABELS if g in TOOL_GROUPS]},
+                           "description": "Groups to load"}},
+               ["groups"])
+
+
+def load_tool_groups(args):
+    groups = args.get("groups")
+    if isinstance(groups, str):
+        groups = [g for g in re.split(r"[,\s]+", groups) if g]
+    names, unknown = [], []
+    for g in groups or []:
+        g = str(g).strip().lower()
+        if g in TOOL_GROUPS:
+            names += [n for n in TOOL_GROUPS[g] if n in SERVER_TOOLS and n not in names]
+        else:
+            unknown.append(g)
+    return names, unknown
+
+
+# ---- Checking tool arguments -------------------------------------------------------------------------------------
+def parse_tool_args(raw):
+    """The model's argument text as a dict, repairing the usual slips. (args, error or None)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}, None
+    tries = [raw]
+    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
+    tries.append(fenced)
+    tries.append(re.sub(r",\s*([}\]])", r"\1", fenced))           # trailing commas
+    for t in tries:
+        try:
+            v = json.loads(t)
+            return (v, None) if isinstance(v, dict) else ({}, "the arguments must be a JSON object")
+        except ValueError:
+            pass
+    try:   # Python-style dicts: single quotes, True/False/None
+        import ast
+        v = ast.literal_eval(fenced)
+        if isinstance(v, dict):
+            return v, None
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        pass
+    return {}, "the arguments weren't valid JSON"
+
+
+def _coerce(value, prop):
+    """(value, ok): fits one argument to its schema type where the meaning is clear ("3" → 3, "a, b" → [a, b])."""
+    t = prop.get("type")
+    if isinstance(t, list):
+        t = next((x for x in t if x != "null"), None)
+    if t is None:
+        return value, True
+    if t == "string":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value), True
+        if isinstance(value, str):
+            enum = prop.get("enum")
+            if enum and value not in enum:
+                low = {str(e).lower(): e for e in enum}
+                return (low[value.strip().lower()], True) if value.strip().lower() in low else (value, False)
+            return value, True
+        return value, False
+    if t in ("integer", "number"):
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, (int, float)):
+            return (int(value) if t == "integer" and float(value).is_integer() else value), \
+                not (t == "integer" and not float(value).is_integer())
+        if isinstance(value, str):
+            try:
+                f = float(value.strip())
+            except ValueError:
+                return value, False
+            if t == "integer":
+                return (int(f), True) if f.is_integer() else (value, False)
+            return f, True
+        return value, False
+    if t == "boolean":
+        if isinstance(value, bool):
+            return value, True
+        if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no"):
+            return value.strip().lower() in ("true", "yes"), True
+        if value in (0, 1):
+            return bool(value), True
+        return value, False
+    if t == "array":
+        if isinstance(value, list):
+            items = prop.get("items") if isinstance(prop.get("items"), dict) else {}
+            out = []
+            for x in value:
+                cx, ok = _coerce(x, items)
+                if not ok:
+                    return value, False
+                out.append(cx)
+            return out, True
+        if isinstance(value, str):
+            s = value.strip()
+            if s.startswith("["):
+                try:
+                    v = json.loads(s)
+                    if isinstance(v, list):
+                        return _coerce(v, prop)
+                except ValueError:
+                    pass
+            parts = [p.strip() for p in s.split(",")] if "," in s else [s]
+            return _coerce([p for p in parts if p], prop)
+        return _coerce([value], prop)
+    if t == "object":
+        if isinstance(value, dict):
+            return value, True
+        if isinstance(value, str):
+            try:
+                v = json.loads(value)
+                return (v, True) if isinstance(v, dict) else (value, False)
+            except ValueError:
+                return value, False
+        return value, False
+    return value, True
+
+
+def check_tool_args(tool_def, args):
+    """(fixed args, problem or None) against a tool's own definition: required arguments, types, choices."""
+    params = ((tool_def or {}).get("function") or {}).get("parameters") or {}
+    props = params.get("properties") or {}
+    problems, out = [], dict(args)
+    for key in list(out):
+        if key not in props and not key.startswith("_") and key not in ("approved", "conversation_id"):
+            close = [p for p in props if p.lower() == key.lower() or p.replace("_", "") == key.replace("_", "").lower()]
+            if close:
+                out[close[0]] = out.pop(key)
+    for key, prop in props.items():
+        if key not in out or out[key] is None:
+            continue
+        v, ok = _coerce(out[key], prop)
+        if ok:
+            out[key] = v
+        else:
+            want = prop.get("type", "value")
+            if prop.get("enum"):
+                want = "one of " + ", ".join(map(str, prop["enum"]))
+            problems.append(f"{key} should be {want}")
+    for key in params.get("required") or []:
+        if key not in out or out[key] is None or (isinstance(out[key], str) and not out[key].strip()):
+            hint = (props.get(key) or {}).get("description")
+            problems.append(f"{key} is missing" + (f" ({hint})" if hint else ""))
+    return out, ("; ".join(problems) if problems else None)
+
+
+# ---- Ask, then wait ----------------------------------------------------------------------------------------------
+_ASKS = re.compile(r"\b(would you like|do you want|should i|shall i|want me to|which (one|option|would|do you)|"
+                   r"what (size|dimensions|kind|type|would you)|can you (tell|confirm|send|share)|could you "
+                   r"(tell|confirm|send|share)|let me know|are you (ok|okay|sure|happy)|is that (ok|okay|right)|"
+                   r"or would you rather|please confirm|before i (start|go|continue))\b", re.I)
+
+
+def asks_user(text):
+    """True when a reply ends by asking the user something, so it has to wait for the answer."""
+    text = REPLY_THINK.sub("", text or "").strip()
+    text = re.sub(r"```[\s\S]*?```", "", text).strip()
+    if not text:
+        return False
+    tail = [ln.strip() for ln in text.splitlines() if ln.strip()][-3:]
+    last = tail[-1].rstrip("*_ )\"'")
+    if last.endswith("?"):
+        return True
+    return bool(_ASKS.search(" ".join(tail[-2:])))
+
+
+# ---- Plan, act, check -------------------------------------------------------------------------------------------
+PLAN_MODES = {"cad", "modeler", "pcb", "programmer", "electronics"}
+PLAN_HINT = ("This looks like several steps of work. Before your first tool call, call update_plan with 3-6 short "
+             "steps; then work through them, marking each done with update_plan as you finish it. Check each "
+             "step's result before the next. When everything is done, check the result against what the user asked.")
+RETRY_NOTE = ("This step failed. Read the error, fix its cause and try once more. If it fails the same way again, "
+              "stop and tell the user what went wrong and what you'd try next.")
+ESCALATE_NOTE = ("This failed twice the same way, so a bigger model now takes the next step: look at the cause again "
+                 "from the start, fix it and retry.")
+STOP_NOTE = ("This failed again the same way. Don't try it again: tell the user what went wrong and ask how to go on.")
+PLAN_LIMIT = 8
+
+
+def wants_plan(mode_id, text):
+    """Multi-step work: a design mode, or a message that asks for several things or a build."""
+    t = text or ""
+    return (mode_id in PLAN_MODES and len(t) > 40) or bool(
+        re.search(r"\b(step by step|build (me )?(a|an|the)|design (me )?(a|an|the)|make (me )?(a|an) .{3,40}(that|with)|"
+                  r"set up|then\b.*\bthen\b)", t, re.I)) or len(re.findall(r"^\s*(\d+[.)]|[-*])\s", t, re.M)) >= 3
+
+
+def plan_text(steps):
+    done = sum(1 for s in steps if s["done"])
+    head = f"☰ Plan: {done} of {len(steps)} done" if done < len(steps) else f"☰ Plan: all {len(steps)} done"
+    return head + "\n" + "\n".join(f"{i + 1}. {s['text']}" + (" (done)" if s["done"] else "") for i, s in enumerate(steps))
+
+
+def update_plan(run, args):
+    """update_plan: sets the steps (the first call) and ticks them off. One plan message per reply, edited in place."""
+    plan = getattr(run, "plan", None) or {"steps": [], "msg": None}
+    steps = args.get("steps")
+    if isinstance(steps, str):
+        steps = [s for s in re.split(r"\n|;\s*", steps) if s.strip()]
+    if isinstance(steps, list) and steps:
+        new = []
+        for s in steps[:PLAN_LIMIT]:
+            text = s.get("text") if isinstance(s, dict) else s
+            text = re.sub(r"^\s*(\d+[.)]|[-*])\s*", "", " ".join(str(text or "").split()))[:120]
+            if text:
+                old = next((x for x in plan["steps"] if x["text"].lower() == text.lower()), None)
+                new.append({"text": text, "done": bool(isinstance(s, dict) and s.get("done")) or bool(old and old["done"])})
+        if new:
+            plan["steps"] = new
+    for k in args.get("done") or []:
+        try:
+            i = int(k) - 1
+        except (TypeError, ValueError):
+            i = next((j for j, x in enumerate(plan["steps"]) if str(k).lower() in x["text"].lower()), -1)
+        if 0 <= i < len(plan["steps"]):
+            plan["steps"][i]["done"] = True
+    if not plan["steps"]:
+        raise ValueError("give the steps, e.g. steps=['Base plate 120x80x4 mm', 'Four M3 holes', 'Fillet the corners']")
+    text = plan_text(plan["steps"])
+    ts = _reply_ts(run.conv)
+    if plan["msg"]:
+        m = {**plan["msg"], "text": text, "updated_at": ts}
+    else:
+        m = {"id": str(uuid.uuid4()), "conv_id": run.conv, "role": "tool", "text": text, "reasoning": "",
+             "created_at": ts, "updated_at": ts, "deleted": False}
+    CHATS.sync(0, [], [m])
+    run.emit({"type": "message", "message": m})
+    plan["msg"] = m
+    run.plan = plan
+    left = [f"{i + 1}. {s['text']}" for i, s in enumerate(plan["steps"]) if not s["done"]]
+    return {"ok": True, "plan": [f"{i + 1}. {s['text']}" + (" (done)" if s["done"] else "") for i, s in
+                                 enumerate(plan["steps"])],
+            "next": left[0] if left else "All steps done: check the result against the request, then answer."}
+
+
+UPDATE_PLAN_DEF = _fn(
+    "update_plan",
+    "Your plan for multi-step work, shown to the user as a checklist. First call: steps (3-6 short steps). Then "
+    "done=[step numbers] as you finish them.",
+    {"steps": {"type": "array", "items": {"type": "string"}, "description": "The steps (only to set or change the plan)"},
+     "done": {"type": "array", "items": {"type": "integer"}, "description": "Step numbers you just finished"}}, [])
+
+
+def failure_note(run, name, result):
+    """A note added to a failed tool result: retry once with the cause fixed, then stop."""
+    fails = getattr(run, "fails", None)
+    if fails is None:
+        fails = run.fails = {}
+    key = name + ":" + re.sub(r"\d+", "#", str(result.get("error") or ""))[:80]
+    fails[key] = fails.get(key, 0) + 1
+    return STOP_NOTE if fails[key] >= 2 else RETRY_NOTE
+# ---- The deep lane: a bigger "thinking" model in system RAM -------------------------------------------------------
+# Stella's everyday model lives on the graphics card: quick, but a graphics card holds only a small model. System RAM
+# is bigger and cheap, and a mixture-of-experts model (35B of knowledge, only ~3B used per word) runs from it at a
+# usable speed on the processor. Design work, multi-step plans and anything the quick model fails at twice go to it.
+#
+#  · Finding one: Server → Bigger brain → "Find one that fits" measures the memory that's actually free right now,
+#    tries the best model that fits (downloading it), loads it and measures it; if it doesn't load or is too slow it
+#    tries the next smaller one. Nothing fits: the deep lane stays off, and says why.
+#  · Running it: it loads the first time it's needed (20-60 s) and leaves memory after a quiet spell, so the RAM is
+#    only taken while it's useful. Or point it at a llama-server on another computer (url).
+# Settings (deep.json next to the chat database): enabled, lane (auto | design | always | off), model_file, label,
+# context, tok_s, idle_min, url.
+DEEP_PORT = 8096
+DEEP_LANES = ("auto", "design", "always", "off")
+DEEP_MIN_TPS = 2.5          # slower than this isn't worth waiting for
+DEEP = {"exe": "", "models_dir": "", "proc": None, "log": None, "last_used": 0.0, "lock": threading.Lock(),
+        "finding": None, "flags": None}
+DEEP_ASK = re.compile(r"\b(think (harder|deeper|it through|carefully)|big(ger)? brain|deep (model|lane|brain)|"
+                      r"use (the|your) (big|bigger|smart|smarter) model)\b", re.I)
+DEEP_DESIGN_MODES = {"cad", "modeler", "pcb"}
+
+
+def _deep_path():
+    return os.path.join(MOVE["base"] or ".", "deep.json")
+
+
+def deep_settings():
+    try:
+        with open(_deep_path(), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("enabled", False)
+    if d.get("lane") not in DEEP_LANES:
+        d["lane"] = "auto"
+    d.setdefault("idle_min", 15)
+    return d
+
+
+def save_deep_settings(data):
+    d = deep_settings()
+    for k in ("enabled", "lane", "idle_min", "url", "model_file", "label", "context", "tok_s", "key", "quant",
+              "threads", "note"):
+        if k in data:
+            d[k] = data[k]
+    if d["lane"] not in DEEP_LANES:
+        raise ValueError("lane is auto, design, always or off")
+    d["idle_min"] = max(0, min(240, int(d.get("idle_min") or 0)))
+    url = str(d.get("url") or "").strip()
+    if url and not re.match(r"https?://", url):
+        raise ValueError("the address starts with http:// (a llama-server on another computer)")
+    d["url"] = url
+    with open(_deep_path() + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
+    os.replace(_deep_path() + ".tmp", _deep_path())
+    return deep_status()
+
+
+def deep_exe():
+    """llama-server, as the Windows app passes it or next to the models folder on Linux (~/llm/llama.cpp/...)."""
+    if DEEP["exe"] and os.path.isfile(DEEP["exe"]):
+        return DEEP["exe"]
+    md = DEEP["models_dir"]
+    if md:
+        for c in (os.path.join(os.path.dirname(md), "llama.cpp", "build", "bin", "llama-server"),
+                  os.path.join(os.path.dirname(md), "bin", "llama", "llama-server.exe")):
+            if os.path.isfile(c):
+                return c
+    return ""
+
+
+def free_ram_gb():
+    """Memory free for a new program right now (GB), or None if unknown."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class M(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_ulong), ("x", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in "abcdefg"]
+            m = M()
+            m.l = ctypes.sizeof(m)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return round(m.b / 2**30, 1)
+        with open("/proc/meminfo") as f:
+            return round(int(re.search(r"MemAvailable:\s+(\d+)", f.read()).group(1)) / 2**20, 1)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def deep_candidates(free_gb, ctx=16384, cores=4):
+    """Mixture-of-experts models that fit in free_gb, best first: (key, label, quant, size_gb, est tok/s)."""
+    if not TUNE:
+        return []
+    out = []
+    for m in TUNE.CATALOG:
+        if not m.get("moe") or m.get("legacy"):
+            continue
+        for tag, gb in m["quants"]:
+            need = gb + ctx / 1000 * m["kv_mb"] / 1000 + 1.0
+            if need > free_gb:
+                continue
+            hw = {"cores": cores, "avx2": True, "gpus": []}
+            e = TUNE.estimate(m, gb, hw, free_gb, [], ctx) or {"tok_s": 0}
+            out.append({"key": m["key"], "label": m["label"], "quant": tag, "size_gb": gb,
+                        "quality": TUNE.quality(m, gb), "tok_s": e["tok_s"]})
+    out.sort(key=lambda o: (-o["quality"], -o["tok_s"]))
+    return out
+
+
+def _deep_flags(exe):
+    if DEEP["flags"] is None:
+        try:
+            r = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=30, errors="replace",
+                               stdin=subprocess.DEVNULL, creationflags=0x08000000 if os.name == "nt" else 0)
+            DEEP["flags"] = (r.stdout or "") + (r.stderr or "")
+        except (OSError, subprocess.SubprocessError):
+            DEEP["flags"] = ""
+    return DEEP["flags"]
+
+
+def deep_model_args(exe, threads):
+    """The deep model's llama-server options, without the model, context and address: all on the processor."""
+    a = ["-ngl", "0", "-t", str(int(threads)), "-np", "1", "-fa", "on", "--cache-type-k", "q8_0",
+         "--cache-type-v", "q8_0", "--jinja"]
+    if "--reasoning-budget" in _deep_flags(exe):
+        a += ["--reasoning-budget", "4096", "--reasoning-budget-message", "I have thought enough; time to answer."]
+    return a
+
+
+def deep_args(s, exe):
+    threads = int(s.get("threads") or max(2, physical_cores()))
+    return (["-m", os.path.join(DEEP["models_dir"], s["model_file"]), "-c", str(int(s.get("context") or 16384))]
+            + deep_model_args(exe, threads) + ["--host", "127.0.0.1", "--port", str(DEEP_PORT)])
+
+
+def deep_url():
+    s = deep_settings()
+    return s["url"].rstrip("/") if s.get("url") else f"http://127.0.0.1:{DEEP_PORT}"
+
+
+def deep_available():
+    s = deep_settings()
+    return bool(s.get("enabled") and s["lane"] != "off" and (s.get("url") or (s.get("model_file") and deep_exe())))
+
+
+def _deep_healthy(timeout=2):
+    try:
+        with urllib.request.urlopen(deep_url() + "/health", timeout=timeout) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def deep_ensure(status=lambda t: None, timeout=240):
+    """Starts the deep model if it isn't running (or checks the other computer's). Returns its URL; raises if not."""
+    s = deep_settings()
+    DEEP["last_used"] = time.time()
+    if s.get("url"):
+        if not _deep_healthy(5):
+            raise RuntimeError("the bigger model on the other computer isn't answering")
+        return deep_url()
+    with DEEP["lock"]:
+        p = DEEP["proc"]
+        if p and p.poll() is None and _deep_healthy():
+            return deep_url()
+        exe = deep_exe()
+        if not exe or not s.get("model_file") or not os.path.isfile(os.path.join(DEEP["models_dir"], s["model_file"])):
+            raise RuntimeError("the bigger model isn't installed")
+        if not (p and p.poll() is None):
+            status("Waking the bigger model (up to a minute)…")
+            path = os.path.join(MOVE["base"] or ".", "deep-model.log")
+            DEEP["log"] = open(path, "w", encoding="utf-8", errors="replace")
+            DEEP["proc"] = subprocess.Popen([exe] + deep_args(s, exe), stdout=DEEP["log"], stderr=subprocess.STDOUT,
+                                            stdin=subprocess.DEVNULL,
+                                            creationflags=0x08000000 if os.name == "nt" else 0)
+            log(f"deep model: starting {s.get('label') or s['model_file']}")
+        started = time.time()
+        while time.time() - started < timeout:
+            if DEEP["proc"].poll() is not None:
+                tail = ""
+                try:
+                    with open(os.path.join(MOVE["base"] or ".", "deep-model.log"), encoding="utf-8", errors="replace") as f:
+                        tail = " ".join(f.read()[-2000:].split()[-30:])
+                except OSError:
+                    pass
+                DEEP["proc"] = None
+                raise RuntimeError("the bigger model stopped while loading: " + tail)
+            if _deep_healthy():
+                DEEP["last_used"] = time.time()
+                return deep_url()
+            time.sleep(1)
+        deep_stop()
+        raise RuntimeError("the bigger model took too long to load")
+
+
+def deep_stop():
+    """Stops the deep model (the Windows app calls this when it stops Stella)."""
+    p = DEEP.get("proc")
+    DEEP["proc"] = None
+    if p and p.poll() is None:
+        p.terminate()
+        try:
+            p.wait(20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        log("deep model: stopped")
+    if DEEP.get("log"):
+        try:
+            DEEP["log"].close()
+        except OSError:
+            pass
+        DEEP["log"] = None
+
+
+def deep_idle_loop():
+    """Frees the deep model's memory after its quiet spell (it loads again when it's next needed)."""
+    while True:
+        time.sleep(30)
+        try:
+            idle = int(deep_settings().get("idle_min") or 0)
+            p = DEEP.get("proc")
+            if p and p.poll() is None and idle and time.time() - DEEP["last_used"] > idle * 60 \
+                    and not any(getattr(r, "lane", "") == "deep" for r in list(REPLY_RUNS.values())):
+                deep_stop()
+        except Exception as e:      # never let the idle check stop for good
+            log(f"deep model idle check: {e}")
+
+
+def choose_lane(mode_id, text, think=False):
+    """'deep' or 'fast' for one reply."""
+    if not deep_available():
+        return "fast"
+    lane = deep_settings()["lane"]
+    if lane == "always" or DEEP_ASK.search(text or ""):
+        return "deep"
+    if lane in ("auto", "design") and mode_id in DEEP_DESIGN_MODES and len(text or "") > 30:
+        return "deep"
+    if lane == "auto" and (wants_plan(mode_id, text) or (think and mode_id in ("programmer", "electronics", "tutor"))):
+        return "deep"
+    return "fast"
+
+
+def deep_status():
+    s = deep_settings()
+    p = DEEP.get("proc")
+    st = {**s, "available": deep_available(), "running": bool(s.get("url") and _deep_healthy(2)) or
+          bool(p and p.poll() is None), "exe_found": bool(deep_exe()), "free_ram_gb": free_ram_gb(),
+          "finding": DEEP.get("finding")}
+    return st
+
+
+def deep_find(fetch=None, bench=None):
+    """Background job: finds the best deep model that loads here (see the top of this part). Progress in
+    DEEP["finding"] = {state, text, tried: [...]}."""
+    fetch = fetch or _download_file
+    bench = bench or (TUNE.bench_once if TUNE else None)
+    job = {"state": "running", "text": "Checking free memory…", "tried": [], "done": 0, "total": 0}
+    DEEP["finding"] = job
+    try:
+        exe, md = deep_exe(), DEEP["models_dir"]
+        if not (TUNE and bench and exe and md):
+            raise RuntimeError("this server can't run a second model (llama-server or the models folder wasn't found)")
+        deep_stop()
+        free = free_ram_gb()
+        if free is None:
+            raise RuntimeError("couldn't read how much memory is free")
+        main_ctx = context_size() or 16384
+        ctx = 32768 if main_ctx > 16384 and free >= 24 else 16384
+        cores = physical_cores()
+        cands = [c for c in deep_candidates(free - 1.5, ctx, cores) if c["tok_s"] >= DEEP_MIN_TPS * 0.8][:3]
+        if not cands:
+            raise RuntimeError(f"only {free:g} GB of memory is free with everything else running: a bigger model "
+                               "needs about 13 GB. More RAM, a smaller everyday model, or another computer would do it")
+        man = TUNE.read_manifest(md)
+        for c in cands:
+            mid = TUNE.model_id(c["key"], c["quant"])
+            job["text"] = f"Trying {c['label']} {c['quant']} ({c['size_gb']:g} GB)…"
+            entry = man.get(mid) or {}
+            name = entry.get("model_file") or ""
+            if not (name and TUNE.installed(md, entry)):
+                job["text"] = f"Downloading {c['label']} {c['quant']} ({c['size_gb']:g} GB)…"
+                r = TUNE.download_model(mid, md, job, fetch, vision=False, mtp=False)
+                name = r["model_file"]
+            job["text"] = f"Loading {c['label']} {c['quant']} to measure it (a minute or two)…"
+            res = bench(exe, os.path.join(md, name), deep_model_args(exe, cores), ctx, timeout=900, n_predict=96)
+            job["tried"].append({"model": f"{c['label']} {c['quant']}", **res})
+            if res.get("ok") and res.get("gen_tps", 0) >= DEEP_MIN_TPS:
+                save_deep_settings({"enabled": True, "model_file": name, "label": f"{c['label']} {c['quant']}",
+                                    "key": c["key"], "quant": c["quant"], "context": ctx, "threads": cores,
+                                    "tok_s": res["gen_tps"], "url": "",
+                                    "note": f"measured {res['gen_tps']:g} tokens/s with {free:g} GB free"})
+                job.update(state="done", text=f"Ready: {c['label']} {c['quant']}, {res['gen_tps']:g} tokens/s. It "
+                                               "loads when it's first needed and leaves memory after a quiet spell.")
+                return job
+        raise RuntimeError("none of the models that should fit loaded fast enough here: " +
+                           "; ".join(f"{t['model']}: " + (f"{t.get('gen_tps', 0):g} tokens/s" if t.get("ok")
+                                                          else str(t.get("error", ""))[:120]) for t in job["tried"]))
+    except Exception as e:
+        job.update(state="failed", text=str(e)[:600])
+        save_deep_settings({"enabled": False})
+        return job
+
+
+def start_deep_find():
+    if DEEP.get("finding") and DEEP["finding"].get("state") == "running":
+        return False
+    threading.Thread(target=deep_find, daemon=True, name="deep-find").start()
+    return True
+# ---- Getting better over time: ratings, her test set, lessons from corrections, checking long answers -------------
+#  · Thumbs up/down on a reply: a thumbs-down (and a correction like "no, that's wrong") becomes a test case;
+#    a thumbs-up keeps a good answer as one that must keep working.
+#  · The test set replays every case against the current model (and the bigger one, if set up) and a judge scores
+#    the new answer, so a change is measured instead of guessed. It runs when asked, and once a night while idle
+#    after the cases or the server changed.
+#  · Corrections become lessons: one sentence she reads next time (in a skill's guide, or in her instructions).
+#  · Long answers are checked once before they stand: missing parts, contradicting numbers, code that can't run.
+EVAL_MAX_CASES = 60
+LESSONS_MAX = 40
+LESSONS_IN_PROMPT = 8
+CORRECTION = re.compile(r"^\s*(no[,.!]|nope\b|wrong\b|that'?s (wrong|not (right|it|what i))|not (right|what i (asked|meant|wanted))|"
+                        r"actually[,]?\s|you (got|made|missed|forgot|misread)|incorrect\b|that isn'?t (right|correct)|"
+                        r"you'?re wrong|that'?s incorrect)", re.I)
+LEARN_STATE = {"tables": False, "eval": None}
+
+
+def _learn_tables():
+    if LEARN_STATE["tables"]:
+        return
+    with CHATS.lock:
+        CHATS.db.executescript("""
+            CREATE TABLE IF NOT EXISTS ratings(msg_id TEXT PRIMARY KEY, conv_id TEXT, rating INTEGER, note TEXT,
+                created_at INTEGER);
+            CREATE TABLE IF NOT EXISTS eval_cases(id TEXT PRIMARY KEY, kind TEXT, conv_id TEXT, msg_id TEXT, mode TEXT,
+                history TEXT, reply TEXT, note TEXT, created_at INTEGER, enabled INTEGER DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS eval_runs(id TEXT PRIMARY KEY, at INTEGER, lane TEXT, model TEXT, passed INTEGER,
+                total INTEGER, details TEXT);
+        """)
+        CHATS.db.commit()
+    LEARN_STATE["tables"] = True
+
+
+def _exchange_before(conv_id, msg_id, turns=3):
+    """(mode, history [{role, content}] up to the user message that led to this reply, the reply's text)."""
+    msgs = _reply_messages(conv_id)
+    idx = next((i for i, m in enumerate(msgs) if m["id"] == msg_id), -1)
+    if idx < 0:
+        raise ValueError("no such message")
+    reply = msgs[idx]["text"]
+    hist = [{"role": h["role"], "content": h["content"]} for h in _reply_history(msgs[:idx])]
+    users = [i for i, h in enumerate(hist) if h["role"] == "user"]
+    hist = hist[users[-turns]:] if len(users) >= turns else hist
+    while hist and hist[-1]["role"] != "user":
+        hist.pop()
+    conv = _reply_conversation(conv_id)
+    lanes = _auto_db().get("chats", {}).get(conv_id, {}).get("lanes", [])
+    mode = (conv[1] if conv and conv[1] else "") or (lanes[-1]["mode"] if lanes else "general")
+    return mode, hist, reply
+
+
+def add_eval_case(kind, conv_id, msg_id, note=""):
+    _learn_tables()
+    mode, hist, reply = _exchange_before(conv_id, msg_id)
+    if not hist:
+        return None
+    cid = uuid.uuid4().hex[:10]
+    with CHATS.lock:
+        CHATS.db.execute("DELETE FROM eval_cases WHERE msg_id=?", (msg_id,))
+        CHATS.db.execute("INSERT INTO eval_cases VALUES(?,?,?,?,?,?,?,?,?,1)",
+                         (cid, kind, conv_id, msg_id, mode, json.dumps(hist), reply, note[:600], int(time.time() * 1000)))
+        CHATS.db.execute("DELETE FROM eval_cases WHERE id NOT IN (SELECT id FROM eval_cases ORDER BY created_at DESC "
+                         "LIMIT ?)", (EVAL_MAX_CASES,))
+        CHATS.db.commit()
+    return cid
+
+
+def rate_message(msg_id, rating, note=""):
+    """Thumbs up (1), down (-1) or none (0) on one of her replies."""
+    _learn_tables()
+    row = CHATS.db.execute("SELECT conv_id, role FROM messages WHERE id=? AND deleted=0", (msg_id,)).fetchone()
+    if not row or row[1] != "assistant":
+        raise ValueError("only Stella's replies can be rated")
+    rating = 1 if int(rating) > 0 else -1 if int(rating) < 0 else 0
+    note = " ".join(str(note or "").split())[:600]
+    with CHATS.lock:
+        if rating == 0:
+            CHATS.db.execute("DELETE FROM ratings WHERE msg_id=?", (msg_id,))
+            CHATS.db.execute("DELETE FROM eval_cases WHERE msg_id=?", (msg_id,))
+        else:
+            CHATS.db.execute("INSERT OR REPLACE INTO ratings VALUES(?,?,?,?,?)",
+                             (msg_id, row[0], rating, note, int(time.time() * 1000)))
+        CHATS.db.commit()
+    case = None
+    if rating:
+        case = add_eval_case("good" if rating > 0 else "bad", row[0], msg_id, note)
+    if rating < 0 and note:
+        threading.Thread(target=learn_lesson, args=(row[0], msg_id, note), daemon=True).start()
+    return {"rating": rating, "case": case}
+
+
+def ratings_for(conv_id):
+    _learn_tables()
+    return {r[0]: r[1] for r in CHATS.db.execute("SELECT msg_id, rating FROM ratings WHERE conv_id=?", (conv_id,))}
+
+
+def eval_cases():
+    _learn_tables()
+    rows = CHATS.db.execute("SELECT id, kind, conv_id, msg_id, mode, history, reply, note, created_at, enabled FROM "
+                            "eval_cases ORDER BY created_at DESC").fetchall()
+    out = []
+    for r in rows:
+        hist = json.loads(r[5] or "[]")
+        req = next((h["content"] for h in reversed(hist) if h["role"] == "user"), "")
+        req = re.sub(r"^\[Automatic context[\s\S]*?\[End of context\]\s*", "", str(req))
+        out.append({"id": r[0], "kind": r[1], "conv_id": r[2], "msg_id": r[3], "mode": r[4], "request": req[:400],
+                    "reply": (r[6] or "")[:400], "note": r[7] or "", "created_at": r[8], "enabled": bool(r[9]),
+                    "_history": hist, "_reply": r[6] or ""})
+    return out
+
+
+def eval_runs(limit=10):
+    _learn_tables()
+    rows = CHATS.db.execute("SELECT id, at, lane, model, passed, total, details FROM eval_runs ORDER BY at DESC LIMIT ?",
+                            (limit,)).fetchall()
+    return [{"id": r[0], "at": r[1], "lane": r[2], "model": r[3], "passed": r[4], "total": r[5],
+             "details": json.loads(r[6] or "[]")} for r in rows]
+
+
+def delete_eval_case(cid):
+    _learn_tables()
+    with CHATS.lock:
+        n = CHATS.db.execute("DELETE FROM eval_cases WHERE id=?", (str(cid),)).rowcount
+        CHATS.db.commit()
+    return n > 0
+
+
+JUDGE_SCHEMA = {"type": "object", "properties": {"pass": {"type": "boolean"}, "score": {"type": "integer"},
+                                                 "why": {"type": "string"}}, "required": ["pass", "score", "why"]}
+
+
+def _model_once(url, messages, max_tokens=1200, schema=None, tools=None, think=False, timeout=600):
+    body = {"model": "local", "messages": messages, "max_tokens": max_tokens, "temperature": 0.3 if schema else 0.6,
+            "chat_template_kwargs": {"enable_thinking": think}}
+    if schema:
+        body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
+    if tools:
+        body["tools"] = tools
+    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        msg = (json.loads(r.read()).get("choices") or [{}])[0].get("message") or {}
+    text = REPLY_THINK.sub("", msg.get("content") or "").strip()
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        text += f"\n[calls the {fn.get('name')} tool with {str(fn.get('arguments'))[:400]}]"
+    return text.strip()
+
+
+def _judge(url, case, answer):
+    req = case["_history"][-1]["content"] if case["_history"] else ""
+    if case["kind"] == "good":
+        task = ("The user was happy with the earlier reply below. PASS if the new reply is still correct and about as "
+                "helpful (it may be worded differently).")
+    else:
+        task = ("The user marked the earlier reply below as bad" + (f", saying: {case['note']}" if case["note"] else "")
+                + ". PASS only if the new reply avoids that problem and answers the request well.")
+    prompt = (f"{task}\n\nRequest:\n{str(req)[-3000:]}\n\nEarlier reply:\n{case['_reply'][:3000]}\n\nNew reply:\n"
+              f"{answer[:4000]}\n\nScore the new reply 0-10. Reply with JSON only.")
+    raw = _model_once(url, [{"role": "system", "content": "You are a strict, fair reviewer of an assistant's replies."},
+                            {"role": "user", "content": prompt}], 300, JUDGE_SCHEMA)
+    m = re.search(r"\{[\s\S]*\}", raw)
+    v = json.loads(m.group(0)) if m else {}
+    return bool(v.get("pass")), int(v.get("score") or 0), str(v.get("why") or "")[:300]
+
+
+def run_evals(lane="fast"):
+    """Replays the test set (in the background); results in eval_runs. Returns the run's summary."""
+    _learn_tables()
+    state = {"state": "running", "done": 0, "total": 0, "lane": lane, "started": int(time.time() * 1000)}
+    LEARN_STATE["eval"] = state
+    try:
+        url = deep_ensure() if lane == "deep" else LLAMA_URL
+        cases = [c for c in eval_cases() if c["enabled"]]
+        state["total"] = len(cases)
+        details, passed = [], 0
+        model = deep_settings().get("label", "deep") if lane == "deep" else (_llama_model_name() or "model")
+        for c in cases:
+            mode = _reply_mode(c["mode"] or "general")
+            system = _reply_system("web", "Stella", "", "", mode, "")
+            names = select_tools(c["_history"][-1]["content"] if c["_history"] else "", mode["id"],
+                                 mode.get("tools") or "all")
+            tools = [SERVER_TOOLS[n][1] for n in names if n in SERVER_TOOLS]
+            try:
+                answer = _model_once(url, [{"role": "system", "content": system}, *c["_history"]], 1500, None, tools)
+                ok, score, why = _judge(url, c, answer)
+            except (urllib.error.URLError, OSError, ValueError, RuntimeError, KeyError) as e:
+                answer, ok, score, why = "", False, 0, f"couldn't run: {e}"
+            passed += ok
+            details.append({"case": c["id"], "kind": c["kind"], "request": c["request"][:160], "pass": ok,
+                            "score": score, "why": why, "answer": answer[:600]})
+            state["done"] += 1
+        rid = uuid.uuid4().hex[:10]
+        with CHATS.lock:
+            CHATS.db.execute("INSERT INTO eval_runs VALUES(?,?,?,?,?,?,?)",
+                             (rid, int(time.time() * 1000), lane, model, passed, len(cases), json.dumps(details)))
+            CHATS.db.execute("DELETE FROM eval_runs WHERE id NOT IN (SELECT id FROM eval_runs ORDER BY at DESC LIMIT 30)")
+            CHATS.db.execute("INSERT OR REPLACE INTO meta VALUES('evals:last', ?)", (_evals_fingerprint(),))
+            CHATS.db.commit()
+        state.update(state="done", passed=passed)
+        return {"passed": passed, "total": len(cases), "model": model}
+    except Exception as e:
+        state.update(state="failed", error=str(e)[:300])
+        return {"error": str(e)}
+
+
+def _llama_model_name():
+    try:
+        return os.path.basename(str(_llama("/props", timeout=5).get("model_path") or "")).replace(".gguf", "")
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+
+
+def _evals_fingerprint():
+    _learn_tables()
+    n = CHATS.db.execute("SELECT COUNT(*), MAX(created_at) FROM eval_cases WHERE enabled=1").fetchone()
+    return f"{n[0]}:{n[1]}:{_llama_model_name()}"
+
+
+def start_evals(lane="fast"):
+    if LEARN_STATE["eval"] and LEARN_STATE["eval"].get("state") == "running":
+        return False
+    threading.Thread(target=run_evals, args=(lane,), daemon=True, name="evals").start()
+    return True
+
+
+def nightly_evals():
+    """Called by the jobs loop at night: replays the test set if the cases or the model changed since last time."""
+    _learn_tables()
+    row = CHATS.db.execute("SELECT v FROM meta WHERE k='evals:last'").fetchone()
+    if CHATS.db.execute("SELECT COUNT(*) FROM eval_cases WHERE enabled=1").fetchone()[0] and \
+            (not row or row[0] != _evals_fingerprint()):
+        run_evals("fast")
+
+
+# ---- Lessons from corrections ---------------------------------------------------------------------------------
+LESSON_SCHEMA = {"type": "object", "properties": {"lesson": {"type": "string"}, "skill": {"type": "string"}},
+                 "required": ["lesson", "skill"]}
+LESSON_PROMPT = """The user corrected an AI assistant. Write ONE short lesson (one sentence, an instruction to the assistant
+itself) that would have avoided the mistake and will help with similar tasks later, e.g. "Use 3.2 mm clearance holes for
+M3 screws unless the user says otherwise." or "Check that FreeCAD is installed before planning a CAD design.".
+If the user only changed their mind or preference for this one task, or there's no real mistake, reply with an empty
+lesson. "skill": the name of the skill it belongs to, from this list, or "general": {skills}
+Reply with JSON only."""
+
+
+def _lessons_path():
+    return os.path.join(MOVE["base"] or ".", "lessons.json")
+
+
+def lessons():
+    try:
+        with open(_lessons_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def _save_lessons(items):
+    with open(_lessons_path() + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(items[-LESSONS_MAX:], f, indent=1)
+    os.replace(_lessons_path() + ".tmp", _lessons_path())
+
+
+def add_lesson(text, skill="general", conv_id=""):
+    text = " ".join(str(text or "").split())[:300]
+    if len(text) < 8:
+        return None
+    items = lessons()
+    if any(_same_fact(text, x["text"]) for x in items):
+        return None
+    names = {s["name"] for s in skills_list()}
+    item = {"id": uuid.uuid4().hex[:8], "text": text, "skill": skill if skill in names else "general",
+            "conv_id": conv_id, "created_at": int(time.time() * 1000)}
+    _save_lessons(items + [item])
+    return item
+
+
+def delete_lesson(lid):
+    items = lessons()
+    keep = [x for x in items if x["id"] != str(lid)]
+    if len(keep) == len(items):
+        return False
+    _save_lessons(keep)
+    return True
+
+
+def lessons_section():
+    general = [x["text"] for x in lessons() if x["skill"] == "general"][-LESSONS_IN_PROMPT:]
+    return ("## Lessons from past mistakes\n" + "\n".join(f"- {t}" for t in general)) if general else ""
+
+
+def skill_lessons(name):
+    return [x["text"] for x in lessons() if x["skill"] == name][-12:]
+
+
+def learn_lesson(conv_id, bad_msg_id, correction):
+    """Writes a lesson from a correction (and keeps the corrected exchange as a test case)."""
+    try:
+        _, hist, bad = _exchange_before(conv_id, bad_msg_id)
+        req = re.sub(r"^\[Automatic context[\s\S]*?\[End of context\]\s*", "", str(hist[-1]["content"])) if hist else ""
+        skills = ", ".join(s["name"] for s in skills_list())
+        body = {"model": "local", "temperature": 0.2, "max_tokens": 200,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "response_format": {"type": "json_schema", "json_schema": {"name": "lesson", "schema": LESSON_SCHEMA}},
+                "messages": [{"role": "system", "content": LESSON_PROMPT.replace("{skills}", skills)},
+                             {"role": "user", "content": f"Request:\n{req[-2000:]}\n\nAssistant's reply:\n{bad[:2500]}"
+                                                         f"\n\nThe user's correction:\n{correction[:1500]}"}]}
+        content = _quick_model(body, timeout=120)["choices"][0]["message"].get("content") or "{}"
+        m = re.search(r"\{[\s\S]*\}", content)
+        v = json.loads(m.group(0)) if m else {}
+        item = add_lesson(v.get("lesson"), str(v.get("skill") or "general"), conv_id)
+        if item:
+            log(f"lesson learned: {item['text']}")
+        return item
+    except Exception as e:      # learning is a bonus: never let it break anything
+        log(f"lesson skipped: {e}")
+        return None
+
+
+def note_correction(run):
+    """After a reply: if the user's message corrected her previous reply, learn from it (in the background)."""
+    msgs = _reply_messages(run.conv)
+    users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
+    if len(users) < 2:
+        return False
+    last = msgs[users[-1]]
+    if not CORRECTION.search(last["text"] or ""):
+        return False
+    prev = next((m for m in reversed(msgs[:users[-1]]) if m["role"] == "assistant"), None)
+    if not prev:
+        return False
+    try:
+        add_eval_case("correction", run.conv, prev["id"], last["text"])
+    except (ValueError, sqlite3.Error):
+        pass
+    threading.Thread(target=learn_lesson, args=(run.conv, prev["id"], last["text"]), daemon=True).start()
+    return True
+
+
+# ---- Checking long answers once ---------------------------------------------------------------------------------
+CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"},
+                                                 "problems": {"type": "array", "items": {"type": "string"}, "maxItems": 3}},
+                "required": ["ok", "problems"]}
+CHECK_PROMPT = """You check an assistant's reply before the user reads it. Flag only concrete, objective problems:
+a part of the request that wasn't answered, numbers or units that contradict each other or are clearly wrong, code that
+can't run as written (syntax, undefined names, missing imports), or steps in the wrong order. Do NOT flag style, length,
+wording or things that are a matter of taste. When in doubt, it's ok. Reply with JSON only."""
+SELF_CHECK_MIN = 1500
+
+
+def wants_check(text, mode_id, voice=False):
+    if voice or not text:
+        return False
+    code_lines = sum(b.count("\n") for b in re.findall(r"```[\s\S]*?```", text))
+    return len(text) >= SELF_CHECK_MIN or code_lines >= 40 or (mode_id in DEEP_DESIGN_MODES and len(text) >= 800)
+
+
+def check_reply(request, reply):
+    """[problems] found in a reply ([] = fine). Uses Stella's everyday model, which is free once she has answered."""
+    raw = _model_once(LLAMA_URL, [{"role": "system", "content": CHECK_PROMPT},
+                                  {"role": "user", "content": f"Request:\n{request[-3000:]}\n\nReply:\n{reply[:9000]}"}],
+                      300, CHECK_SCHEMA, timeout=120)
+    m = re.search(r"\{[\s\S]*\}", raw)
+    v = json.loads(m.group(0)) if m else {"ok": True}
+    probs = [" ".join(str(p).split())[:200] for p in v.get("problems") or [] if str(p).strip()]
+    return [] if v.get("ok", True) and not probs else probs[:3]
+
+
+def self_check_settings():
+    try:
+        with open(os.path.join(MOVE["base"] or ".", "self-check.json"), encoding="utf-8") as f:
+            return {"enabled": bool(json.load(f).get("enabled", True))}
+    except (OSError, ValueError):
+        return {"enabled": True}
+
+
+def save_self_check_settings(data):
+    with open(os.path.join(MOVE["base"] or ".", "self-check.json"), "w", encoding="utf-8") as f:
+        json.dump({"enabled": bool(data.get("enabled", True))}, f)
+    return self_check_settings()
+# ---- Background jobs: things Stella does on a schedule while you're away -------------------------------------------
+# A job is a request run at set times ("every weekday at 7:30: summarize last night's GitHub builds"). Each run is a
+# normal reply in the job's own chat (so you can read it and carry on there), and a reminder rings on your phones
+# when it's done. Ask Stella ("every morning at 7, ...") or use Settings → Background jobs. Times are this server's.
+JOB_REPEATS = ("once", "hourly", "daily", "weekdays", "weekly")
+JOBS_MAX = 30
+JOBS = {"lock": threading.Lock(), "running": set()}
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def _jobs_path():
+    return os.path.join(MOVE["base"] or ".", "jobs.json")
+
+
+def jobs_list():
+    try:
+        with open(_jobs_path(), encoding="utf-8") as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        items = []
+    for j in items:
+        j["running"] = j["id"] in JOBS["running"]
+        j["next_run"] = job_next_run(j)
+    return items
+
+
+def _jobs_save(items):
+    keep = [{k: v for k, v in j.items() if k not in ("running", "next_run")} for j in items]
+    with open(_jobs_path() + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(keep, f, indent=1)
+    os.replace(_jobs_path() + ".tmp", _jobs_path())
+
+
+def job_next_run(job, now=None):
+    """The next time (unix seconds, server's local time) this job is due: the first scheduled time after its last
+    run (or after it was made). None when it's off or a one-off that has run."""
+    if not job.get("enabled", True):
+        return None
+    rep = job.get("repeat", "daily")
+    last = (job.get("last_run") or 0) / 1000
+    ref = last or (job.get("created_at") or 0) / 1000 or (now or time.time())
+    hh, mm = (int(x) for x in str(job.get("time") or "08:00").split(":")[:2])
+    if rep == "once":
+        if last:
+            return None
+        d = job.get("date") or time.strftime("%Y-%m-%d", time.localtime(ref))
+        y, mo, da = (int(x) for x in d.split("-"))
+        when = time.mktime((y, mo, da, hh, mm, 0, 0, 0, -1))
+        return when if when > ref else time.mktime((y, mo, da + 1, hh, mm, 0, 0, 0, -1))
+    t = time.localtime(ref)
+    if rep == "hourly":
+        minute = int(job.get("minute") or 0)
+        when = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, minute, 0, 0, 0, -1))
+        return when if when > ref else when + 3600
+    for add in range(0, 9):
+        when = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + add, hh, mm, 0, 0, 0, -1))
+        wday = time.localtime(when).tm_wday
+        if rep == "weekdays" and wday >= 5 or rep == "weekly" and wday != int(job.get("weekday") or 0):
+            continue
+        if when > ref:
+            return when
+    return None
+
+
+def job_save(data):
+    items = jobs_list()
+    jid = str(data.get("id") or "")
+    job = next((j for j in items if j["id"] == jid), None) if jid else None
+    if not job:
+        if len(items) >= JOBS_MAX:
+            raise ValueError(f"there are already {JOBS_MAX} jobs: delete one first")
+        job = {"id": uuid.uuid4().hex[:10], "created_at": int(time.time() * 1000), "enabled": True, "last_run": 0}
+        items.append(job)
+    name = " ".join(str(data.get("name") or job.get("name") or "").split())[:60]
+    prompt = str(data.get("prompt") or job.get("prompt") or "").strip()[:2000]
+    if not name or not prompt:
+        raise ValueError("a job needs a short name and what to do")
+    rep = str(data.get("repeat") or job.get("repeat") or "daily").lower()
+    if rep not in JOB_REPEATS:
+        raise ValueError("repeat is once, hourly, daily, weekdays or weekly")
+    tm = str(data.get("time") or job.get("time") or "08:00").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)?", tm, re.I)
+    if not m:
+        raise ValueError("time is like 07:30")
+    h = int(m.group(1)) % 12 + (12 if m.group(3) and m.group(3)[0].lower() == "p" else 0) if m.group(3) else int(m.group(1))
+    if h > 23 or int(m.group(2)) > 59:
+        raise ValueError("time is like 07:30")
+    wd = data.get("weekday", job.get("weekday", 0))
+    if isinstance(wd, str) and not wd.isdigit():
+        wd = next((i for i, d in enumerate(DAYS) if d.startswith(wd.strip().lower()[:3])), 0)
+    date = str(data.get("date") or job.get("date") or "")
+    if rep == "once" and date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ValueError("date is like 2026-12-24")
+    job.update(name=name, prompt=prompt, repeat=rep, time=f"{h:02d}:{m.group(2)}", weekday=int(wd) % 7, date=date,
+               minute=int(data.get("minute", job.get("minute", 0)) or 0) % 60,
+               enabled=bool(data.get("enabled", job.get("enabled", True))), notify=bool(data.get("notify", job.get("notify", True))))
+    _jobs_save(items)
+    return next(j for j in jobs_list() if j["id"] == job["id"])
+
+
+def job_delete(jid):
+    items = jobs_list()
+    keep = [j for j in items if j["id"] != str(jid)]
+    if len(keep) == len(items):
+        return False
+    _jobs_save(keep)
+    return True
+
+
+def _job_chat(job):
+    """The job's own chat (made on its first run, or again if you deleted it)."""
+    cid = job.get("conv_id")
+    if cid and _reply_conversation(cid) is not None:
+        return cid
+    cid = "job-" + job["id"]
+    ts = int(time.time() * 1000)
+    CHATS.sync(0, [{"id": cid, "title": "Job: " + job["name"], "created_at": ts, "updated_at": ts, "mode": ""}], [])
+    return cid
+
+
+def run_job(jid, name="Stella"):
+    """Runs one job now (in this thread). Returns its result text."""
+    items = jobs_list()
+    job = next((j for j in items if j["id"] == str(jid)), None)
+    if not job:
+        raise ValueError("no such job")
+    with JOBS["lock"]:
+        if job["id"] in JOBS["running"]:
+            raise ValueError("that job is already running")
+        JOBS["running"].add(job["id"])
+    try:
+        cid = _job_chat(job)
+        ts = _reply_ts(cid)
+        now = time.strftime("%Y-%m-%dT%H:%M:%S") + time.strftime("%z")[:3] + ":" + time.strftime("%z")[3:]
+        text = (f"(Scheduled job “{job['name']}”, running by itself: nobody is watching, so don't ask questions; do "
+                f"the work and give the result.)\n\n{job['prompt']}")
+        CHATS.sync(0, [], [{"id": str(uuid.uuid4()), "conv_id": cid, "role": "user", "text": text, "created_at": ts,
+                            "updated_at": ts, "deleted": False}])
+        errors = []
+        start_reply(cid, {"client": "web", "name": name, "fresh": True, "now": now, "auto_level": "auto",
+                          "now_line": "Current time: " + time.strftime("%A %Y-%m-%d %H:%M") + " (this server's time)"},
+                    lambda ev: errors.append(ev.get("error")) if ev.get("type") == "done" and ev.get("error") else None)
+        reply = next((m["text"] for m in reversed(_reply_messages(cid)) if m["role"] == "assistant"), "")
+        result = ("✗ " + errors[0]) if errors else (reply.strip().splitlines() or [""])[0][:200]
+        items = jobs_list()
+        for j in items:
+            if j["id"] == job["id"]:
+                j.update(last_run=int(time.time() * 1000), last_result=result, conv_id=cid)
+                if j.get("repeat") == "once":
+                    j["enabled"] = False
+        _jobs_save(items)
+        if job.get("notify", True):
+            try:
+                CHATS.add_reminder(f"{job['name']} is ready" + (": couldn't finish" if errors else ""),
+                                   int(time.time() * 1000) + 5000, "none")
+            except (ValueError, sqlite3.Error) as e:
+                log(f"job: couldn't add the reminder ({e})")
+        log(f"job {job['name']}: {result[:80]}")
+        return result
+    finally:
+        JOBS["running"].discard(job["id"])
+
+
+def jobs_loop():
+    """Runs due jobs (waiting a little if Stella is busy with a reply), and the test set at night."""
+    time.sleep(60)
+    night_done = ""
+    while True:
+        try:
+            now = time.time()
+            for j in jobs_list():
+                nxt = j.get("next_run")
+                if nxt and nxt <= now and not j["running"]:
+                    late = now - nxt
+                    with ACTIVITY["lock"]:
+                        busy = ACTIVITY["active"] > 0
+                    if busy and late < 600:
+                        continue          # someone's mid-reply: try again shortly
+                    if late > 6 * 3600 and j.get("repeat") != "once":
+                        items = jobs_list()   # long missed (server was off): skip to the next time
+                        for x in items:
+                            if x["id"] == j["id"]:
+                                x["last_run"] = int(now * 1000)
+                        _jobs_save(items)
+                        continue
+                    threading.Thread(target=run_job, args=(j["id"],), daemon=True, name="job").start()
+            day = time.strftime("%Y-%m-%d")
+            if time.localtime().tm_hour in (2, 3, 4) and night_done != day and server_idle(600):
+                night_done = day
+                threading.Thread(target=nightly_evals, daemon=True, name="evals").start()
+        except Exception as e:     # never stop the loop for one bad job
+            log(f"jobs: {e}")
+        time.sleep(30)
+
+
+def tool_schedule_job(args):
+    action = str(args.get("action") or "add").lower()
+    if action == "list":
+        items = jobs_list()
+        return {"jobs": [{"id": j["id"], "name": j["name"], "repeat": j["repeat"], "time": j["time"],
+                          "next_run": time.strftime("%a %Y-%m-%d %H:%M", time.localtime(j["next_run"])) if j.get("next_run") else "off",
+                          "last_result": j.get("last_result", "")} for j in items]}, f"{len(items)} background jobs"
+    if action in ("remove", "delete", "cancel", "run"):
+        key = str(args.get("job") or args.get("name") or "").lower()
+        hit = [j for j in jobs_list() if j["id"] == key or key and key in j["name"].lower()]
+        if len(hit) != 1:
+            raise ValueError("which job? " + ", ".join(j["name"] for j in jobs_list()) if not hit else
+                             "more than one job matches: " + ", ".join(j["name"] for j in hit))
+        if action == "run":
+            threading.Thread(target=run_job, args=(hit[0]["id"],), daemon=True).start()
+            return {"started": hit[0]["name"], "note": "It runs in its own chat; a reminder rings when it's done."}, \
+                f"Started {hit[0]['name']}"
+        job_delete(hit[0]["id"])
+        return {"deleted": hit[0]["name"]}, f"Deleted the job {hit[0]['name']}"
+    j = job_save(args)
+    when = time.strftime("%a %Y-%m-%d %H:%M", time.localtime(j["next_run"])) if j.get("next_run") else "never"
+    return {"saved": j["name"], "repeat": j["repeat"], "time": j["time"], "first_run": when,
+            "note": "Times are the server's. The result goes into the chat 'Job: " + j["name"] + "' and a reminder "
+                    "rings when it's done."}, f"Scheduled {j['name']} ({j['repeat']} {j['time']})"
+
+
+SERVER_TOOLS["schedule_job"] = (tool_schedule_job, _fn(
+    "schedule_job",
+    "Background jobs: something you do by yourself at set times while the user is away (a morning summary, checking "
+    "builds, watching a price). Each run goes into the job's own chat and a reminder rings when it's done. For a "
+    "plain reminder use set_reminder instead.",
+    {"action": _p("add (default), list, remove or run"),
+     "name": _p("Short name, e.g. Morning briefing"),
+     "prompt": _p("What to do each time, written as a full request to yourself"),
+     "repeat": {"type": "string", "enum": list(JOB_REPEATS), "description": "How often"},
+     "time": _p("24-hour time, e.g. 07:30 (server time)"),
+     "weekday": _p("For weekly: monday … sunday"),
+     "date": _p("For once: YYYY-MM-DD"),
+     "job": _p("For remove/run: its name or id")}, ["action"]))
+TOOL_GROUPS["jobs"] = ["schedule_job"]
+TOOL_TRIGGERS["jobs"] = re.compile(
+    r"\b(every|each) (day|morning|evening|night|week|weekday|hour|monday|tuesday|wednesday|thursday|friday|saturday|"
+    r"sunday)\b|\bschedul|\bdaily\b|\bweekly\b|\bhourly\b|background jobs?|\bjobs?\b.*\b(list|cancel|delete|stop)", re.I)
+TOOL_GROUP_LABELS["jobs"] = "background jobs that run on a schedule"
+# ---- A real browser for pages fetch_page can't read ---------------------------------------------------------------
+# Many sites build their page with JavaScript, so a plain download is nearly empty. browse_page opens the page in a
+# headless Edge or Chrome (Chromium on Linux) on the server, lets its scripts run, then reads the finished page, and
+# can show a picture of it. Public pages only, a fresh profile each time: no logins, cookies or saved passwords.
+BROWSER = {"exe": None}
+BROWSER_CANDIDATES_WIN = [
+    r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe", r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+    r"%ProgramFiles%\Google\Chrome\Application\chrome.exe", r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+    r"%LocalAppData%\Google\Chrome\Application\chrome.exe"]
+BROWSER_CANDIDATES_UNIX = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge",
+                           "microsoft-edge-stable"]
+
+
+def find_browser():
+    if BROWSER["exe"] is None:
+        import shutil
+        found = os.environ.get("STELLAI_BROWSER", "")
+        if not found:
+            if os.name == "nt":
+                found = next((p for p in (os.path.expandvars(c) for c in BROWSER_CANDIDATES_WIN) if os.path.isfile(p)), "")
+            else:
+                found = next((shutil.which(c) for c in BROWSER_CANDIDATES_UNIX if shutil.which(c)), "")
+        BROWSER["exe"] = found or ""
+    return BROWSER["exe"]
+
+
+def _browser_run(url, extra, timeout=60, wait_s=6):
+    import tempfile
+    import shutil
+    exe = find_browser()
+    if not exe:
+        raise RuntimeError("no Edge, Chrome or Chromium on the server (on Linux: sudo apt install chromium)")
+    profile = tempfile.mkdtemp(prefix="stellai-browser-")
+    cmd = [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+           "--disable-extensions", "--mute-audio", "--hide-scrollbars", f"--user-data-dir={profile}",
+           f"--virtual-time-budget={int(max(1, min(20, wait_s)) * 1000)}", f"--user-agent={WEB_UA}"]
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        cmd.append("--no-sandbox")       # Chromium refuses to run as root otherwise (e.g. in a container)
+    try:
+        r = subprocess.run(cmd + extra + [url], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        return r.stdout.decode("utf-8", "replace"), profile
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("the page took too long to load")
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def tool_browse_page(args):
+    url = str(args.get("url", "")).strip()
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("only http and https addresses can be opened")
+    if not _public_host(u.hostname):
+        raise ValueError("that address is on a private network; Stella only opens public web pages")
+    limit = max(1000, min(30000, int(args.get("max_chars") or 12000)))
+    wait = float(args.get("wait_seconds") or 6)
+    html, _ = _browser_run(url, ["--dump-dom"], wait_s=wait)
+    if len(html.strip()) < 50:
+        raise RuntimeError("the browser returned an empty page")
+    title, text = _html_text(html)
+    find = str(args.get("find") or "").strip().lower()
+    if find and find in text.lower():
+        i = text.lower().index(find)
+        text = text[max(0, i - limit // 3):]
+    out = {"url": url, "title": title, "text": text[:limit], "truncated": len(text) > limit}
+    if args.get("screenshot") and DIAGRAM_DIR:
+        image_id = uuid.uuid4().hex[:16]
+        path = os.path.join(DIAGRAM_DIR, image_id + ".png")
+        _browser_run(url, [f"--screenshot={path}", "--window-size=1280,1600"], wait_s=wait)
+        if os.path.isfile(path) and os.path.getsize(path) > 1000:
+            out.update(image=image_id, title=title or url)
+            out["note"] = "A picture of the page is shown to the user."
+    return out, f"Opened {title or url} in the browser"[:200]
+
+
+SERVER_TOOLS["browse_page"] = (tool_browse_page, _fn(
+    "browse_page",
+    "Open a public web page in a real (headless) browser and read it after its scripts run: for pages fetch_page "
+    "returns empty or broken (shops, dashboards, apps built with JavaScript). Slower than fetch_page, so try that "
+    "first. screenshot=true also shows the user a picture of the page. No logins.",
+    {"url": _p("The http(s) address"), "find": _p("Optional words to jump to in a long page"),
+     "screenshot": _p("true to show a picture of the page", "boolean"),
+     "wait_seconds": _p("How long to let the page's scripts run (default 6, max 20)", "number"),
+     "max_chars": _p("Maximum characters to return (default 12000)", "integer")}, ["url"]))
+TOOL_GROUPS["browser"] = ["browse_page"]
+TOOL_TRIGGERS["browser"] = re.compile(r"\bbrowser\b|screenshot|javascript|\bopen (the|this|that) (page|site|website)|"
+                                      r"what does (the|this|that) (page|site|website) look like", re.I)
+TOOL_GROUP_LABELS["browser"] = "a real browser for pages fetch_page can't read, with screenshots"
+# ---- Saved chat memory: going back to a long chat answers straight away -------------------------------------------
+# Before answering, the model reads the whole chat (thousands of tokens: on a CPU or a small card that's the slow part).
+# llama-server keeps what it read for the chat it last answered, but switching chats throws that away. With
+# --slot-save-path it can save that work to disk and load it back: so when you switch chats, the hub saves the chat
+# being left and restores the one you're going back to. A model started without the option just skips this.
+SLOTS = {"current": "", "off_until": 0.0, "lock": threading.Lock(), "dir": ""}
+SLOT_KEEP = 12                  # chats kept on disk (newest)
+SLOT_MIN_TOKENS = 1500          # shorter chats re-read in a moment anyway
+
+
+def _slot_call(action, filename):
+    return _llama(f"/slots/0?action={action}", {"filename": filename}, timeout=120)
+
+
+def _slot_name(conv_id):
+    return "stellai-" + re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:60] + ".bin"
+
+
+def slot_switch(conv_id, used_tokens=0):
+    """Call before a reply on the everyday model: saves the chat that was loaded, restores this one if saved.
+    True when the request should go to slot 0 (the one being saved and restored)."""
+    if time.time() < SLOTS["off_until"]:
+        return False
+    with SLOTS["lock"]:
+        prev = SLOTS["current"]
+        if prev == conv_id:
+            return True
+        try:
+            if prev and SLOTS.get("prev_tokens", 0) >= SLOT_MIN_TOKENS:
+                _slot_call("save", _slot_name(prev))
+                SLOTS.setdefault("saved", {})[prev] = time.time()
+            if conv_id in SLOTS.get("saved", {}) or (SLOTS["dir"] and os.path.isfile(os.path.join(SLOTS["dir"], _slot_name(conv_id)))):
+                _slot_call("restore", _slot_name(conv_id))
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 404, 501):   # this model wasn't started with --slot-save-path: try again in an hour
+                SLOTS["off_until"] = time.time() + 3600
+                SLOTS["current"] = ""
+                return False
+            log(f"chat memory: {e}")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            log(f"chat memory: {e}")
+        SLOTS["current"] = conv_id
+        SLOTS["prev_tokens"] = used_tokens
+        _slot_tidy()
+        return True
+
+
+def _slot_tidy():
+    """Keeps the newest SLOT_KEEP saved chats on disk."""
+    saved = SLOTS.setdefault("saved", {})
+    for old in sorted(saved, key=saved.get)[:-SLOT_KEEP]:
+        saved.pop(old, None)
+    d = SLOTS["dir"]
+    if not d or not os.path.isdir(d):
+        return
+    try:
+        files = sorted((os.path.join(d, f) for f in os.listdir(d) if f.startswith("stellai-") and f.endswith(".bin")),
+                       key=os.path.getmtime)
+        for f in files[:-SLOT_KEEP]:
+            os.remove(f)
+    except OSError:
+        pass
+
+
+def slot_done(conv_id, used_tokens):
+    """After a reply: how much of this chat the model holds (decides whether it's worth saving later)."""
+    if SLOTS["current"] == conv_id:
+        SLOTS["prev_tokens"] = used_tokens
 # ----------------------------------------------------------------------------- desktop web chat
 # The page is kept in server/webchat.html; build_hub.py puts it here.
 WEBCHAT_HTML = r"""<!doctype html>
@@ -9702,7 +11541,7 @@ body.docs #docs{display:flex}
 .msg.assistant.wide{max-width:100%;width:100%}
 .msg .who{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--accent);opacity:.8;margin-bottom:4px}
 .msg .acts{position:absolute;top:-12px;right:8px;display:none;gap:4px}.msg:hover .acts{display:flex}
-.msg .acts button{padding:1px 8px;font-size:12px;border-radius:8px}
+.msg .acts button{padding:1px 8px;font-size:12px;border-radius:8px}.msg .acts button.on{color:var(--accent);border-color:var(--accent)}
 .tool{font-family:var(--mono);font-size:13px;color:var(--gold);padding:0 10px}
 .err{background:rgba(255,107,122,.12);border:1px solid rgba(255,107,122,.5);border-radius:12px;padding:10px 12px;color:#ffc7cd}
 .summary{border:1px solid rgba(155,123,255,.4);background:rgba(155,123,255,.08);border-radius:12px;padding:10px 14px;cursor:pointer}
@@ -9900,6 +11739,12 @@ const ICON_PATHS = {
   thought: "M12 4.5a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15Z M9 12h.01 M12 12h.01 M15 12h.01",
   dot: "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10Z",
   info: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 11v5.5 M12 7.8h.01",
+  plan: "M3.5 6.5l1.5 1.5 2.5-3 M10 6.5h10.5 M3.5 12.5l1.5 1.5 2.5-3 M10 12.5h10.5 M4 18h3 M10 18h10.5",
+  book: "M4 5.5c2.5-1 5.5-1 8 .5v13.5c-2.5-1.5-5.5-1.5-8-.5Z M20 5.5c-2.5-1-5.5-1-8 .5v13.5c2.5-1.5 5.5-1.5 8-.5Z",
+  up: "M7 10.5V20H4v-9.5Z M7 10.5L11 3.5c1.5 0 2.5 1 2.2 2.6L12.6 9.5H18.5a2 2 0 0 1 2 2.3l-1.2 6.5a2 2 0 0 1-2 1.7H7",
+  down: "M7 13.5V4H4v9.5Z M7 13.5L11 20.5c1.5 0 2.5-1 2.2-2.6l-.6-3.4H18.5a2 2 0 0 0 2-2.3l-1.2-6.5a2 2 0 0 0-2-1.7H7",
+  brain: "M12 5a3 3 0 0 0-5.8-1A3 3 0 0 0 4 9a3 3 0 0 0 0 5 3 3 0 0 0 2.2 5A3 3 0 0 0 12 19Z M12 5a3 3 0 0 1 5.8-1A3 3 0 0 1 20 9a3 3 0 0 1 0 5 3 3 0 0 1-2.2 5A3 3 0 0 1 12 19Z M12 5v14",
+  clock: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 7.5V12l3 2",
 };
 function icon(name, cls = "") {
   return `<svg class="li${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON_PATHS[name] || ICON_PATHS.sparkle}"/></svg>`;
@@ -9910,12 +11755,12 @@ const MODE_ICON = { "⌨": "keyboard", "✒": "pen", "✍": "pen", "✏": "pen",
   "❤": "heart", "♥": "heart", "🌙": "moon", "★": "star", "⭐": "star", "💻": "code", "◆": "cube", "🧊": "cube", "📐": "ruler", "🔌": "plug" };
 const modeIc = sym => icon(MODE_ICON[String(sym || "").trim()] || "sparkle");
 // Stored marks at the start of a line ("✓ Saved", "⇄ Auto: CAD") drawn as icons
-const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""] };
+const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""], "☰": ["plan", ""] };
 // The phone saves a Cancel/Undo button at the end of an action line ("[[button:Undo|tool|{…}]]"); only it can press it
 const stripButton = text => String(text || "").replace(/\n?\[\[button:[^\]\n]*\]\]\s*$/, "");
 function markedLine(text) {
   const t = stripButton(text).trimStart(); const m = MARKS[t[0]];
-  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()) : esc(t);
+  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()).replace(/\n/g, "<br>") : esc(t);
 }
 const fileIc = kind => icon(kind === "pdf" ? "doc" : kind === "image" ? "image" : kind === "code" ? "code" : "note");
 document.querySelectorAll("[data-ic]").forEach(el => { el.outerHTML = icon(el.dataset.ic, el.hasAttribute("data-solo") ? "solo" : ""); });
@@ -9988,6 +11833,7 @@ setPrompts(PROMPTS);
 const COLORS = { cyan: "#5CE1E6", blue: "#5AA9FF", red: "#FF5C6C", green: "#4DE8A0", purple: "#A77BFF", pink: "#FF7AC6", orange: "#FFA552", yellow: "#FFD84D" };
 
 // ---------------------------------------------------------------- state
+const RATINGS = new Map();   // message id -> 1 / -1 (thumbs on her replies)
 const S = {
   convs: new Map(), msgs: new Map(), dirtyC: new Set(), dirtyM: new Map(),
   cursor: 0, serverId: "", current: null, pendingProject: "", pendingMode: "",
@@ -10169,7 +12015,9 @@ function msgHtml(m, canRetry, live) {
     return `<div class="msg user">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${S.busy ? "" : `<button data-edit="${m.id}">Edit</button>`}</div>`}${photos.map(id => `<div class="md"><img src="${media("image:" + id)}"></div>`).join("")}${esc(text)}</div>`;
   }
   const wide = /```|\n\|/.test(m.text);
-  return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
+  const rated = RATINGS.get(m.id) || 0;
+  const rate = `<button data-rate="1" data-mid="${m.id}" class="${rated > 0 ? "on" : ""}" title="Good answer: keep it working">${icon("up", "solo")}</button><button data-rate="-1" data-mid="${m.id}" class="${rated < 0 ? "on" : ""}" title="Bad answer: she learns from it">${icon("down", "solo")}</button>`;
+  return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts">${rate}<button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
     <div class="who">${icon("sparkle")}${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>${icon("thought")}Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
     <div class="md">${m.text ? md(m.text) : '<span class="sub">…</span>'}</div></div>`;
 }
@@ -10674,6 +12522,10 @@ async function openProject(id) {
   if (q("#pdel")) q("#pdel").onclick = async () => { if (!confirm(`Delete “${p.name}”? Its notes and files are deleted; its chats are kept.`)) return;
     await api(`/projects/${p.id}`, { method: "DELETE" }); d.remove(); await loadMeta(); sync(); };
 }
+function confirmBox(text) {
+  return new Promise(res => { const d = dialog(`<p>${esc(text)}</p><div class="btns"><button id="no">Cancel</button><button class="primary" id="yes">OK</button></div>`, () => res(false));
+    d.querySelector("#yes").onclick = () => { d.remove(); res(true); }; d.querySelector("#no").onclick = () => { d.remove(); res(false); }; });
+}
 function alertBox(text) { const d = dialog(`<p>${esc(text)}</p><div class="btns"><button id="ok">OK</button></div>`); d.querySelector("#ok").onclick = () => d.remove(); }
 async function openTasks() {
   const [r, l] = await Promise.all([api("/reminders"), api("/lists")]);
@@ -10700,9 +12552,17 @@ async function openTasks() {
     await api(`/lists/${encodeURIComponent(n)}`, { method: "POST", json: { items: [i] } }); again(); };
 }
 async function openSettings() {
-  let gh = {}; try { gh = await api("/github"); } catch {}
+  let gh = {}, pers = { text: "", default: "", max: 600 }, selfCheck = {}; try { gh = await api("/github"); } catch {}
+  try { pers = await api("/personality"); } catch {}
+  try { selfCheck = await api("/self-check"); } catch {}
   const d = dialog(`<h2>${icon("settings")}Settings</h2>
     <label class="sub">Assistant name (this browser)</label><input id="nm" value="${esc(NAME())}">
+    <label class="sub" style="display:block;margin-top:10px">Personality (every device): describe her in your own words; empty = the default</label>
+    <textarea id="pers" rows="3" maxlength="${pers.max || 600}" placeholder="${esc(pers.default || "")}">${esc(pers.text || "")}</textarea>
+    <div class="btns" style="justify-content:flex-start;flex-wrap:wrap"><button class="ghost" id="skillsBtn">${icon("book")}Skills and lessons</button>
+      <button class="ghost" id="deepBtn">${icon("brain")}Bigger brain</button><button class="ghost" id="evalBtn">${icon("check")}Test set</button>
+      <button class="ghost" id="jobsBtn">${icon("clock")}Background jobs</button></div>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="selfCheck" style="width:auto" ${selfCheck.enabled !== false ? "checked" : ""}>Check long answers once before they stand (a few seconds longer)</label>
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
@@ -10717,14 +12577,128 @@ async function openSettings() {
     <button id="logout">Forget the API key here</button>
     <div class="btns"><button id="close">Cancel</button><button class="primary" id="save">Save</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#skillsBtn").onclick = () => { d.remove(); openSkills(); };
+  d.querySelector("#deepBtn").onclick = () => { d.remove(); openDeep(); };
+  d.querySelector("#evalBtn").onclick = () => { d.remove(); openEvals(); };
+  d.querySelector("#jobsBtn").onclick = () => { d.remove(); openJobs(); };
+  d.querySelector("#selfCheck").onchange = async e => { try { await api("/self-check", { method: "POST", json: { enabled: e.target.checked } }); } catch (er) { notice(er.message); } };
   d.querySelector("#logout").onclick = () => { store.set("key", ""); location.reload(); };
   if (d.querySelector("#untok")) d.querySelector("#untok").onclick = async () => { await api("/github", { method: "POST", json: { token: "" } }); d.remove(); openSettings(); };
   d.querySelector("#save").onclick = async () => {
     store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value); store.set("autoModes", d.querySelector("#am").value);
+    const pt = d.querySelector("#pers").value.trim();
+    if (pt !== (pers.text || "")) { try { await api("/personality", { method: "POST", json: { text: pt } }); setPrompts(await api("/prompts")); } catch (e) { alertBox("Personality: " + e.message); return; } }
     const body = { default_repo: d.querySelector("#repo").value.trim() }; const t = d.querySelector("#tok").value.trim(); if (t) body.token = t;
     try { const st = await api("/github", { method: "POST", json: body }); d.remove(); if (st.error) alertBox("GitHub: " + st.error); renderBar(); renderMsgs(); }
     catch (e) { alertBox(e.message); }
   };
+}
+
+// Skills: step-by-step guides Stella reads before a kind of task. Built-in ones can be replaced by yours of the same name.
+async function openSkills(editName) {
+  let list = []; try { list = (await api("/skills")).skills || []; } catch (e) { alertBox(e.message); return; }
+  const who = s => s.source === "built-in" ? " (built-in)" : s.source === "stella" ? ` (saved by ${esc(NAME())})` : "";
+  const d = dialog(`<h2>${icon("book")}Skills</h2><p class="sub">Short how-to guides ${esc(NAME())} reads before that kind of task, so a small model follows steps that work. Add your own, or ask her to “save how we did this as a skill”.</p>
+    <div class="list">${list.map(s => `<div class="row"><span class="t"><b>${esc(s.name)}</b>${who(s)}<br><span class="sub">${esc(s.description)}</span></span>
+      <button class="ghost" data-edit="${esc(s.name)}">${s.source === "built-in" ? "View / replace" : "Edit"}</button>${s.source !== "built-in" ? `<button class="ghost" data-del="${esc(s.name)}">${s.replaces_built_in ? "Back to built-in" : "Delete"}</button>` : ""}</div>`).join("")}</div>
+    <h3 class="hud" style="margin-top:14px">Lessons from your corrections</h3><div class="list" id="lessonList"><p class="sub">Loading…</p></div>
+    <h3 class="hud" id="formTitle" style="margin-top:14px">Add a skill</h3>
+    <input id="sn" placeholder="Name, e.g. solder-smd"><input id="sd" style="margin-top:6px" placeholder="When to use it (one line)">
+    <input id="st" style="margin-top:6px" placeholder="Words that suggest it (optional), e.g. solder, smd, reflow">
+    <textarea id="sb" rows="9" style="margin-top:6px" placeholder="1. …&#10;2. …"></textarea>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save skill</button></div>`);
+  const fill = name => { const s = list.find(x => x.name === name); if (!s) return;
+    d.querySelector("#formTitle").textContent = s.source === "built-in" ? "Replace " + s.name : "Edit " + s.name;
+    d.querySelector("#sn").value = s.name; d.querySelector("#sd").value = s.description; d.querySelector("#st").value = s.source === "built-in" ? "" : (s.triggers || ""); d.querySelector("#sb").value = s.body; d.querySelector("#sb").focus(); };
+  if (editName) fill(editName);
+  const drawLessons = async () => { let ls = []; try { ls = (await api("/lessons")).lessons || []; } catch {}
+    d.querySelector("#lessonList").innerHTML = ls.length ? ls.slice().reverse().map(l => `<div class="row"><span class="t">${esc(l.text)}<br><span class="sub">${l.skill === "general" ? "Every chat" : "With the " + esc(l.skill) + " skill"}</span></span><button class="ghost" data-dell="${l.id}" title="Forget this lesson">${icon("close", "solo")}</button></div>`).join("")
+      : `<p class="sub">None yet. When you correct her (“no, that's wrong…”) or give a reply a thumbs-down with a note, she writes a one-line lesson here.</p>`; };
+  drawLessons();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#save").onclick = async () => {
+    const body = { name: d.querySelector("#sn").value.trim().toLowerCase().replace(/\s+/g, "-"), description: d.querySelector("#sd").value.trim(), triggers: d.querySelector("#st").value.trim(), body: d.querySelector("#sb").value.trim() };
+    try { await api("/skills", { method: "POST", json: body }); d.remove(); openSkills(); } catch (e) { alertBox(e.message); }
+  };
+  d.onclick = async e => { const t = e.target.closest("button")?.dataset || {};
+    if (t.dell) { try { await api("/lessons/" + t.dell, { method: "DELETE" }); } catch (er) { notice(er.message); } drawLessons(); return; }
+    if (t.edit) fill(t.edit);
+    else if (t.del) { try { await api("/skills/" + encodeURIComponent(t.del), { method: "DELETE" }); d.remove(); openSkills(); } catch (er) { alertBox(er.message); } } };
+}
+
+// The bigger model: a mixture-of-experts model in system RAM for design work and hard problems
+async function openDeep() {
+  const d = dialog(`<h2>${icon("brain")}Bigger brain</h2><div id="dd"><p class="sub">Loading…</p></div><div class="btns"><button id="close">Close</button></div>`);
+  let timer = 0;
+  const draw = async () => {
+    let st; try { st = await api("/deep"); } catch (e) { d.querySelector("#dd").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; return; }
+    const f = st.finding, finding = f && f.state === "running";
+    const lanes = [["auto", "Auto: design work, plans and hard problems"], ["design", "Design work only (CAD, Blender, PCB)"], ["always", "Every reply"], ["off", "Off"]];
+    d.querySelector("#dd").innerHTML = `<p class="sub">A bigger model that runs from the computer's memory instead of the graphics card: slower to answer, but it reasons better. ${esc(NAME())} uses it for design work, multi-step plans, anything the quick model fails at twice, or when you ask her to “think harder”. It loads when it's needed and leaves memory after a quiet spell.</p>
+      <p>${st.available ? `<b>${esc(st.label || st.model_file || st.url)}</b>${st.tok_s ? ` · ${st.tok_s} tokens/s` : ""} · ${st.running ? "loaded now" : "loads when needed"}` : "<b>Not set up.</b>"}
+      ${st.free_ram_gb != null ? `<br><span class="sub">Free memory right now: ${st.free_ram_gb} GB${st.note ? " · " + esc(st.note) : ""}</span>` : ""}</p>
+      ${f ? `<p class="sub" style="${f.state === "failed" ? "color:var(--red)" : ""}">${esc(f.text)}${finding && f.total ? ` (${Math.round(100 * f.done / f.total)}%)` : ""}</p>` : ""}
+      <div class="btns" style="justify-content:flex-start"><button class="primary" id="find" ${finding || !st.exe_found ? "disabled" : ""}>${st.available ? "Find a better fit again" : "Find one that fits"}</button></div>
+      ${st.exe_found ? "" : `<p class="sub">This server can't start a second model by itself; point it at one on another computer below.</p>`}
+      <label class="sub" style="display:block;margin-top:10px">When to use it</label><select id="lane">${lanes.map(([v, l]) => `<option value="${v}" ${st.lane === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <label class="sub" style="display:block;margin-top:10px">Leave memory after this many quiet minutes (0 = keep it loaded)</label><input id="idle" type="number" min="0" max="240" value="${st.idle_min}">
+      <label class="sub" style="display:block;margin-top:10px">Or use a llama-server on another computer (optional)</label><input id="durl" placeholder="http://192.168.1.50:8096" value="${esc(st.url || "")}">
+      <div class="btns" style="justify-content:flex-start"><button id="saveDeep">Save</button></div>`;
+    d.querySelector("#find").onclick = async () => { if (!await confirmBox(`This checks the free memory, downloads the best model that fits (often 10–15 GB) and loads it to measure it. It can take a while; ${NAME()} keeps working meanwhile. Go ahead?`)) return;
+      try { await api("/deep/find", { method: "POST", json: {} }); } catch (e) { notice(e.message); } draw(); };
+    d.querySelector("#saveDeep").onclick = async () => { const url = d.querySelector("#durl").value.trim();
+      try { await api("/deep", { method: "POST", json: { lane: d.querySelector("#lane").value, idle_min: +d.querySelector("#idle").value || 0, url, ...(url ? { enabled: true } : {}) } }); notice("Saved."); } catch (e) { alertBox(e.message); } draw(); };
+    clearTimeout(timer); if (finding) timer = setTimeout(() => { if (document.body.contains(d)) draw(); }, 3000);
+  };
+  draw();
+  d.querySelector("#close").onclick = () => { clearTimeout(timer); d.remove(); };
+}
+// Her test set: rated and corrected replies, replayed against the current model with a score
+async function openEvals() {
+  const d = dialog(`<h2>${icon("check")}Test set</h2><div id="ev"><p class="sub">Loading…</p></div><div class="btns"><button id="close">Close</button></div>`);
+  let timer = 0;
+  const draw = async () => {
+    let r; try { r = await api("/evals"); } catch (e) { d.querySelector("#ev").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; return; }
+    const run = r.running, busy = run && run.state === "running", last = r.runs[0], prev = r.runs[1];
+    const kind = { bad: "thumbs-down", good: "thumbs-up", correction: "corrected" };
+    d.querySelector("#ev").innerHTML = `<p class="sub">Replies you rated or corrected. Each run asks the model the same requests again and a strict reviewer scores the new answers, so you can see whether a change made ${esc(NAME())} better or worse. It also runs by itself at night when the cases or the model changed.</p>
+      ${last ? `<p><b>Last run: ${last.passed} of ${last.total} passed</b> · ${esc(last.model)} · ${new Date(last.at).toLocaleString()}${prev ? ` <span class="sub">(before: ${prev.passed} of ${prev.total})</span>` : ""}</p>` : "<p>No runs yet.</p>"}
+      ${busy ? `<p class="sub">Running… ${run.done} of ${run.total}</p>` : run && run.state === "failed" ? `<p class="sub" style="color:var(--red)">${esc(run.error || "")}</p>` : ""}
+      <div class="btns" style="justify-content:flex-start"><button class="primary" id="runFast" ${busy || !r.cases.length ? "disabled" : ""}>Run now</button><button id="runDeep" ${busy || !r.cases.length ? "disabled" : ""}>Run on the bigger model</button></div>
+      <h3 class="hud" style="margin-top:12px">Cases (${r.cases.length})</h3><div class="list">${r.cases.map(c => { const res = last && last.details.find(x => x.case === c.id);
+        return `<div class="row"><span class="t">${res ? icon(res.pass ? "check" : "cross", res.pass ? "ok" : "bad") : ""}<b>${esc(kind[c.kind] || c.kind)}</b> · ${esc(c.request)}${c.note ? `<br><span class="sub">${esc(c.note)}</span>` : ""}${res && !res.pass ? `<br><span class="sub">Reviewer: ${esc(res.why)}</span>` : ""}</span><button class="ghost" data-delc="${c.id}" title="Remove from the test set">${icon("close", "solo")}</button></div>`; }).join("") || `<p class="sub">Give a reply a thumbs-up or thumbs-down (hover over it) to add it here.</p>`}</div>`;
+    d.querySelector("#runFast").onclick = async () => { await api("/evals/run", { method: "POST", json: { lane: "fast" } }); draw(); };
+    d.querySelector("#runDeep").onclick = async () => { await api("/evals/run", { method: "POST", json: { lane: "deep" } }); draw(); };
+    clearTimeout(timer); if (busy) timer = setTimeout(() => { if (document.body.contains(d)) draw(); }, 4000);
+  };
+  draw();
+  d.querySelector("#close").onclick = () => { clearTimeout(timer); d.remove(); };
+  d.onclick = async e => { const b = e.target.closest("[data-delc]"); if (!b) return; try { await api("/evals/" + b.dataset.delc, { method: "DELETE" }); } catch (er) { notice(er.message); } draw(); };
+}
+// Background jobs: things she does by herself at set times
+async function openJobs() {
+  const d = dialog(`<h2>${icon("clock")}Background jobs</h2><p class="sub">Things ${esc(NAME())} does by herself at set times (this server's clock). Each run goes into the job's own chat and a reminder rings on your phones when it's done. You can also just ask her: “every weekday at 7:30, summarize last night's GitHub builds”.</p>
+    <div class="list" id="jl"><p class="sub">Loading…</p></div>
+    <h3 class="hud" style="margin-top:12px">Add a job</h3><input id="jn" placeholder="Name, e.g. Morning briefing">
+    <textarea id="jp" rows="3" style="margin-top:6px" placeholder="What to do each time, e.g. Check my GitHub builds and summarize any failures"></textarea>
+    <div style="display:flex;gap:8px;margin-top:6px"><select id="jr">${[["daily", "Every day"], ["weekdays", "Weekdays"], ["weekly", "Once a week"], ["hourly", "Every hour"], ["once", "Once"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <input id="jt" type="time" value="07:30"><select id="jw">${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((n, i) => `<option value="${i}">${n}</option>`).join("")}</select></div>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="addJob">Add job</button></div>`);
+  const rep = { daily: "every day", weekdays: "weekdays", weekly: "weekly", hourly: "every hour", once: "once" };
+  const draw = async () => { let js = []; try { js = (await api("/jobs")).jobs || []; } catch (e) { notice(e.message); }
+    d.querySelector("#jl").innerHTML = js.map(j => `<div class="row"><span class="t"><b>${esc(j.name)}</b> · ${rep[j.repeat] || j.repeat} ${j.repeat === "hourly" ? "" : esc(j.time)}${j.running ? " · running now" : j.next_run ? ` · next ${new Date(j.next_run * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : " · off"}<br><span class="sub">${esc(j.prompt.slice(0, 140))}</span>${j.last_result ? `<br><span class="sub">Last: ${esc(j.last_result)}</span>` : ""}</span>
+      <button class="ghost" data-runj="${j.id}">Run now</button>${j.conv_id ? `<button class="ghost" data-openj="${esc(j.conv_id)}">Open</button>` : ""}<button class="ghost" data-delj="${j.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("") || `<p class="sub">No jobs yet.</p>`; };
+  draw();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#addJob").onclick = async () => {
+    try { await api("/jobs", { method: "POST", json: { name: d.querySelector("#jn").value, prompt: d.querySelector("#jp").value, repeat: d.querySelector("#jr").value, time: d.querySelector("#jt").value, weekday: +d.querySelector("#jw").value } });
+      d.querySelector("#jn").value = ""; d.querySelector("#jp").value = ""; draw(); } catch (e) { alertBox(e.message); } };
+  d.onclick = async e => { const b = e.target.closest("button"); if (!b) return; const t = b.dataset;
+    try {
+      if (t.runj) { await api(`/jobs/${t.runj}/run`, { method: "POST", json: {} }); notice("Started: it runs in its own chat."); setTimeout(draw, 1500); }
+      else if (t.delj) { if (await confirmBox("Delete this job?")) { await api("/jobs/" + t.delj, { method: "DELETE" }); draw(); } }
+      else if (t.openj) { d.remove(); await sync(); openChat(t.openj); }
+    } catch (er) { notice(er.message); } };
 }
 
 // ---------------------------------------------------------------- search past chats
@@ -10844,7 +12818,7 @@ function renderAtts() {
 
 // ---------------------------------------------------------------- wiring
 function newChat(projectId = "") { if (S.busy) stop(); S.current = null; S.pendingProject = projectId; S.pendingMode = ""; S.context = null; S.error = null; S.editing = null; store.set("current", ""); renderSide(); renderBar(); renderMsgs(); $("#input").focus(); }
-function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); }
+function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); loadRatings(id); }
 function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(240, t.scrollHeight) + "px"; }
 $("#newChat").onclick = () => newChat();
 $("#newProject").onclick = () => openProject("new");
@@ -10860,7 +12834,7 @@ $("#projectChip").onclick = () => openProject(curProjectId());
 $("#openMemory").onclick = () => openMemory();
 // Memory: what Stella remembers about you, and facts she suggests from quiet chats (keep or drop them)
 async function openMemory() {
-  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. She also reads chats that have gone quiet and suggests facts to keep.</p>
+  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. A few minutes after a chat goes quiet she reads it and suggests facts to keep (only things you said).</p>
     <label class="sub">Learning from quiet chats</label>
     <select id="mm"><option value="review">Suggest, I review</option><option value="auto">Save by itself</option><option value="off">Off</option></select>
     <div id="ms"></div><h3 class="hud" style="margin-top:12px">Remembered</h3><div class="list" id="ml"><p class="sub">Loading…</p></div>
@@ -10994,8 +12968,31 @@ $("#wrap").onchange = e => {
   if (t.value.startsWith("pin:")) { const id = t.value.slice(4); saveConv({ ...curConv(), mode: id === "general" ? "" : id, updated_at: nextTs() }); sync().then(updateMeter); renderBar(); renderMsgs(); return; }
   S.forced.set(S.current, t.value); retry();
 };
+// Thumbs up/down on her replies: a thumbs-down (with what was wrong) becomes a test case and a lesson
+async function loadRatings(conv) {
+  if (!conv) return;
+  try { const r = (await api(`/chats/${encodeURIComponent(conv)}/ratings`)).ratings || {}; for (const [k, v] of Object.entries(r)) RATINGS.set(k, v); if (conv === S.current) renderMsgs(false); } catch {}
+}
+async function rateMsg(mid, rating) {
+  const now = RATINGS.get(mid) || 0; if (now === rating) rating = 0;
+  let note = "";
+  if (rating < 0) {
+    note = await new Promise(res => {
+      const d = dialog(`<h2>${icon("down")}What was wrong?</h2><p class="sub">Optional, but it's how ${esc(NAME())} learns: it becomes a lesson she reads next time, and a test her answers must pass.</p>
+        <textarea id="rn" rows="3" placeholder="e.g. M3 clearance holes are 3.2 mm, not 3 mm"></textarea>
+        <div class="btns"><button id="skip">Skip</button><button class="primary" id="ok">Save</button></div>`, () => res(""));
+      d.querySelector("#rn").focus();
+      d.querySelector("#skip").onclick = () => { d.remove(); res(""); };
+      d.querySelector("#ok").onclick = () => { const v = d.querySelector("#rn").value.trim(); d.remove(); res(v); };
+    });
+  }
+  try { await api(`/messages/${encodeURIComponent(mid)}/rate`, { method: "POST", json: { rating, note } }); RATINGS.set(mid, rating); renderMsgs(false);
+    notice(rating > 0 ? "Kept as a good answer in her test set." : rating < 0 ? "Thanks: added to her test set" + (note ? " and she'll learn from it." : ".") : "Rating removed."); }
+  catch (er) { notice(er.message); }
+}
 $("#wrap").onclick = e => {
   const t = e.target;
+  const rb = t.closest && t.closest("[data-rate]"); if (rb) { rateMsg(rb.dataset.mid, +rb.dataset.rate); return; }
   if (t.dataset.doc) { openDocs(t.dataset.doc); return; }
   if (t.classList.contains("cp")) { navigator.clipboard.writeText(t.nextElementSibling.textContent); t.textContent = "Copied"; setTimeout(() => t.textContent = "Copy", 1200); return; }
   if (t.dataset.copy) { const m = msgsOf(S.current).find(x => x.id === t.dataset.copy); if (m) navigator.clipboard.writeText(m.text.replace(/!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)/g, "").trim()); return; }
@@ -11116,6 +13113,29 @@ async function micToggle(opts = {}) {
   postAvatar({ state: "listening" });
   if (followup) avatarStatus("");
 }
+// Interrupting her by talking when the wake word isn't listening (with it, the wake word's listener does this):
+// while she speaks, the microphone (with the browser's echo cancelling) waits for your voice; then she stops and
+// listens. The first moment of her speech sets how much of her own voice leaks back, so only a clearly louder,
+// steady voice counts.
+const BARGE = { on: false };
+async function bargeWatch() {
+  if (BARGE.on || MIC.rec || WAKE.det || !AVATAR_MODE || !AV.cfg.barge_in || !window.isSecureContext || !navigator.mediaDevices) return;
+  BARGE.on = true;
+  let streamIn;
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } }); }
+  catch { BARGE.on = false; return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)(); const src = ctx.createMediaStreamSource(streamIn);
+  const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
+  const buf = new Float32Array(an.fftSize); const t0 = performance.now(); let leak = 0.01, run = 0;
+  const end = () => { if (!BARGE.on) return; BARGE.on = false; clearInterval(iv); try { src.disconnect(); } catch {} streamIn.getTracks().forEach(t => t.stop()); ctx.close(); };
+  const iv = setInterval(() => {
+    if (!SPEAK.speaking || MIC.rec) { end(); return; }
+    an.getFloatTimeDomainData(buf); let r = 0; for (let i = 0; i < buf.length; i++) r += buf[i] * buf[i]; r = Math.sqrt(r / buf.length);
+    if (performance.now() - t0 < 800) { leak = Math.max(leak, r); return; }
+    if (r > Math.max(0.035, leak * 2.5)) { if (++run >= 6) { end(); SPEAK.cancel(); if (S.busy) stop(); micToggle({ followup: true }); } }
+    else run = Math.max(0, run - 1);
+  }, 50);
+}
 // After a spoken answer, keep listening for a few seconds so you can reply without the wake word
 function startFollowUp() {
   if (!AVATAR_MODE || !AV.cfg.followup || !window.isSecureContext) return;
@@ -11196,6 +13216,7 @@ const SPEAK = {
     const buf = await item.p;
     if (buf && item.gen === this.gen) {
       const ctx = this.audio(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+      if (AVATAR_MODE) bargeWatch();
       await new Promise(res => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(this.analyser); s.onended = res; item.src = s; s.start(); });
     }
     this.playing = null;
@@ -11517,7 +13538,7 @@ async function start() {
   try { await sync(); } catch (e) { console.warn("sync", e); }
   if (S.current && !S.convs.has(S.current)) S.current = null;
   try { await loadMeta(); } catch (e) { console.warn("meta", e); }
-  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) refreshDocs();
+  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) { refreshDocs(); loadRatings(S.current); }
   if (AVATAR_MODE) $("#avName").textContent = NAME().toUpperCase();
 }
 setInterval(() => { if (KEY && !S.busy) sync(); if (KEY && !S.busy && document.body.classList.contains("docs") && !D.editing) refreshDocs(); }, 20000);
@@ -11599,7 +13620,7 @@ def avatar_config():
     cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
            "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
            "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": "",
-           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": False,
+           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": True,
            "neon": False, "neon_glow": "#3dff9e", "neon_haze": "#ff3fb4", "neon_crowd": True}
     try:
         with open(_avatar_path("config.json")) as f:
@@ -14616,6 +16637,126 @@ def make_http_handler(cfg, chats):
     def get_prompts(self, path, m):
         return self.send_json(200, prompts_payload())
 
+    @routes.add("GET", "/personality")   # Settings → Stella → Personality (every device)
+    def get_personality(self, path, m):
+        return self.send_json(200, {"text": personality(), "default": PERSONALITY_DEFAULT, "max": PERSONALITY_MAX})
+
+    @routes.add("POST", "/personality")
+    def post_personality(self, path, m):
+        try:
+            return self.send_json(200, save_personality(json.loads(self.read_body(20_000) or b"{}")))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("GET", "/skills")   # Stella's how-to guides: built-in ones and yours
+    def get_skills(self, path, m):
+        return self.send_json(200, {"skills": skills_list()})
+
+    @routes.add("POST", "/skills")   # add or change one of yours: {name, description, body, triggers}
+    def post_skills(self, path, m):
+        try:
+            s = skill_save(json.loads(self.read_body(SKILL_MAX * 4 + 4000) or b"{}"))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"skill": s, "skills": skills_list()})
+
+    @routes.add("DELETE", R(r"/skills/([a-z0-9][a-z0-9-]{1,39})"))
+    def delete_skill(self, path, m):
+        if not skill_delete(m.group(1)):
+            return self.send_json(404, {"error": "that's not one of your skills (built-in skills can't be deleted)"})
+        return self.send_json(200, {"skills": skills_list()})
+
+    def body_json(self, limit=200_000):
+        return json.loads(self.read_body(limit) or b"{}")
+
+    # ---- The bigger model (34_deep_brain.py) --------------------------------------------------------------------
+    @routes.add("GET", "/deep")
+    def get_deep(self, path, m):
+        return self.send_json(200, deep_status())
+
+    @routes.add("POST", "/deep")   # {enabled, lane, idle_min, url}
+    def post_deep(self, path, m):
+        try:
+            return self.send_json(200, save_deep_settings(body_json(self)))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/deep/find")   # find, download and measure the best one that fits (in the background)
+    def post_deep_find(self, path, m):
+        return self.send_json(200, {"started": start_deep_find(), **deep_status()})
+
+    # ---- Ratings, the test set, lessons, checking long answers (35_learning.py) ---------------------------------
+    @routes.add("POST", R(r"/messages/([^/]{1,64})/rate"))   # {rating: 1 | -1 | 0, note}
+    def post_rate(self, path, m):
+        try:
+            d = body_json(self, 20_000)
+            return self.send_json(200, rate_message(m.group(1), d.get("rating", 0), d.get("note", "")))
+        except (ValueError, TypeError, sqlite3.Error) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("GET", R(r"/chats/([^/]{1,64})/ratings"))
+    def get_ratings(self, path, m):
+        return self.send_json(200, {"ratings": ratings_for(m.group(1))})
+
+    @routes.add("GET", "/evals")
+    def get_evals(self, path, m):
+        cases = [{k: v for k, v in c.items() if not k.startswith("_")} for c in eval_cases()]
+        return self.send_json(200, {"cases": cases, "runs": eval_runs(), "running": LEARN_STATE["eval"]})
+
+    @routes.add("POST", "/evals/run")   # {lane: fast | deep}
+    def post_evals_run(self, path, m):
+        try:
+            lane = "deep" if body_json(self, 2000).get("lane") == "deep" else "fast"
+        except ValueError:
+            lane = "fast"
+        return self.send_json(200, {"started": start_evals(lane), "running": LEARN_STATE["eval"]})
+
+    @routes.add("DELETE", R(r"/evals/([0-9a-f]{10})"))
+    def delete_eval(self, path, m):
+        return self.send_json(200 if delete_eval_case(m.group(1)) else 404, {"ok": True})
+
+    @routes.add("GET", "/lessons")
+    def get_lessons(self, path, m):
+        return self.send_json(200, {"lessons": lessons()})
+
+    @routes.add("DELETE", R(r"/lessons/([0-9a-f]{8})"))
+    def delete_lesson_route(self, path, m):
+        return self.send_json(200 if delete_lesson(m.group(1)) else 404, {"lessons": lessons()})
+
+    @routes.add("GET", "/self-check")
+    def get_self_check(self, path, m):
+        return self.send_json(200, self_check_settings())
+
+    @routes.add("POST", "/self-check")
+    def post_self_check(self, path, m):
+        try:
+            return self.send_json(200, save_self_check_settings(body_json(self, 2000)))
+        except (ValueError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    # ---- Background jobs (36_jobs.py) ----------------------------------------------------------------------------
+    @routes.add("GET", "/jobs")
+    def get_jobs(self, path, m):
+        return self.send_json(200, {"jobs": jobs_list()})
+
+    @routes.add("POST", "/jobs")   # add or change: {id?, name, prompt, repeat, time, weekday, date, enabled}
+    def post_jobs(self, path, m):
+        try:
+            return self.send_json(200, {"job": job_save(body_json(self, 20_000)), "jobs": jobs_list()})
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("DELETE", R(r"/jobs/([0-9a-f]{10})"))
+    def delete_job(self, path, m):
+        return self.send_json(200 if job_delete(m.group(1)) else 404, {"jobs": jobs_list()})
+
+    @routes.add("POST", R(r"/jobs/([0-9a-f]{10})/run"))
+    def post_job_run(self, path, m):
+        if not any(j["id"] == m.group(1) for j in jobs_list()):
+            return self.send_json(404, {"error": "no such job"})
+        threading.Thread(target=run_job, args=(m.group(1),), daemon=True).start()
+        return self.send_json(200, {"started": True})
+
     @routes.add("GET", "/modes")
     def get_modes(self, path, m):
         return self.send_json(200, {"modes": chats.modes()})
@@ -14835,6 +16976,9 @@ def parse_args(argv=None):
     p.add_argument("--backup-dir", default="", help="where nightly backups go (default: backups next to the database)")
     p.add_argument("--model-conf", default="", help="Linux launcher's model.conf (enables switching models from the app)")
     p.add_argument("--models-dir", default="", help="folder with the .gguf models")
+    p.add_argument("--slot-dir", default="", help="llama-server's --slot-save-path (old saved chats are tidied up)")
+    p.add_argument("--llama-server", default="", help="llama-server program for the bigger 'deep' model (default: "
+                                                     "found next to the models folder)")
     p.add_argument("--llama-pid", default="", help="file with llama-server's process id")
     p.add_argument("--avatar-dir", default="", help="avatar screen files: voice, 3D libraries, your character "
                                                     "(default: avatar next to the database)")
@@ -14917,6 +17061,9 @@ def start(cfg):
         os.makedirs(_avatar_path("bin", kind), exist_ok=True)
     if getattr(cfg, "model_conf", "") and getattr(cfg, "models_dir", ""):
         SERVER_CONTROL = LinuxServerControl(cfg.model_conf, cfg.models_dir, cfg.llama_pid)
+    DEEP["models_dir"] = os.path.abspath(cfg.models_dir) if getattr(cfg, "models_dir", "") else ""
+    DEEP["exe"] = getattr(cfg, "llama_server", "") or ""
+    SLOTS["dir"] = getattr(cfg, "slot_dir", "") or ""
     SEARXNG_URL = getattr(cfg, "searxng", "") or ""
     GITHUB_FILE = os.path.abspath(getattr(cfg, "github_file", "") or
                                   os.path.join(os.path.dirname(os.path.abspath(cfg.db)), "github.json"))
@@ -14932,6 +17079,8 @@ def start(cfg):
         SUMMARIZER["loop"] = True
         threading.Thread(target=summarizer_loop, daemon=True, name="summaries").start()
         threading.Thread(target=learner_loop, daemon=True, name="learner").start()
+        threading.Thread(target=deep_idle_loop, daemon=True, name="deep-idle").start()
+        threading.Thread(target=jobs_loop, daemon=True, name="jobs").start()
     log(f"hub ready on :{cfg.app_port}, chats in {cfg.db}"
         + ("" if mermaid_command() else " (Mermaid not installed: flowcharts use schemdraw)"))
     return web

@@ -27,18 +27,36 @@ LEARN_SCHEMA = {
     "type": "object",
     "properties": {
         "add": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+        "update": {"type": "array", "maxItems": 5, "items": {
+            "type": "object", "properties": {"id": {"type": "string"}, "fact": {"type": "string"}},
+            "required": ["id", "fact"]}},
         "remove": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
     },
-    "required": ["add", "remove"],
+    "required": ["add", "update", "remove"],
 }
 
-LEARN_PROMPT = """You maintain a short list of long-term facts about the user, so their assistant can help them better over time.
-Read the conversation and decide what is worth remembering for weeks or months: stable preferences, projects they are working on,
-tools/boards/parts/software they use, people and pets in their life, routines and schedules, goals, and explicit "remember" requests.
-Do NOT save: one-off questions, small talk, things already in the list, temporary states ("I'm tired"), or anything the assistant said.
-Write each fact as one short sentence in third person, e.g. "Uses an ESP32-S3 for most projects." or "Works 8-4 on weekdays."
-If the conversation shows an existing fact is now wrong, put its id in "remove" (and the corrected fact in "add").
-Reply with JSON only: {"add": [...], "remove": [...]}. Empty lists are fine and are the usual answer."""
+LEARN_PROMPT = """You keep a short list of long-term facts about the user, so their assistant can help them better over time.
+Read the conversation and pick out what the USER said that will still be true and useful in a month: who they are,
+people and pets in their life, where they live and work, their projects and what they decided about them, the tools,
+boards, parts and software they use, their routines, and how they like the assistant to answer. Also anything they
+asked to be remembered.
+Rules:
+- Only what the user said themselves. Never the assistant's suggestions, research or guesses, even if the user agreed
+  with a "sounds good" (save the decision they made, not the assistant's details).
+- Not one-off questions, small talk, moods, today's errands, or things the list already says in other words.
+- Never passwords, keys, card or account numbers, ID numbers, or health details.
+- One short third-person sentence each, as specific as the user was, e.g. "Uses an ESP32-S3 for most projects."
+- When the conversation changes a known fact, put it in "update" with that fact's id and the new sentence (keep
+  useful history, e.g. "Works on the infra team (previously search).") instead of adding a near-copy.
+- "remove" only facts the user said are wrong or asked to forget.
+Reply with JSON only: {"add": [...], "update": [{"id": "...", "fact": "..."}], "remove": [...]}. Empty lists are the
+usual answer."""
+
+
+def _same_fact(a, b):
+    """True when two facts say nearly the same thing (so a near-copy isn't added)."""
+    ta, tb = set(_terms(a)), set(_terms(b))
+    return bool(ta and tb) and len(ta & tb) / max(1, min(len(ta), len(tb))) >= 0.8
 
 
 def learn_memories(messages, conv_id=""):
@@ -60,7 +78,7 @@ def learn_memories(messages, conv_id=""):
             {"role": "user", "content": f"Known facts:\n{known}\n\nConversation:\n{convo}"},
         ],
         "temperature": 0.2,
-        "max_tokens": 400,
+        "max_tokens": 500,
         "response_format": {"type": "json_schema", "json_schema": {"name": "memory_update", "schema": LEARN_SCHEMA}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -68,24 +86,38 @@ def learn_memories(messages, conv_id=""):
     m = re.search(r"\{[\s\S]*\}", content)
     update = json.loads(m.group(0)) if m else {}
     removed, added, suggested = [], [], []
-    ids = {x["id"] for x in existing}
-    gone = [str(mid).strip("[] ") for mid in update.get("remove", [])[:5] if str(mid).strip("[] ") in ids]
-    facts = [" ".join(f.split()) for f in update.get("add", [])[:5] if isinstance(f, str) and len(f.strip()) >= 3]
+    by_id = {x["id"]: x["text"] for x in existing}
+    gone = [str(mid).strip("[] ") for mid in (update.get("remove") or [])[:5] if str(mid).strip("[] ") in by_id]
+    changes = []   # (old id, new fact)
+    for u in (update.get("update") or [])[:5]:
+        if isinstance(u, dict) and str(u.get("id", "")).strip("[] ") in by_id:
+            fact = " ".join(str(u.get("fact") or "").split())
+            if len(fact) >= 3 and fact.lower() != by_id[str(u["id"]).strip("[] ")].lower():
+                changes.append((str(u["id"]).strip("[] "), fact))
+    facts = []
+    for f in (update.get("add") or [])[:5]:
+        if not isinstance(f, str) or len(f.strip()) < 3:
+            continue
+        f = " ".join(f.split())
+        if any(_same_fact(f, t) for t in by_id.values()) or any(_same_fact(f, x) for x in facts):
+            continue
+        facts.append(f)
     if mode == "review":
-        # a removal paired with a new fact is shown as "replace X with Y"; a lone removal as "forget X?"
-        for i, fact in enumerate(facts):
-            sid = CHATS.suggest_memory(fact, gone[i] if i < len(gone) else "", conv_id)
-            if sid:
+        # an update is shown as "replace X with Y"; a lone removal as "forget X?"
+        for mid, fact in changes:
+            if CHATS.suggest_memory(fact, mid, conv_id):
                 suggested.append(fact)
-        for mid in gone[len(facts):]:
-            old = next((x["text"] for x in existing if x["id"] == mid), "")
-            if old and CHATS.suggest_memory("(forget) " + old, mid, conv_id):
-                suggested.append("(forget) " + old)
+        for fact in facts:
+            if CHATS.suggest_memory(fact, "", conv_id):
+                suggested.append(fact)
+        for mid in gone:
+            if CHATS.suggest_memory("(forget) " + by_id[mid], mid, conv_id):
+                suggested.append("(forget) " + by_id[mid])
         return {"added": [], "removed": [], "suggested": suggested, "mode": mode}
-    for mid in gone:
+    for mid in gone + [mid for mid, _ in changes]:
         if CHATS.delete_memory(mid):
             removed.append(mid)
-    for fact in facts:
+    for fact in facts + [fact for _, fact in changes]:
         _, new = CHATS.add_memory(fact, "learned")
         if new:
             added.append(fact)

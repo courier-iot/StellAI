@@ -118,8 +118,11 @@ def tool_fetch_page(args):
         i = text.lower().index(find)
         text = text[max(0, i - limit // 3):]
     truncated = len(text) > limit
-    return {"url": final, "title": title, "text": text[:limit], "truncated": truncated}, \
-        f"Read {title or final}"[:200]
+    out = {"url": final, "title": title, "text": text[:limit], "truncated": truncated}
+    if len(text.strip()) < 400 and "html" in ctype:
+        out["note"] = ("This page came back nearly empty: it's probably built with JavaScript. Read it with browse_page "
+                       "(load_tools groups=['browser'] if you don't have it).")
+    return out, f"Read {title or final}"[:200]
 
 
 SERVER_TOOLS["web_search"] = (tool_web_search, _fn(

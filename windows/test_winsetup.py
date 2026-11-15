@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import threading
 import zipfile
 
@@ -385,6 +386,85 @@ def test_mermaid():
     args = ws.hub_args(cfg)
     assert args[args.index("--mmdc") + 1] == os.path.join(bin_dir, "mmdc.cmd")
     assert ws.install_mermaid(cfg, lambda m: None) == os.path.join(bin_dir, "mmdc.cmd")   # already there: no download
+
+
+def test_freecad():
+    assets = [{"name": n, "browser_download_url": "http://x/" + n} for n in (
+        "FreeCAD_1.1.1-Linux-x86_64-py311.AppImage", "FreeCAD_1.1.1-Windows-x86_64-py311.7z",
+        "FreeCAD_1.1.1-Windows-x86_64-py311-installer.exe", "FreeCAD_1.1.1-Windows-x86_64-py311-installer.exe-SHA256.txt")]
+    exe, sums = ws.pick_freecad_installer(assets)
+    assert exe["name"] == "FreeCAD_1.1.1-Windows-x86_64-py311-installer.exe" and sums["name"].endswith("-SHA256.txt")
+    old = [{"name": "FreeCAD_1.0.2-conda-Windows-x86_64-installer-1.exe"}]
+    assert ws.pick_freecad_installer(old)[0]["name"] == old[0]["name"] and ws.pick_freecad_installer(old)[1] is None
+    assert ws.pick_freecad_installer([{"name": "FreeCAD_1.1.1-macOS-arm64.dmg"}]) == (None, None)
+    tmp = tempfile.mkdtemp()
+    cfg = ws.Config(tmp)
+    assert ws.freecad_exe(cfg) is None
+    os.makedirs(cfg.p("freecad", "bin"))
+    open(cfg.p("freecad", "bin", "FreeCADCmd.exe"), "w").close()
+    assert ws.install_freecad(cfg, lambda m: None) == cfg.p("freecad", "bin", "FreeCADCmd.exe")   # already there
+    ws.freecad_to_server(cfg)
+    assert os.environ["STELLAI_FREECAD"] == cfg.p("freecad", "bin", "FreeCADCmd.exe")
+
+
+NOISY_LLAMA = r"""
+import http.server, json, sys
+port = int(sys.argv[sys.argv.index("--port") + 1])
+sys.stderr.write("load_tensors: layer ready\n" * 40000)   # ~1 MB of log, far more than a pipe holds
+sys.stderr.flush()
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def answer(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        self.answer({"status": "ok"})
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.answer({"content": "hi", "timings": {"predicted_per_second": 20.0, "prompt_per_second": 300.0}})
+
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+
+def test_bench_with_a_noisy_log():
+    """llama-server writes a lot while loading: the test must not freeze on its log (it once filled a pipe)."""
+    tmp = tempfile.mkdtemp()
+    with open(os.path.join(tmp, "noisy_llama.py"), "w") as f:
+        f.write(NOISY_LLAMA)
+    started = time.time()
+    r = ws.tune.bench_once(sys.executable, "noisy_llama", [], 4096, env={"PYTHONPATH": tmp}, timeout=60, log=lambda m: None)
+    assert r["ok"] and r["gen_tps"] == 20.0, r
+    assert time.time() - started < 30, "the benchmark was slow: is the log still going to a pipe?"
+    with open(os.path.join(tmp, "noisy_llama.py"), "w") as f:
+        f.write("import sys\nsys.stderr.write('x' * 200000 + ' error: out of memory')\nsys.exit(1)\n")
+    r = ws.tune.bench_once(sys.executable, "noisy_llama", [], 4096, env={"PYTHONPATH": tmp}, timeout=60, log=lambda m: None)
+    assert not r["ok"] and "out of memory" in r["error"], r
+
+
+def test_draft_and_deep_args():
+    tmp = tempfile.mkdtemp()
+    cfg = ws.Config(tmp)
+    args = ws.hub_args(cfg)
+    assert args[args.index("--models-dir") + 1] == cfg.p("models") and "--llama-server" in args and "--slot-dir" in args
+    pl = {"model_key": "qwen3.6-35b-a3b|UD-IQ3_S", "backend": "cuda"}
+    assert ws.draft_model_args(cfg, pl, "--model-draft") is None, "no draft model for a mixture-of-experts model"
+    pl = {"model_key": "qwen3.5-9b|Q3_K_M", "backend": "cuda", "helper_file": "Qwen3.5-0.8B-Q8_0.gguf"}
+    assert ws.draft_model_args(cfg, pl, "") is None, "not when llama.cpp has no draft models"
+    os.makedirs(cfg.p("models"))
+    open(cfg.p("models", "Qwen3.5-0.8B-Q8_0.gguf"), "w").close()
+    a = ws.draft_model_args(cfg, pl, "--model-draft")
+    assert a[:4] == ["-md", cfg.p("models", "Qwen3.5-0.8B-Q8_0.gguf"), "-ngld", "99"], a
+    r = ws.tune.tune.__defaults__   # the draft trial is part of the speed test
+    assert "draft_args" in ws.tune.tune.__code__.co_varnames
 
 
 if __name__ == "__main__":

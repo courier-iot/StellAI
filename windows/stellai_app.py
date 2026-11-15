@@ -83,6 +83,7 @@ class App:
         self.hw = None
         self.cancel = threading.Event()
         self.installing = False
+        self.tuning = False      # Test & tune is running: Stella is stopped on purpose, so updates must wait
         self.tray = None
         self.qr_img = None
         self.update_state = "Checking for updates…" if ws.can_self_update() else "Updates: off when running from source"
@@ -879,6 +880,10 @@ class App:
                                               "measure it, keeps the longest conversation that fits and the MTP speed-up "
                                               "only if it helps, then starts her again. Go ahead?"):
             return
+        if self.tuning:
+            self.log("Test & tune is already running.")
+            return
+        self.tuning = True
         was = bool(self.servers.wanted)
         self.servers.stop()
         self.log("Test & tune: measuring Stella's model…")
@@ -891,6 +896,7 @@ class App:
             self.q.put(("log", text))
 
             def done():
+                self.tuning = False
                 if was:
                     self.start_servers()
                 messagebox.showinfo("StellAI test & tune", text)
@@ -1093,7 +1099,7 @@ class App:
             self.update_lock.release()
 
     def _idle(self):
-        if self.installing:
+        if self.installing or self.tuning:
             return False
         if not self.servers.wanted:
             return True

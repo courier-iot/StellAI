@@ -31,7 +31,14 @@ check([x["what"] for x in r["history"]] == ["start: vela.vrm", "add halo", "back
 r, s = run("blender_project", {"action": "export", "format": "glb"})
 check(os.path.basename(r["file"]) == "vela-halo-v0003.glb", "export", r)
 r, s = run("blender_project", {"action": "new", "name": "Bad Name"})
-check(not r["ok"], "bad workspace names are refused", r)
+check(r["ok"] and h._ws_versions("bad-name"), "names are made lowercase-with-dashes", r)
+ts = int(time.time() * 1000)
+h.CHATS.sync(0, [{"id": "n1", "title": "t", "created_at": ts, "updated_at": ts}],
+             [{"id": "n1u", "conv_id": "n1", "role": "user", "text": "can you make a hexagonal baseplate for a soda can?",
+               "created_at": ts, "updated_at": ts}])
+r, s = run("blender_project", {"action": "new", "conversation_id": "n1"})
+check(r["ok"] and h._ws_versions("hexagonal-baseplate-soda"), "a missing name comes from the request", (r, s))
+run("blender_project", {"action": "open", "name": "vela-halo"})
 check("blender_step" in h.select_tools("hello", "modeler"), "the Modeler mode gets the Blender tools")
 check([t for t in h.select_tools("can you fix the mesh on my vrm") if t.startswith("blender")], "3D words bring the Blender tools")
 check(not [t for t in h.select_tools("what's the weather") if t.startswith("blender")], "other messages don't")

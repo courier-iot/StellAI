@@ -69,9 +69,10 @@ def start_hub(extra=(), llama="http://127.0.0.1:9", serve=True):
     return h, web, tmp, web.server_address[1]
 
 
-def fake_model(port, ctx=2048):
-    """Starts the stand-in model server (tests/fakes/fake_llama.py) on a port; returns the process."""
-    p = subprocess.Popen([sys.executable, os.path.join(FAKES, "fake_llama.py"), str(port), str(ctx)])
+def fake_model(port, ctx=2048, name=""):
+    """Starts the stand-in model server (tests/fakes/fake_llama.py) on a port; returns the process. A name
+    (e.g. "deep") is put in front of its streamed replies, so tests can tell two models apart."""
+    p = subprocess.Popen([sys.executable, os.path.join(FAKES, "fake_llama.py"), str(port), str(ctx)] + ([name] if name else []))
     for _ in range(50):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5)

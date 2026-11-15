@@ -505,7 +505,7 @@ def tool_pcb_project(args):
                     (".zip", ".kicad_pcb")) or os.path.isdir(os.path.join(_inbox(), f))][:40],
                 "workspaces": PCB.list(), "active": _safe(lambda: PCB.name(""))}, "Checked PCB workspaces"
     if action == "new":
-        name = PCB.start(args.get("name"))
+        name = PCB.start(args.get("name"), args)
         v, path = PCB.next(name)
         try:
             if args.get("file"):

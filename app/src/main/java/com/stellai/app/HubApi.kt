@@ -331,6 +331,61 @@ object HubApi {
     /** Stella's instructions and the built-in modes: {instructions: {phone, web}, mode_note, summary_intro, voice_style, modes}. */
     fun prompts(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/prompts")
 
+    /** Stella's personality in the user's own words (empty = the default): {"text", "default", "max"}. */
+    fun personality(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/personality")
+
+    fun savePersonality(serverUrl: String, apiKey: String, text: String): JSONObject =
+        postJson(serverUrl, apiKey, "/personality", JSONObject().put("text", text))
+
+    /** Skills: Stella's how-to guides, built-in and the user's own ({name, description, source, triggers, body}). */
+    fun skills(serverUrl: String, apiKey: String): JSONArray =
+        getJson(serverUrl, apiKey, "/skills").optJSONArray("skills") ?: JSONArray()
+
+    fun saveSkill(serverUrl: String, apiKey: String, skill: JSONObject): JSONArray =
+        postJson(serverUrl, apiKey, "/skills", skill).optJSONArray("skills") ?: JSONArray()
+
+    fun deleteSkill(serverUrl: String, apiKey: String, name: String): JSONArray =
+        JSONObject(execute(authed(serverUrl, apiKey, "/skills/$name").delete().build())).optJSONArray("skills") ?: JSONArray()
+
+    /** Thumbs up (1), down (-1) or none (0) on one of Stella's replies; a note says what was wrong. */
+    fun rate(serverUrl: String, apiKey: String, messageId: String, rating: Int, note: String): JSONObject =
+        postJson(serverUrl, apiKey, "/messages/${java.net.URLEncoder.encode(messageId, "UTF-8")}/rate",
+            JSONObject().put("rating", rating).put("note", note))
+
+    fun lessons(serverUrl: String, apiKey: String): JSONArray =
+        getJson(serverUrl, apiKey, "/lessons").optJSONArray("lessons") ?: JSONArray()
+
+    fun deleteLesson(serverUrl: String, apiKey: String, id: String): JSONArray =
+        JSONObject(execute(authed(serverUrl, apiKey, "/lessons/$id").delete().build())).optJSONArray("lessons") ?: JSONArray()
+
+    /** The bigger model: {enabled, lane, label, tok_s, available, running, free_ram_gb, finding, ...}. */
+    fun deep(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/deep")
+
+    fun saveDeep(serverUrl: String, apiKey: String, body: JSONObject): JSONObject = postJson(serverUrl, apiKey, "/deep", body)
+
+    fun findDeep(serverUrl: String, apiKey: String): JSONObject = postJson(serverUrl, apiKey, "/deep/find", JSONObject())
+
+    /** The test set: {cases, runs, running}. */
+    fun evals(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/evals")
+
+    fun runEvals(serverUrl: String, apiKey: String, lane: String): JSONObject =
+        postJson(serverUrl, apiKey, "/evals/run", JSONObject().put("lane", lane))
+
+    fun selfCheck(serverUrl: String, apiKey: String): JSONObject = getJson(serverUrl, apiKey, "/self-check")
+
+    fun saveSelfCheck(serverUrl: String, apiKey: String, enabled: Boolean): JSONObject =
+        postJson(serverUrl, apiKey, "/self-check", JSONObject().put("enabled", enabled))
+
+    /** Background jobs: [{id, name, prompt, repeat, time, next_run, last_result, running, conv_id}]. */
+    fun jobs(serverUrl: String, apiKey: String): JSONArray =
+        getJson(serverUrl, apiKey, "/jobs").optJSONArray("jobs") ?: JSONArray()
+
+    fun runJob(serverUrl: String, apiKey: String, id: String): JSONObject =
+        postJson(serverUrl, apiKey, "/jobs/$id/run", JSONObject())
+
+    fun deleteJob(serverUrl: String, apiKey: String, id: String): JSONArray =
+        JSONObject(execute(authed(serverUrl, apiKey, "/jobs/$id").delete().build())).optJSONArray("jobs") ?: JSONArray()
+
     fun modes(serverUrl: String, apiKey: String): JSONArray =
         JSONObject(execute(authed(serverUrl, apiKey, "/modes").get().build())).optJSONArray("modes") ?: JSONArray()
 

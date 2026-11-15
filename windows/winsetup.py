@@ -448,13 +448,23 @@ def tune_now(cfg, log=lambda t: None):
         args += ["--fit-target", str(1024 + (1000 if pl.get("vision") else 0) + (700 if cfg.get("whisper_gpu") else 0))]
     args += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja"]
     env = {"CUDA_VISIBLE_DEVICES": pl["llama_gpus"]} if pl.get("llama_gpus") else None
+    draft = None
+    try:
+        draft = draft_model_args(cfg, pl, flags, log)
+    except Exception as e:      # the speed-up is optional: the test still runs without it
+        log(f"Skipping the draft model speed-up: {e}")
     res = tune.tune(exe, model, args, int(pl.get("context") or 16384), env=env, try_mtp=bool(pl.get("mtp")),
-                    has_opt=lambda o: o in flags, log=log)
+                    has_opt=lambda o: o in flags, log=log, draft_args=draft)
     if res.get("error"):
         raise RuntimeError("the model didn't load: " + str(res["error"])[:300])
     pl["context"] = res["context"]
     pl["spec_args"] = list(tune.MTP_ARGS) if res.get("mtp") else []
-    pl["tuned"] = {"context": res["context"], "mtp": res.get("mtp", False), "tok_s": res.get("gen_tps")}
+    if res.get("draft") and draft:
+        # the draft model's own options (the vision add-on the trial included is added by llama_args anyway)
+        pl["spec_args"] = ["-md", draft[draft.index("-md") + 1], "-ngld", draft[draft.index("-ngld") + 1]] + \
+            list(tune.DRAFT_ARGS)
+    pl["tuned"] = {"context": res["context"], "mtp": res.get("mtp", False), "draft": res.get("draft", False),
+                   "tok_s": res.get("gen_tps")}
     cfg.set(plan=pl, context=None)
     man = tune.read_manifest(cfg.p("models"))
     if pl.get("model_key") in man:
@@ -465,7 +475,49 @@ def tune_now(cfg, log=lambda t: None):
     if pl.get("mtp"):
         lines.append(f"MTP speed-up: {'on' if res.get('mtp') else 'off'} "
                      f"({res.get('mtp_tps', 0):g} tokens/s with it{'' if res.get('mtp') else ': not faster here'}).")
+    if draft:
+        if "draft_tps" in res:
+            lines.append(f"Draft model speed-up: {'on' if res.get('draft') else 'off'} ({res['draft_tps']:g} tokens/s "
+                         f"with it{'' if res.get('draft') else ': not faster here'}).")
+        else:
+            lines.append("Draft model speed-up: didn't run here.")
     return " ".join(lines)
+
+
+DRAFT_KEY, DRAFT_QUANT = "qwen3.5-0.8b", "Q4_K_M"
+
+
+def draft_model_args(cfg, pl, flags, log=lambda t: None):
+    """The small draft model's options for the speed test, or None when it doesn't apply (a different model family,
+    a mixture-of-experts model, or a llama.cpp without draft models). Uses the helper's file when it's the 0.8B,
+    else downloads the 0.8B once (about 0.5 GB)."""
+    key = str(pl.get("model_key") or "").split("|")[0]
+    entry = (tune.BY_KEY.get(key) if tune else None) or {}
+    if "--model-draft" not in flags or not entry or entry.get("moe") or not key.startswith(("qwen3.5-", "qwen3.6-")) \
+            or key in (DRAFT_KEY, "qwen3.5-2b"):
+        return None
+    path = ""
+    helper = pl.get("helper_file") or ""
+    if helper and "0.8B" in helper and os.path.isfile(cfg.p("models", helper)):
+        path = cfg.p("models", helper)
+    else:
+        man = tune.read_manifest(cfg.p("models"))
+        e = man.get(tune.model_id(DRAFT_KEY, DRAFT_QUANT))
+        if e and tune.installed(cfg.p("models"), e):
+            path = cfg.p("models", e["model_file"])
+        else:
+            log("Downloading the small draft model (about 0.5 GB)...")
+            r = tune.resolve(DRAFT_KEY, DRAFT_QUANT)
+            for f in r["files"]:
+                download(f["url"], cfg.p("models", f["name"]))
+            tune.record_model(cfg.p("models"), r)
+            path = cfg.p("models", r["model_file"])
+    gpu = pl.get("backend", "cpu") != "cpu"
+    a = ["-md", path, "-ngld", "99" if gpu else "0"] + list(tune.DRAFT_ARGS)
+    mm = cfg.p("models", pl.get("mmproj_file") or "-")
+    if pl.get("vision") and os.path.isfile(mm):   # measured with the vision add-on, as Stella really runs
+        a += ["--mmproj", mm] + (["--no-mmproj-offload"] if vision_on_cpu(cfg, pl, flags) else [])
+    return a
 
 
 # ============================================================================ GitHub releases
@@ -990,6 +1042,11 @@ def install(cfg, pl, status, progress, cancel):
     except RuntimeError as e:
         status(f"Mermaid diagrams skipped ({e}); flowcharts are drawn with schemdraw instead")
     cfg.set(mermaid_tried=time.time())
+    try:
+        install_freecad(cfg, status, cancel)
+    except RuntimeError as e:
+        status(f"FreeCAD skipped ({e}); the CAD Designer mode needs it")
+    cfg.set(freecad_tried=time.time())
 
     for d in ("diagrams", "images", "wakewords", "logs"):
         os.makedirs(cfg.p(d), exist_ok=True)
@@ -1120,8 +1177,13 @@ def llama_args(cfg, pl, key):
     a += ["--reasoning-budget", "1024" if ctx <= 8192 else "2048",
           "--reasoning-budget-message", "I have thought enough; time to answer."]
     # The speed-up the speed test chose (MTP), and a prompt cache in RAM sized to the memory budget
-    if pl.get("spec_args") and "draft-mtp" in flags:
-        a += list(pl["spec_args"])
+    spec = list(pl.get("spec_args") or [])
+    if spec and ("-md" in spec and "--model-draft" in flags and os.path.isfile(spec[spec.index("-md") + 1])
+                 or "-md" not in spec and "draft-mtp" in flags):
+        a += spec
+    if "--slot-save-path" in flags:     # saved chat memory: switching back to a long chat answers straight away
+        os.makedirs(cfg.p("slots"), exist_ok=True)
+        a += ["--slot-save-path", cfg.p("slots")]
     if pl.get("cache_ram_mb") is not None and "--cache-ram" in flags:
         a += ["--cache-ram", str(int(pl["cache_ram_mb"]))]
     a += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja",
@@ -1256,6 +1318,89 @@ def install_mermaid(cfg, status, cancel=None):
     return mermaid_exe(cfg)
 
 
+# ============================================================================ FreeCAD (CAD Designer)
+# The CAD Designer mode drives FreeCAD headless. The app installs FreeCAD's official Windows installer silently
+# into its own folder (%LOCALAPPDATA%\StellAI\freecad), checked against the release's SHA-256 file, and points the
+# server at it. Like Mermaid, existing installs get it in the background; it's about 520 MB.
+FREECAD_REPO = "FreeCAD/FreeCAD"
+FREECAD_RETRY_DAYS = 3
+
+
+def pick_freecad_installer(assets):
+    """(installer asset, its -SHA256.txt asset) for 64-bit Windows from a FreeCAD release's assets, or (None, None)."""
+    exe = next((a for a in assets if re.fullmatch(r"FreeCAD_[\d.]+(-conda)?-Windows-x86_64(-py\d+)?-installer(-\d+)?\.exe",
+                                                   a.get("name", ""))), None)
+    if not exe:
+        return None, None
+    return exe, next((a for a in assets if a.get("name") == exe["name"] + "-SHA256.txt"), None)
+
+
+def freecad_exe(cfg):
+    path = cfg.p("freecad", "bin", "FreeCADCmd.exe")
+    return path if os.path.isfile(path) else None
+
+
+def freecad_to_server(cfg):
+    """Tells the server where FreeCAD is (it reads STELLAI_FREECAD)."""
+    path = freecad_exe(cfg)
+    if path:
+        os.environ["STELLAI_FREECAD"] = path
+
+
+def install_freecad(cfg, status, cancel=None, get=http_json):
+    """FreeCAD in the app's folder. Returns FreeCADCmd.exe's path; raises RuntimeError if it can't."""
+    import hashlib
+    if freecad_exe(cfg):
+        return freecad_exe(cfg)
+    status("Finding the latest FreeCAD for the CAD Designer…")
+    try:
+        rel = get(f"https://api.github.com/repos/{FREECAD_REPO}/releases/latest")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise RuntimeError(f"couldn't reach GitHub ({e})")
+    exe, sums = pick_freecad_installer(rel.get("assets") or [])
+    if not exe:
+        raise RuntimeError(f"FreeCAD {rel.get('tag_name', '')} has no 64-bit Windows installer")
+    digest = ""
+    if sums:
+        try:
+            m = re.search(r"\b([0-9a-fA-F]{64})\b", http_text(sums["browser_download_url"]))
+            digest = m.group(1).lower() if m else ""
+        except (urllib.error.URLError, OSError) as e:
+            raise RuntimeError(f"couldn't get FreeCAD's checksum ({e})")
+    path = os.path.join(cfg.p("downloads"), exe["name"])
+
+    def prog(done, total):
+        if total:
+            status(f"Downloading FreeCAD: {done / 2**20:.0f} of {total / 2**20:.0f} MB")
+    download(exe["browser_download_url"], path, prog, cancel)
+    if digest:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != digest:
+            os.remove(path)
+            raise RuntimeError("the FreeCAD download didn't match its checksum")
+    status("Installing FreeCAD (a minute or two)…")
+    try:   # NSIS: /S silent, /D= the folder (must come last, unquoted); installs for this user, no admin prompt
+        r = subprocess.run([path, "/S", "/NCRC", "/D=" + cfg.p("freecad")], capture_output=True, text=True,
+                           timeout=1800, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"the FreeCAD installer didn't run ({e})")
+    for _ in range(60):   # the installer can hand off to a second process; wait for the files to appear
+        if freecad_exe(cfg):
+            break
+        time.sleep(2)
+    if not freecad_exe(cfg):
+        raise RuntimeError(f"the FreeCAD installer finished (code {r.returncode}) but FreeCADCmd.exe isn't there")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    freecad_to_server(cfg)
+    return freecad_exe(cfg)
+
+
 def hub_args(cfg):
     args = ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
             "--image-dir", cfg.p("images"), "--wakeword-dir", cfg.p("wakewords"),
@@ -1267,6 +1412,9 @@ def hub_args(cfg):
         args += ["--helper", f"http://127.0.0.1:{HELPER_PORT}"]
     if cfg.get("searxng"):
         args += ["--searxng", f"http://127.0.0.1:{SEARXNG_PORT}"]
+    # the bigger "deep" model runs from the same llama.cpp and models folder; saved chats live in slots
+    args += ["--models-dir", cfg.p("models"), "--llama-server", cfg.p("bin", "llama", "llama-server.exe"),
+             "--slot-dir", cfg.p("slots")]
     return args
 
 
@@ -1382,11 +1530,14 @@ class Servers:
                 self.hub.CODE_RUNNER_CMD = [sys.executable, "--python-runner"]
             self.hub.LOG_HOOK = self.log
             node_on_path(self.cfg)
+            freecad_to_server(self.cfg)
             self.web = self.hub.start(self.hub.parse_args(hub_args(self.cfg)))
             self.hub.SERVER_CONTROL = WinServerControl(self)   # lets the phone app switch models
             self._move_hooks()
             if not mermaid_exe(self.cfg) and time.time() - float(self.cfg.get("mermaid_tried") or 0) > MERMAID_RETRY_DAYS * 86400:
                 threading.Thread(target=self._add_mermaid, daemon=True, name="mermaid").start()
+            if not freecad_exe(self.cfg) and time.time() - float(self.cfg.get("freecad_tried") or 0) > FREECAD_RETRY_DAYS * 86400:
+                threading.Thread(target=self._add_freecad, daemon=True, name="freecad").start()
             threading.Thread(target=self.web.serve_forever, daemon=True, name="hub").start()
 
     def _add_mermaid(self):
@@ -1399,6 +1550,15 @@ class Servers:
         except RuntimeError as e:
             self.log(f"Mermaid diagrams couldn't be installed ({e}); flowcharts use schemdraw. Trying again in "
                      f"{MERMAID_RETRY_DAYS} days.")
+
+    def _add_freecad(self):
+        """Installs FreeCAD for an existing install, in the background; CAD Designer uses it once it's there."""
+        self.cfg.set(freecad_tried=time.time())
+        try:
+            install_freecad(self.cfg, self.log)
+            self.log("FreeCAD is ready: the CAD Designer mode works now")
+        except RuntimeError as e:
+            self.log(f"FreeCAD couldn't be installed ({e}). Trying again in {FREECAD_RETRY_DAYS} days.")
 
     # ---- moving Stella to another server, and back ------------------------------------------------------------
     on_moved = None        # set by the app: called with the new server's info after Stella moved away
@@ -1467,6 +1627,11 @@ class Servers:
                 self._spawn("llama", llama_args(self.cfg, pl, api_key(self.cfg)), llama_env(pl))
 
     def stop(self):
+        try:
+            if self.hub and hasattr(self.hub, "deep_stop"):
+                self.hub.deep_stop()      # the bigger model, if the hub started it
+        except Exception:
+            pass
         with self.lock:
             self.wanted = False
             if self.web:

@@ -11,6 +11,8 @@ import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Checklist
+import androidx.compose.material.icons.outlined.AutoStories
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Description
@@ -126,6 +128,8 @@ object LineIcons {
     val Phone get() = Icons.Outlined.PhoneAndroid
     val Sync get() = Icons.Outlined.Sync
     val Code get() = Icons.Outlined.Code
+    val Skills get() = Icons.Outlined.AutoStories
+    val Check get() = Icons.Outlined.CheckCircle
     val Open get() = Icons.Outlined.ExpandMore
     val Close get() = Icons.Outlined.ExpandLess
 }
@@ -142,7 +146,8 @@ fun IconText(icon: ImageVector, text: String, modifier: Modifier = Modifier, col
 }
 
 /**
- * Text that may start with a status mark ("✓ ", "✗ ", "⚠ ", "⇄ " or "↪ ", as stored in chats and tool results):
+ * Text that may start with a status mark ("✓ ", "✗ ", "⚠ ", "⇄ ", "↪ " or "☰ " (a plan), as stored in chats and
+ * tool results):
  * the mark is drawn as a line icon instead.
  */
 @Composable
@@ -155,6 +160,7 @@ fun StatusLine(text: String, modifier: Modifier = Modifier, color: Color = Local
         t.startsWith("⚠") -> IconText(Icons.Outlined.WarningAmber, t.drop(1).trim(), modifier, badColor, style)
         t.startsWith("⇄") -> IconText(Icons.Outlined.SwapHoriz, t.drop(1).trim(), modifier, color, style)
         t.startsWith("↪") -> IconText(Icons.AutoMirrored.Outlined.Redo, t.drop(1).trim(), modifier, color, style)
+        t.startsWith("☰") -> IconText(Icons.Outlined.Checklist, t.drop(1).trim(), modifier, color, style)
         else -> Text(text, modifier, color = color, style = style)
     }
 }

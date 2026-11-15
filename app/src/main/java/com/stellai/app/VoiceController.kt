@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.ToneGenerator
+import android.media.audiofx.AcousticEchoCanceler
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -53,6 +54,17 @@ class VoiceController(private val app: App) {
 
     @Volatile
     private var followUpListen = false
+
+    /** Interrupting her by talking: while she speaks after a voice question, the microphone stays open. */
+    @Volatile
+    private var watchSpeech = false
+
+    /** Called when she starts talking (Speaker.onStartTalking). */
+    fun watchWhileSpeaking() {
+        if (!app.settings.bargeIn || !hasMicPermission()) return
+        watchSpeech = true
+        ensureRunning()
+    }
 
     /**
      * Record one command now (mic button, power-button assist). [followUp]: right after Stella answered,
@@ -103,6 +115,7 @@ class VoiceController(private val app: App) {
     @SuppressLint("MissingPermission") // checked in hasMicPermission()
     private fun runLoop() {
         var recorder: AudioRecord? = null
+        var echo: AcousticEchoCanceler? = null
         var detector: WakeWordDetector? = null
         var detectorModel = ""
         var failed = false
@@ -123,8 +136,15 @@ class VoiceController(private val app: App) {
                 failed = true
                 return
             }
+            // Cancel her own voice out of the microphone where the phone can (for interrupting her by talking)
+            echo = if (AcousticEchoCanceler.isAvailable()) {
+                try { AcousticEchoCanceler.create(recorder.audioSessionId)?.apply { enabled = true } } catch (_: Exception) { null }
+            } else null
             recorder.startRecording()
             postError(null)
+            var talkStart = 0L
+            var leak = 0.0
+            var voiced = 0
 
             val chunk = ShortArray(WakeWordDetector.CHUNK_SAMPLES)
             val preRoll = ShortRing(RATE / 2) // keep the last 0.5 s for after the wake word
@@ -132,7 +152,10 @@ class VoiceController(private val app: App) {
 
             while (true) {
                 val wake = wakeMode
-                if (!wake && !listenRequested.get()) break
+                val talking = app.speaker.talking
+                if (!talking) watchSpeech = false
+                val watching = watchSpeech && talking
+                if (!wake && !listenRequested.get() && !watching) break
                 updatePhase(if (wake) VoicePhase.WAITING_FOR_WAKE else VoicePhase.IDLE)
 
                 if (!readFully(recorder, chunk)) {
@@ -141,6 +164,39 @@ class VoiceController(private val app: App) {
                     break
                 }
                 preRoll.add(chunk)
+                if (watching && listenRequested.getAndSet(false)) {   // the mic button while she talks
+                    watchSpeech = false
+                    talkStart = 0L
+                    handleCommand(recorder, ShortArray(0))
+                    detector?.reset()
+                    continue
+                }
+                if (watching) {
+                    // While she talks: the first moment measures how much of her own voice leaks into the
+                    // microphone; then a clearly louder, steady voice (about a third of a second) is you.
+                    val level = rms(chunk, chunk.size)
+                    val now = System.currentTimeMillis()
+                    if (talkStart == 0L) { talkStart = now; leak = 0.0; voiced = 0 }
+                    if (now - talkStart < 700) {
+                        leak = maxOf(leak, level)
+                    } else if (level > maxOf(1200.0, leak * 2.5, noiseFloor * 4)) {
+                        voiced++
+                        if (voiced >= 4) {
+                            Log.i(TAG, "interrupted by voice (level $level, her voice $leak)")
+                            watchSpeech = false
+                            talkStart = 0L
+                            main.post { app.speaker.stop() }
+                            followUpListen = true
+                            handleCommand(recorder, preRoll.snapshot())
+                            detector?.reset()
+                            continue
+                        }
+                    } else {
+                        voiced = maxOf(0, voiced - 1)
+                    }
+                    continue      // no wake word or noise tracking while she talks
+                }
+                talkStart = 0L
                 trackNoise(chunk)
 
                 if (listenRequested.getAndSet(false)) {
@@ -176,7 +232,9 @@ class VoiceController(private val app: App) {
             } catch (_: Exception) {
             }
             recorder?.release()
+            try { echo?.release() } catch (_: Exception) {}
             detector?.close()
+            watchSpeech = false
             updatePhase(VoicePhase.IDLE)
             synchronized(lock) { thread = null }
             // A request may have arrived while we were shutting down (but don't spin on errors).

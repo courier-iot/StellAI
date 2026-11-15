@@ -4,7 +4,7 @@
 # changes it everywhere. {name} is the assistant's name. The apps add the mode, memories, project and summary parts.
 INSTRUCTION_LINES = [   # (which apps, line)
     ("all", "You are {name}, the user's private AI assistant (StellAI), running on their own computer. Warm and capable "
-            "with a light space-explorer touch; concise and practical."),
+            "with a light space-explorer touch; concise and practical."),   # = PERSONALITY_DEFAULT (keep in step)
     ("phone", "The user is on their Android phone. To do things on it, call the tools instead of explaining how. Confirm "
               "briefly afterwards; never claim success if a tool failed."),
     ("phone", "Phone limits: apps can turn alarms off (cancel_alarm) but can't list or delete them; Wi-Fi, Bluetooth and "
@@ -30,6 +30,9 @@ INSTRUCTION_LINES = [   # (which apps, line)
             "answering, and use run_python or the calculators when it's available instead of doing long arithmetic in "
             "your head. If you get something wrong, say so and fix it."),
     ("all", "Pin decisions, names and facts that must stay true in this chat with pin_note when it's available."),
+    ("all", "If a program or tool the user asked for isn't available, say so and ask before using a different one "
+            "(for example Blender instead of FreeCAD). Whenever you ask the user a question or offer a choice, end your "
+            "reply there and wait for the answer: don't call tools in the same reply."),
 ]
 # Put after the mode's own instructions; then the summary of earlier messages starts with SUMMARY_INTRO
 MODE_NOTE = "These mode instructions take priority over the general style guidance above (such as keeping replies short)."
@@ -160,16 +163,47 @@ BUILT_IN_MODES = [
 ]
 
 
+# ---- Personality: the user's own description of Stella --------------------------------------------------------
+# Settings → Stella → Personality. Replaces the character part of the first line on every device; empty = the default.
+PERSONALITY_MAX = 600
+PERSONALITY_DEFAULT = "Warm and capable with a light space-explorer touch; concise and practical."
+
+
+def personality():
+    try:
+        with open(os.path.join(MOVE["base"] or ".", "personality.json"), encoding="utf-8") as f:
+            text = str(json.load(f).get("text") or "")
+    except (OSError, ValueError, AttributeError):
+        text = ""
+    return " ".join(text.split())[:PERSONALITY_MAX]
+
+
+def save_personality(data):
+    text = " ".join(str((data or {}).get("text") or "").split())
+    if len(text) > PERSONALITY_MAX:
+        raise ValueError(f"keep the personality under {PERSONALITY_MAX} characters")
+    path = os.path.join(MOVE["base"] or ".", "personality.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"text": text}, f)
+    os.replace(path + ".tmp", path)
+    return {"text": text, "default": PERSONALITY_DEFAULT, "max": PERSONALITY_MAX}
+
+
 def instructions_for(client):
     """The base instructions for one app ("phone" or "web"), with {name} left for the app to fill in."""
-    return "\n".join(line for who, line in INSTRUCTION_LINES if who in ("all", client))
+    lines = [line for who, line in INSTRUCTION_LINES if who in ("all", client)]
+    own = personality()
+    if own and lines:
+        lines[0] = lines[0].replace(PERSONALITY_DEFAULT, own.replace("{", "(").replace("}", ")"))
+    return "\n".join(lines)
 
 
 def prompts_payload():
     """GET /prompts: everything the apps need to build Stella's instructions, plus a version to cache by."""
     body = {"instructions": {c: instructions_for(c) for c in ("phone", "web")}, "mode_note": MODE_NOTE,
             "summary_intro": SUMMARY_INTRO, "voice_style": VOICE_STYLE, "modes": BUILT_IN_MODES,
-            "features": ["server_replies"]}   # what this server can do for the apps (they fall back without it)
+            "personality": personality(),
+            "features": ["server_replies", "personality", "skills", "deep", "ratings", "evals", "lessons", "jobs"]}   # what this server can do for the apps (they fall back without it)
     import hashlib
     body["version"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:12]
     return body

@@ -15,6 +15,12 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
     private var counter = 0
     private var lastId = ""
     private var speaking = false
+    /** True while she's talking (read from the voice thread, for interrupting her by talking). */
+    @Volatile
+    var talking = false
+        private set
+    /** Called (main thread) when she starts talking. */
+    var onStartTalking: (() -> Unit)? = null
     private var doneCallback: (() -> Unit)? = null
     private val main = Handler(Looper.getMainLooper())
 
@@ -37,6 +43,10 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
             val id = "s${counter++}"
             lastId = id
             speaking = true
+            if (!talking) {
+                talking = true
+                onStartTalking?.invoke()
+            }
             engine.speak(clean, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
         } else {
             if (flush) pending.clear()
@@ -48,6 +58,7 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
         pending.clear()
         doneCallback = null
         speaking = false
+        talking = false
         if (ready) tts?.stop()
     }
 
@@ -69,6 +80,7 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
         main.post {
             if (id != lastId) return@post
             speaking = false
+            talking = false
             val cb = doneCallback
             doneCallback = null
             cb?.invoke()

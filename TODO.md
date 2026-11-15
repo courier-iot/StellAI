@@ -29,6 +29,24 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 9. [x] **Personality and working style** (prompt, S): direct, asks one clarifying question, admits uncertainty, checks its work.
 10. [x] **Conveniences** (all, S): auto-continue at the length limit; "Continue in a new chat" carrying notes and summary.
 
+### Working more like Claude on small hardware (0.30.0)
+
+- [x] **Tools on demand**: only the tools a message needs, plus `load_tools`; tools used stay, offered-but-unused ones don't pile up, and a mode switch drops the old mode's tools.
+- [x] **Checked tool calls**: arguments repaired and checked against each tool's schema; a call that can't be fixed goes back to her with the exact problem.
+- [x] **Ask, then wait**: a reply that asks the user something ends the turn, even if she also called tools.
+- [x] **Plan, act, check**: a checklist in the chat for multi-step work, retry once on a failed step, then stop and explain.
+- [x] **Skills**: built-in how-to guides (FreeCAD part, Blender model, KiCad board, research, debugging, GitHub fixes) plus your own, in Settings → Skills.
+- [x] **Sooner, stricter memory learning**: a few minutes after a chat goes quiet, only what you said, updates instead of near-copies.
+- [x] **Personality box** (Settings → Stella): your own description replaces her default character on every device.
+- [x] **A bigger brain on demand** (0.31.0): a mixture-of-experts model in system RAM for design work, plans and repeated failures; found by measuring free memory and test-loading it; loads on demand, leaves memory when idle; or on another computer.
+- [x] **Her own test set** (0.31.0): thumbs up/down and corrections become cases; replayed with a reviewer's score, by hand or at night.
+- [x] **Learning from corrections** (0.31.0): one-line lessons, tied to a skill or for every chat.
+- [x] **Checking long answers** (0.31.0): once, fixed in place.
+- [x] **Draft-model speed-up** (0.31.0, Windows Test & tune) and **saved chat memory** (llama-server slots).
+- [x] **Background jobs** (0.31.0) and a **real browser tool** (headless Edge/Chrome, read-only).
+- [x] **Interrupting her by talking** (0.31.0): phone and avatar screen.
+- [ ] **Linux setup refresh** (S): re-running the setup adds saved chat memory to the launcher; the draft-model trial isn't in stellai-tune.sh yet.
+
 ## Also discussed, not yet built
 
 - [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.

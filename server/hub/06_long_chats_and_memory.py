@@ -216,13 +216,18 @@ def save_memory_settings(data):
     return memory_settings()
 
 
+LEARN_WAKE = threading.Event()   # set after each reply: learn from that chat once it has been quiet a few minutes
+LEARN_QUIET_MINUTES = 4
+
+
 def learner_loop():
-    """Every few minutes, while Stella is idle: learn from chats that have been quiet for 20 minutes."""
+    """While Stella is idle: learn from chats that have been quiet for a few minutes (checked after each reply,
+    and every five minutes)."""
     time.sleep(180)
     while True:
         try:
-            if memory_settings()["mode"] != "off" and server_idle(120) and _llama_up():
-                quiet = int((time.time() - 20 * 60) * 1000)
+            if memory_settings()["mode"] != "off" and server_idle(60) and _llama_up():
+                quiet = int((time.time() - LEARN_QUIET_MINUTES * 60) * 1000)
                 oldest = int((time.time() - 3 * 86400) * 1000)
                 with CHATS.lock:
                     rows = CHATS.db.execute(
@@ -230,7 +235,7 @@ def learner_loop():
                         "GROUP BY conv_id HAVING MAX(updated_at) BETWEEN ? AND ? ORDER BY 2 DESC LIMIT 20",
                         (oldest, quiet)).fetchall()
                 for cid, last in rows:
-                    if not server_idle(120):
+                    if not server_idle(60):
                         break
                     with CHATS.lock:
                         done = CHATS.db.execute("SELECT v FROM meta WHERE k=?", ("learned:" + cid,)).fetchone()
@@ -248,6 +253,10 @@ def learner_loop():
         except Exception as e:
             LEARNER["error"] = str(e)[:200]
             log(f"memory learning skipped: {e}")
-        time.sleep(300)
+        # after a reply, look again just after that chat goes quiet; otherwise every five minutes
+        woke = LEARN_WAKE.wait(300)
+        LEARN_WAKE.clear()
+        if woke:
+            time.sleep(LEARN_QUIET_MINUTES * 60 + 20)
 
 

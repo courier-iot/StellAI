@@ -57,7 +57,7 @@ body.docs #docs{display:flex}
 .msg.assistant.wide{max-width:100%;width:100%}
 .msg .who{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--accent);opacity:.8;margin-bottom:4px}
 .msg .acts{position:absolute;top:-12px;right:8px;display:none;gap:4px}.msg:hover .acts{display:flex}
-.msg .acts button{padding:1px 8px;font-size:12px;border-radius:8px}
+.msg .acts button{padding:1px 8px;font-size:12px;border-radius:8px}.msg .acts button.on{color:var(--accent);border-color:var(--accent)}
 .tool{font-family:var(--mono);font-size:13px;color:var(--gold);padding:0 10px}
 .err{background:rgba(255,107,122,.12);border:1px solid rgba(255,107,122,.5);border-radius:12px;padding:10px 12px;color:#ffc7cd}
 .summary{border:1px solid rgba(155,123,255,.4);background:rgba(155,123,255,.08);border-radius:12px;padding:10px 14px;cursor:pointer}
@@ -255,6 +255,12 @@ const ICON_PATHS = {
   thought: "M12 4.5a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15Z M9 12h.01 M12 12h.01 M15 12h.01",
   dot: "M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10Z",
   info: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 11v5.5 M12 7.8h.01",
+  plan: "M3.5 6.5l1.5 1.5 2.5-3 M10 6.5h10.5 M3.5 12.5l1.5 1.5 2.5-3 M10 12.5h10.5 M4 18h3 M10 18h10.5",
+  book: "M4 5.5c2.5-1 5.5-1 8 .5v13.5c-2.5-1.5-5.5-1.5-8-.5Z M20 5.5c-2.5-1-5.5-1-8 .5v13.5c2.5-1.5 5.5-1.5 8-.5Z",
+  up: "M7 10.5V20H4v-9.5Z M7 10.5L11 3.5c1.5 0 2.5 1 2.2 2.6L12.6 9.5H18.5a2 2 0 0 1 2 2.3l-1.2 6.5a2 2 0 0 1-2 1.7H7",
+  down: "M7 13.5V4H4v9.5Z M7 13.5L11 20.5c1.5 0 2.5-1 2.2-2.6l-.6-3.4H18.5a2 2 0 0 0 2-2.3l-1.2-6.5a2 2 0 0 0-2-1.7H7",
+  brain: "M12 5a3 3 0 0 0-5.8-1A3 3 0 0 0 4 9a3 3 0 0 0 0 5 3 3 0 0 0 2.2 5A3 3 0 0 0 12 19Z M12 5a3 3 0 0 1 5.8-1A3 3 0 0 1 20 9a3 3 0 0 1 0 5 3 3 0 0 1-2.2 5A3 3 0 0 1 12 19Z M12 5v14",
+  clock: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18Z M12 7.5V12l3 2",
 };
 function icon(name, cls = "") {
   return `<svg class="li${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICON_PATHS[name] || ICON_PATHS.sparkle}"/></svg>`;
@@ -265,12 +271,12 @@ const MODE_ICON = { "⌨": "keyboard", "✒": "pen", "✍": "pen", "✏": "pen",
   "❤": "heart", "♥": "heart", "🌙": "moon", "★": "star", "⭐": "star", "💻": "code", "◆": "cube", "🧊": "cube", "📐": "ruler", "🔌": "plug" };
 const modeIc = sym => icon(MODE_ICON[String(sym || "").trim()] || "sparkle");
 // Stored marks at the start of a line ("✓ Saved", "⇄ Auto: CAD") drawn as icons
-const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""] };
+const MARKS = { "✓": ["check", "ok"], "✗": ["cross", "bad"], "⚠": ["warn", "bad"], "⇄": ["swap", ""], "↪": ["redo", ""], "☰": ["plan", ""] };
 // The phone saves a Cancel/Undo button at the end of an action line ("[[button:Undo|tool|{…}]]"); only it can press it
 const stripButton = text => String(text || "").replace(/\n?\[\[button:[^\]\n]*\]\]\s*$/, "");
 function markedLine(text) {
   const t = stripButton(text).trimStart(); const m = MARKS[t[0]];
-  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()) : esc(t);
+  return m ? icon(m[0], m[1]) + esc(t.slice(1).trim()).replace(/\n/g, "<br>") : esc(t);
 }
 const fileIc = kind => icon(kind === "pdf" ? "doc" : kind === "image" ? "image" : kind === "code" ? "code" : "note");
 document.querySelectorAll("[data-ic]").forEach(el => { el.outerHTML = icon(el.dataset.ic, el.hasAttribute("data-solo") ? "solo" : ""); });
@@ -343,6 +349,7 @@ setPrompts(PROMPTS);
 const COLORS = { cyan: "#5CE1E6", blue: "#5AA9FF", red: "#FF5C6C", green: "#4DE8A0", purple: "#A77BFF", pink: "#FF7AC6", orange: "#FFA552", yellow: "#FFD84D" };
 
 // ---------------------------------------------------------------- state
+const RATINGS = new Map();   // message id -> 1 / -1 (thumbs on her replies)
 const S = {
   convs: new Map(), msgs: new Map(), dirtyC: new Set(), dirtyM: new Map(),
   cursor: 0, serverId: "", current: null, pendingProject: "", pendingMode: "",
@@ -524,7 +531,9 @@ function msgHtml(m, canRetry, live) {
     return `<div class="msg user">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${S.busy ? "" : `<button data-edit="${m.id}">Edit</button>`}</div>`}${photos.map(id => `<div class="md"><img src="${media("image:" + id)}"></div>`).join("")}${esc(text)}</div>`;
   }
   const wide = /```|\n\|/.test(m.text);
-  return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts"><button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
+  const rated = RATINGS.get(m.id) || 0;
+  const rate = `<button data-rate="1" data-mid="${m.id}" class="${rated > 0 ? "on" : ""}" title="Good answer: keep it working">${icon("up", "solo")}</button><button data-rate="-1" data-mid="${m.id}" class="${rated < 0 ? "on" : ""}" title="Bad answer: she learns from it">${icon("down", "solo")}</button>`;
+  return `<div class="msg assistant${wide ? " wide" : ""}">${live ? "" : `<div class="acts">${rate}<button data-copy="${m.id}">Copy</button>${canRetry && !S.busy ? `<button data-retry="1">Retry</button>` : ""}</div>`}
     <div class="who">${icon("sparkle")}${esc(name)}</div>${m.reasoning ? `<div class="think" data-think>${icon("thought")}Thought process (click to show)</div><div class="thinkbody" style="display:none" class="think">${esc(m.reasoning)}</div>` : ""}
     <div class="md">${m.text ? md(m.text) : '<span class="sub">…</span>'}</div></div>`;
 }
@@ -1029,6 +1038,10 @@ async function openProject(id) {
   if (q("#pdel")) q("#pdel").onclick = async () => { if (!confirm(`Delete “${p.name}”? Its notes and files are deleted; its chats are kept.`)) return;
     await api(`/projects/${p.id}`, { method: "DELETE" }); d.remove(); await loadMeta(); sync(); };
 }
+function confirmBox(text) {
+  return new Promise(res => { const d = dialog(`<p>${esc(text)}</p><div class="btns"><button id="no">Cancel</button><button class="primary" id="yes">OK</button></div>`, () => res(false));
+    d.querySelector("#yes").onclick = () => { d.remove(); res(true); }; d.querySelector("#no").onclick = () => { d.remove(); res(false); }; });
+}
 function alertBox(text) { const d = dialog(`<p>${esc(text)}</p><div class="btns"><button id="ok">OK</button></div>`); d.querySelector("#ok").onclick = () => d.remove(); }
 async function openTasks() {
   const [r, l] = await Promise.all([api("/reminders"), api("/lists")]);
@@ -1055,9 +1068,17 @@ async function openTasks() {
     await api(`/lists/${encodeURIComponent(n)}`, { method: "POST", json: { items: [i] } }); again(); };
 }
 async function openSettings() {
-  let gh = {}; try { gh = await api("/github"); } catch {}
+  let gh = {}, pers = { text: "", default: "", max: 600 }, selfCheck = {}; try { gh = await api("/github"); } catch {}
+  try { pers = await api("/personality"); } catch {}
+  try { selfCheck = await api("/self-check"); } catch {}
   const d = dialog(`<h2>${icon("settings")}Settings</h2>
     <label class="sub">Assistant name (this browser)</label><input id="nm" value="${esc(NAME())}">
+    <label class="sub" style="display:block;margin-top:10px">Personality (every device): describe her in your own words; empty = the default</label>
+    <textarea id="pers" rows="3" maxlength="${pers.max || 600}" placeholder="${esc(pers.default || "")}">${esc(pers.text || "")}</textarea>
+    <div class="btns" style="justify-content:flex-start;flex-wrap:wrap"><button class="ghost" id="skillsBtn">${icon("book")}Skills and lessons</button>
+      <button class="ghost" id="deepBtn">${icon("brain")}Bigger brain</button><button class="ghost" id="evalBtn">${icon("check")}Test set</button>
+      <button class="ghost" id="jobsBtn">${icon("clock")}Background jobs</button></div>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="selfCheck" style="width:auto" ${selfCheck.enabled !== false ? "checked" : ""}>Check long answers once before they stand (a few seconds longer)</label>
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
@@ -1072,14 +1093,128 @@ async function openSettings() {
     <button id="logout">Forget the API key here</button>
     <div class="btns"><button id="close">Cancel</button><button class="primary" id="save">Save</button></div>`);
   d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#skillsBtn").onclick = () => { d.remove(); openSkills(); };
+  d.querySelector("#deepBtn").onclick = () => { d.remove(); openDeep(); };
+  d.querySelector("#evalBtn").onclick = () => { d.remove(); openEvals(); };
+  d.querySelector("#jobsBtn").onclick = () => { d.remove(); openJobs(); };
+  d.querySelector("#selfCheck").onchange = async e => { try { await api("/self-check", { method: "POST", json: { enabled: e.target.checked } }); } catch (er) { notice(er.message); } };
   d.querySelector("#logout").onclick = () => { store.set("key", ""); location.reload(); };
   if (d.querySelector("#untok")) d.querySelector("#untok").onclick = async () => { await api("/github", { method: "POST", json: { token: "" } }); d.remove(); openSettings(); };
   d.querySelector("#save").onclick = async () => {
     store.set("name", d.querySelector("#nm").value.trim() || "Stella"); store.set("thinkingMode", d.querySelector("#th").value); store.set("autoModes", d.querySelector("#am").value);
+    const pt = d.querySelector("#pers").value.trim();
+    if (pt !== (pers.text || "")) { try { await api("/personality", { method: "POST", json: { text: pt } }); setPrompts(await api("/prompts")); } catch (e) { alertBox("Personality: " + e.message); return; } }
     const body = { default_repo: d.querySelector("#repo").value.trim() }; const t = d.querySelector("#tok").value.trim(); if (t) body.token = t;
     try { const st = await api("/github", { method: "POST", json: body }); d.remove(); if (st.error) alertBox("GitHub: " + st.error); renderBar(); renderMsgs(); }
     catch (e) { alertBox(e.message); }
   };
+}
+
+// Skills: step-by-step guides Stella reads before a kind of task. Built-in ones can be replaced by yours of the same name.
+async function openSkills(editName) {
+  let list = []; try { list = (await api("/skills")).skills || []; } catch (e) { alertBox(e.message); return; }
+  const who = s => s.source === "built-in" ? " (built-in)" : s.source === "stella" ? ` (saved by ${esc(NAME())})` : "";
+  const d = dialog(`<h2>${icon("book")}Skills</h2><p class="sub">Short how-to guides ${esc(NAME())} reads before that kind of task, so a small model follows steps that work. Add your own, or ask her to “save how we did this as a skill”.</p>
+    <div class="list">${list.map(s => `<div class="row"><span class="t"><b>${esc(s.name)}</b>${who(s)}<br><span class="sub">${esc(s.description)}</span></span>
+      <button class="ghost" data-edit="${esc(s.name)}">${s.source === "built-in" ? "View / replace" : "Edit"}</button>${s.source !== "built-in" ? `<button class="ghost" data-del="${esc(s.name)}">${s.replaces_built_in ? "Back to built-in" : "Delete"}</button>` : ""}</div>`).join("")}</div>
+    <h3 class="hud" style="margin-top:14px">Lessons from your corrections</h3><div class="list" id="lessonList"><p class="sub">Loading…</p></div>
+    <h3 class="hud" id="formTitle" style="margin-top:14px">Add a skill</h3>
+    <input id="sn" placeholder="Name, e.g. solder-smd"><input id="sd" style="margin-top:6px" placeholder="When to use it (one line)">
+    <input id="st" style="margin-top:6px" placeholder="Words that suggest it (optional), e.g. solder, smd, reflow">
+    <textarea id="sb" rows="9" style="margin-top:6px" placeholder="1. …&#10;2. …"></textarea>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="save">Save skill</button></div>`);
+  const fill = name => { const s = list.find(x => x.name === name); if (!s) return;
+    d.querySelector("#formTitle").textContent = s.source === "built-in" ? "Replace " + s.name : "Edit " + s.name;
+    d.querySelector("#sn").value = s.name; d.querySelector("#sd").value = s.description; d.querySelector("#st").value = s.source === "built-in" ? "" : (s.triggers || ""); d.querySelector("#sb").value = s.body; d.querySelector("#sb").focus(); };
+  if (editName) fill(editName);
+  const drawLessons = async () => { let ls = []; try { ls = (await api("/lessons")).lessons || []; } catch {}
+    d.querySelector("#lessonList").innerHTML = ls.length ? ls.slice().reverse().map(l => `<div class="row"><span class="t">${esc(l.text)}<br><span class="sub">${l.skill === "general" ? "Every chat" : "With the " + esc(l.skill) + " skill"}</span></span><button class="ghost" data-dell="${l.id}" title="Forget this lesson">${icon("close", "solo")}</button></div>`).join("")
+      : `<p class="sub">None yet. When you correct her (“no, that's wrong…”) or give a reply a thumbs-down with a note, she writes a one-line lesson here.</p>`; };
+  drawLessons();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#save").onclick = async () => {
+    const body = { name: d.querySelector("#sn").value.trim().toLowerCase().replace(/\s+/g, "-"), description: d.querySelector("#sd").value.trim(), triggers: d.querySelector("#st").value.trim(), body: d.querySelector("#sb").value.trim() };
+    try { await api("/skills", { method: "POST", json: body }); d.remove(); openSkills(); } catch (e) { alertBox(e.message); }
+  };
+  d.onclick = async e => { const t = e.target.closest("button")?.dataset || {};
+    if (t.dell) { try { await api("/lessons/" + t.dell, { method: "DELETE" }); } catch (er) { notice(er.message); } drawLessons(); return; }
+    if (t.edit) fill(t.edit);
+    else if (t.del) { try { await api("/skills/" + encodeURIComponent(t.del), { method: "DELETE" }); d.remove(); openSkills(); } catch (er) { alertBox(er.message); } } };
+}
+
+// The bigger model: a mixture-of-experts model in system RAM for design work and hard problems
+async function openDeep() {
+  const d = dialog(`<h2>${icon("brain")}Bigger brain</h2><div id="dd"><p class="sub">Loading…</p></div><div class="btns"><button id="close">Close</button></div>`);
+  let timer = 0;
+  const draw = async () => {
+    let st; try { st = await api("/deep"); } catch (e) { d.querySelector("#dd").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; return; }
+    const f = st.finding, finding = f && f.state === "running";
+    const lanes = [["auto", "Auto: design work, plans and hard problems"], ["design", "Design work only (CAD, Blender, PCB)"], ["always", "Every reply"], ["off", "Off"]];
+    d.querySelector("#dd").innerHTML = `<p class="sub">A bigger model that runs from the computer's memory instead of the graphics card: slower to answer, but it reasons better. ${esc(NAME())} uses it for design work, multi-step plans, anything the quick model fails at twice, or when you ask her to “think harder”. It loads when it's needed and leaves memory after a quiet spell.</p>
+      <p>${st.available ? `<b>${esc(st.label || st.model_file || st.url)}</b>${st.tok_s ? ` · ${st.tok_s} tokens/s` : ""} · ${st.running ? "loaded now" : "loads when needed"}` : "<b>Not set up.</b>"}
+      ${st.free_ram_gb != null ? `<br><span class="sub">Free memory right now: ${st.free_ram_gb} GB${st.note ? " · " + esc(st.note) : ""}</span>` : ""}</p>
+      ${f ? `<p class="sub" style="${f.state === "failed" ? "color:var(--red)" : ""}">${esc(f.text)}${finding && f.total ? ` (${Math.round(100 * f.done / f.total)}%)` : ""}</p>` : ""}
+      <div class="btns" style="justify-content:flex-start"><button class="primary" id="find" ${finding || !st.exe_found ? "disabled" : ""}>${st.available ? "Find a better fit again" : "Find one that fits"}</button></div>
+      ${st.exe_found ? "" : `<p class="sub">This server can't start a second model by itself; point it at one on another computer below.</p>`}
+      <label class="sub" style="display:block;margin-top:10px">When to use it</label><select id="lane">${lanes.map(([v, l]) => `<option value="${v}" ${st.lane === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <label class="sub" style="display:block;margin-top:10px">Leave memory after this many quiet minutes (0 = keep it loaded)</label><input id="idle" type="number" min="0" max="240" value="${st.idle_min}">
+      <label class="sub" style="display:block;margin-top:10px">Or use a llama-server on another computer (optional)</label><input id="durl" placeholder="http://192.168.1.50:8096" value="${esc(st.url || "")}">
+      <div class="btns" style="justify-content:flex-start"><button id="saveDeep">Save</button></div>`;
+    d.querySelector("#find").onclick = async () => { if (!await confirmBox(`This checks the free memory, downloads the best model that fits (often 10–15 GB) and loads it to measure it. It can take a while; ${NAME()} keeps working meanwhile. Go ahead?`)) return;
+      try { await api("/deep/find", { method: "POST", json: {} }); } catch (e) { notice(e.message); } draw(); };
+    d.querySelector("#saveDeep").onclick = async () => { const url = d.querySelector("#durl").value.trim();
+      try { await api("/deep", { method: "POST", json: { lane: d.querySelector("#lane").value, idle_min: +d.querySelector("#idle").value || 0, url, ...(url ? { enabled: true } : {}) } }); notice("Saved."); } catch (e) { alertBox(e.message); } draw(); };
+    clearTimeout(timer); if (finding) timer = setTimeout(() => { if (document.body.contains(d)) draw(); }, 3000);
+  };
+  draw();
+  d.querySelector("#close").onclick = () => { clearTimeout(timer); d.remove(); };
+}
+// Her test set: rated and corrected replies, replayed against the current model with a score
+async function openEvals() {
+  const d = dialog(`<h2>${icon("check")}Test set</h2><div id="ev"><p class="sub">Loading…</p></div><div class="btns"><button id="close">Close</button></div>`);
+  let timer = 0;
+  const draw = async () => {
+    let r; try { r = await api("/evals"); } catch (e) { d.querySelector("#ev").innerHTML = `<p class="sub" style="color:var(--red)">${esc(e.message)}</p>`; return; }
+    const run = r.running, busy = run && run.state === "running", last = r.runs[0], prev = r.runs[1];
+    const kind = { bad: "thumbs-down", good: "thumbs-up", correction: "corrected" };
+    d.querySelector("#ev").innerHTML = `<p class="sub">Replies you rated or corrected. Each run asks the model the same requests again and a strict reviewer scores the new answers, so you can see whether a change made ${esc(NAME())} better or worse. It also runs by itself at night when the cases or the model changed.</p>
+      ${last ? `<p><b>Last run: ${last.passed} of ${last.total} passed</b> · ${esc(last.model)} · ${new Date(last.at).toLocaleString()}${prev ? ` <span class="sub">(before: ${prev.passed} of ${prev.total})</span>` : ""}</p>` : "<p>No runs yet.</p>"}
+      ${busy ? `<p class="sub">Running… ${run.done} of ${run.total}</p>` : run && run.state === "failed" ? `<p class="sub" style="color:var(--red)">${esc(run.error || "")}</p>` : ""}
+      <div class="btns" style="justify-content:flex-start"><button class="primary" id="runFast" ${busy || !r.cases.length ? "disabled" : ""}>Run now</button><button id="runDeep" ${busy || !r.cases.length ? "disabled" : ""}>Run on the bigger model</button></div>
+      <h3 class="hud" style="margin-top:12px">Cases (${r.cases.length})</h3><div class="list">${r.cases.map(c => { const res = last && last.details.find(x => x.case === c.id);
+        return `<div class="row"><span class="t">${res ? icon(res.pass ? "check" : "cross", res.pass ? "ok" : "bad") : ""}<b>${esc(kind[c.kind] || c.kind)}</b> · ${esc(c.request)}${c.note ? `<br><span class="sub">${esc(c.note)}</span>` : ""}${res && !res.pass ? `<br><span class="sub">Reviewer: ${esc(res.why)}</span>` : ""}</span><button class="ghost" data-delc="${c.id}" title="Remove from the test set">${icon("close", "solo")}</button></div>`; }).join("") || `<p class="sub">Give a reply a thumbs-up or thumbs-down (hover over it) to add it here.</p>`}</div>`;
+    d.querySelector("#runFast").onclick = async () => { await api("/evals/run", { method: "POST", json: { lane: "fast" } }); draw(); };
+    d.querySelector("#runDeep").onclick = async () => { await api("/evals/run", { method: "POST", json: { lane: "deep" } }); draw(); };
+    clearTimeout(timer); if (busy) timer = setTimeout(() => { if (document.body.contains(d)) draw(); }, 4000);
+  };
+  draw();
+  d.querySelector("#close").onclick = () => { clearTimeout(timer); d.remove(); };
+  d.onclick = async e => { const b = e.target.closest("[data-delc]"); if (!b) return; try { await api("/evals/" + b.dataset.delc, { method: "DELETE" }); } catch (er) { notice(er.message); } draw(); };
+}
+// Background jobs: things she does by herself at set times
+async function openJobs() {
+  const d = dialog(`<h2>${icon("clock")}Background jobs</h2><p class="sub">Things ${esc(NAME())} does by herself at set times (this server's clock). Each run goes into the job's own chat and a reminder rings on your phones when it's done. You can also just ask her: “every weekday at 7:30, summarize last night's GitHub builds”.</p>
+    <div class="list" id="jl"><p class="sub">Loading…</p></div>
+    <h3 class="hud" style="margin-top:12px">Add a job</h3><input id="jn" placeholder="Name, e.g. Morning briefing">
+    <textarea id="jp" rows="3" style="margin-top:6px" placeholder="What to do each time, e.g. Check my GitHub builds and summarize any failures"></textarea>
+    <div style="display:flex;gap:8px;margin-top:6px"><select id="jr">${[["daily", "Every day"], ["weekdays", "Weekdays"], ["weekly", "Once a week"], ["hourly", "Every hour"], ["once", "Once"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <input id="jt" type="time" value="07:30"><select id="jw">${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((n, i) => `<option value="${i}">${n}</option>`).join("")}</select></div>
+    <div class="btns"><button id="close">Close</button><button class="primary" id="addJob">Add job</button></div>`);
+  const rep = { daily: "every day", weekdays: "weekdays", weekly: "weekly", hourly: "every hour", once: "once" };
+  const draw = async () => { let js = []; try { js = (await api("/jobs")).jobs || []; } catch (e) { notice(e.message); }
+    d.querySelector("#jl").innerHTML = js.map(j => `<div class="row"><span class="t"><b>${esc(j.name)}</b> · ${rep[j.repeat] || j.repeat} ${j.repeat === "hourly" ? "" : esc(j.time)}${j.running ? " · running now" : j.next_run ? ` · next ${new Date(j.next_run * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : " · off"}<br><span class="sub">${esc(j.prompt.slice(0, 140))}</span>${j.last_result ? `<br><span class="sub">Last: ${esc(j.last_result)}</span>` : ""}</span>
+      <button class="ghost" data-runj="${j.id}">Run now</button>${j.conv_id ? `<button class="ghost" data-openj="${esc(j.conv_id)}">Open</button>` : ""}<button class="ghost" data-delj="${j.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("") || `<p class="sub">No jobs yet.</p>`; };
+  draw();
+  d.querySelector("#close").onclick = () => d.remove();
+  d.querySelector("#addJob").onclick = async () => {
+    try { await api("/jobs", { method: "POST", json: { name: d.querySelector("#jn").value, prompt: d.querySelector("#jp").value, repeat: d.querySelector("#jr").value, time: d.querySelector("#jt").value, weekday: +d.querySelector("#jw").value } });
+      d.querySelector("#jn").value = ""; d.querySelector("#jp").value = ""; draw(); } catch (e) { alertBox(e.message); } };
+  d.onclick = async e => { const b = e.target.closest("button"); if (!b) return; const t = b.dataset;
+    try {
+      if (t.runj) { await api(`/jobs/${t.runj}/run`, { method: "POST", json: {} }); notice("Started: it runs in its own chat."); setTimeout(draw, 1500); }
+      else if (t.delj) { if (await confirmBox("Delete this job?")) { await api("/jobs/" + t.delj, { method: "DELETE" }); draw(); } }
+      else if (t.openj) { d.remove(); await sync(); openChat(t.openj); }
+    } catch (er) { notice(er.message); } };
 }
 
 // ---------------------------------------------------------------- search past chats
@@ -1199,7 +1334,7 @@ function renderAtts() {
 
 // ---------------------------------------------------------------- wiring
 function newChat(projectId = "") { if (S.busy) stop(); S.current = null; S.pendingProject = projectId; S.pendingMode = ""; S.context = null; S.error = null; S.editing = null; store.set("current", ""); renderSide(); renderBar(); renderMsgs(); $("#input").focus(); }
-function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); }
+function openChat(id) { if (S.busy) stop(); S.current = id; S.context = null; S.error = null; S.editing = null; store.set("current", id); renderSide(); renderBar(); renderMsgs(); updateMeter(); $("#side").classList.remove("open"); refreshDocs(); loadRatings(id); }
 function autosize() { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(240, t.scrollHeight) + "px"; }
 $("#newChat").onclick = () => newChat();
 $("#newProject").onclick = () => openProject("new");
@@ -1215,7 +1350,7 @@ $("#projectChip").onclick = () => openProject(curProjectId());
 $("#openMemory").onclick = () => openMemory();
 // Memory: what Stella remembers about you, and facts she suggests from quiet chats (keep or drop them)
 async function openMemory() {
-  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. She also reads chats that have gone quiet and suggests facts to keep.</p>
+  const d = dialog(`<h2>${icon("memory")}Memory</h2><p class="sub">${esc(NAME())} uses these facts in every conversation, on all your devices. A few minutes after a chat goes quiet she reads it and suggests facts to keep (only things you said).</p>
     <label class="sub">Learning from quiet chats</label>
     <select id="mm"><option value="review">Suggest, I review</option><option value="auto">Save by itself</option><option value="off">Off</option></select>
     <div id="ms"></div><h3 class="hud" style="margin-top:12px">Remembered</h3><div class="list" id="ml"><p class="sub">Loading…</p></div>
@@ -1349,8 +1484,31 @@ $("#wrap").onchange = e => {
   if (t.value.startsWith("pin:")) { const id = t.value.slice(4); saveConv({ ...curConv(), mode: id === "general" ? "" : id, updated_at: nextTs() }); sync().then(updateMeter); renderBar(); renderMsgs(); return; }
   S.forced.set(S.current, t.value); retry();
 };
+// Thumbs up/down on her replies: a thumbs-down (with what was wrong) becomes a test case and a lesson
+async function loadRatings(conv) {
+  if (!conv) return;
+  try { const r = (await api(`/chats/${encodeURIComponent(conv)}/ratings`)).ratings || {}; for (const [k, v] of Object.entries(r)) RATINGS.set(k, v); if (conv === S.current) renderMsgs(false); } catch {}
+}
+async function rateMsg(mid, rating) {
+  const now = RATINGS.get(mid) || 0; if (now === rating) rating = 0;
+  let note = "";
+  if (rating < 0) {
+    note = await new Promise(res => {
+      const d = dialog(`<h2>${icon("down")}What was wrong?</h2><p class="sub">Optional, but it's how ${esc(NAME())} learns: it becomes a lesson she reads next time, and a test her answers must pass.</p>
+        <textarea id="rn" rows="3" placeholder="e.g. M3 clearance holes are 3.2 mm, not 3 mm"></textarea>
+        <div class="btns"><button id="skip">Skip</button><button class="primary" id="ok">Save</button></div>`, () => res(""));
+      d.querySelector("#rn").focus();
+      d.querySelector("#skip").onclick = () => { d.remove(); res(""); };
+      d.querySelector("#ok").onclick = () => { const v = d.querySelector("#rn").value.trim(); d.remove(); res(v); };
+    });
+  }
+  try { await api(`/messages/${encodeURIComponent(mid)}/rate`, { method: "POST", json: { rating, note } }); RATINGS.set(mid, rating); renderMsgs(false);
+    notice(rating > 0 ? "Kept as a good answer in her test set." : rating < 0 ? "Thanks: added to her test set" + (note ? " and she'll learn from it." : ".") : "Rating removed."); }
+  catch (er) { notice(er.message); }
+}
 $("#wrap").onclick = e => {
   const t = e.target;
+  const rb = t.closest && t.closest("[data-rate]"); if (rb) { rateMsg(rb.dataset.mid, +rb.dataset.rate); return; }
   if (t.dataset.doc) { openDocs(t.dataset.doc); return; }
   if (t.classList.contains("cp")) { navigator.clipboard.writeText(t.nextElementSibling.textContent); t.textContent = "Copied"; setTimeout(() => t.textContent = "Copy", 1200); return; }
   if (t.dataset.copy) { const m = msgsOf(S.current).find(x => x.id === t.dataset.copy); if (m) navigator.clipboard.writeText(m.text.replace(/!\[[^\]]*\]\((image|diagram):[0-9a-f]+\)/g, "").trim()); return; }
@@ -1471,6 +1629,29 @@ async function micToggle(opts = {}) {
   postAvatar({ state: "listening" });
   if (followup) avatarStatus("");
 }
+// Interrupting her by talking when the wake word isn't listening (with it, the wake word's listener does this):
+// while she speaks, the microphone (with the browser's echo cancelling) waits for your voice; then she stops and
+// listens. The first moment of her speech sets how much of her own voice leaks back, so only a clearly louder,
+// steady voice counts.
+const BARGE = { on: false };
+async function bargeWatch() {
+  if (BARGE.on || MIC.rec || WAKE.det || !AVATAR_MODE || !AV.cfg.barge_in || !window.isSecureContext || !navigator.mediaDevices) return;
+  BARGE.on = true;
+  let streamIn;
+  try { streamIn = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } }); }
+  catch { BARGE.on = false; return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)(); const src = ctx.createMediaStreamSource(streamIn);
+  const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
+  const buf = new Float32Array(an.fftSize); const t0 = performance.now(); let leak = 0.01, run = 0;
+  const end = () => { if (!BARGE.on) return; BARGE.on = false; clearInterval(iv); try { src.disconnect(); } catch {} streamIn.getTracks().forEach(t => t.stop()); ctx.close(); };
+  const iv = setInterval(() => {
+    if (!SPEAK.speaking || MIC.rec) { end(); return; }
+    an.getFloatTimeDomainData(buf); let r = 0; for (let i = 0; i < buf.length; i++) r += buf[i] * buf[i]; r = Math.sqrt(r / buf.length);
+    if (performance.now() - t0 < 800) { leak = Math.max(leak, r); return; }
+    if (r > Math.max(0.035, leak * 2.5)) { if (++run >= 6) { end(); SPEAK.cancel(); if (S.busy) stop(); micToggle({ followup: true }); } }
+    else run = Math.max(0, run - 1);
+  }, 50);
+}
 // After a spoken answer, keep listening for a few seconds so you can reply without the wake word
 function startFollowUp() {
   if (!AVATAR_MODE || !AV.cfg.followup || !window.isSecureContext) return;
@@ -1551,6 +1732,7 @@ const SPEAK = {
     const buf = await item.p;
     if (buf && item.gen === this.gen) {
       const ctx = this.audio(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+      if (AVATAR_MODE) bargeWatch();
       await new Promise(res => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(this.analyser); s.onended = res; item.src = s; s.start(); });
     }
     this.playing = null;
@@ -1872,7 +2054,7 @@ async function start() {
   try { await sync(); } catch (e) { console.warn("sync", e); }
   if (S.current && !S.convs.has(S.current)) S.current = null;
   try { await loadMeta(); } catch (e) { console.warn("meta", e); }
-  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) refreshDocs();
+  renderSide(); renderMsgs(); updateMeter(); if (!AVATAR_MODE) { refreshDocs(); loadRatings(S.current); }
   if (AVATAR_MODE) $("#avName").textContent = NAME().toUpperCase();
 }
 setInterval(() => { if (KEY && !S.busy) sync(); if (KEY && !S.busy && document.body.classList.contains("docs") && !D.editing) refreshDocs(); }, 20000);

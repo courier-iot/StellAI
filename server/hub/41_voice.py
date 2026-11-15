@@ -69,7 +69,7 @@ def avatar_config():
     cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
            "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
            "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": "",
-           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": False,
+           "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": True,
            "neon": False, "neon_glow": "#3dff9e", "neon_haze": "#ff3fb4", "neon_crowd": True}
     try:
         with open(_avatar_path("config.json")) as f:

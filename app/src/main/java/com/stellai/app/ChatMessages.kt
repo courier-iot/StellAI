@@ -124,6 +124,14 @@ internal fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
+    var rating by remember { mutableStateOf(false) }
+    val rateScope = rememberCoroutineScope()
+    if (rating) {
+        RateDialog(onDismiss = { rating = false }) { note ->
+            rating = false
+            rateScope.launch { android.widget.Toast.makeText(context, Ratings.rate(msg.id, -1, note), android.widget.Toast.LENGTH_LONG).show() }
+        }
+    }
     val plain = msg.text.replace(MemoryManager.IMAGE_REF, "").trim()
     // Auto mode's chip ("⇄ Auto: CAD Designer"): a tap opens the choices
     val autoChip = msg.role == Role.TOOL && msg.text.startsWith("⇄")
@@ -141,6 +149,16 @@ internal fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
                 val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, plain)
                 context.startActivity(Intent.createChooser(send, "Share message"))
             })
+            if (msg.role == Role.ASSISTANT && msg.text.isNotEmpty()) {
+                DropdownMenuItem(text = { Text("Good answer") }, onClick = {
+                    menu = false
+                    rateScope.launch { android.widget.Toast.makeText(context, Ratings.rate(msg.id, 1, ""), android.widget.Toast.LENGTH_SHORT).show() }
+                })
+                DropdownMenuItem(text = { Text("Bad answer…") }, onClick = {
+                    menu = false
+                    rating = true
+                })
+            }
             if (msg.role == Role.ASSISTANT && canRetry) {
                 DropdownMenuItem(text = { Text("Retry") }, onClick = {
                     menu = false
@@ -182,7 +200,8 @@ internal fun MessageRow(msg: UiMessage, name: String, canRetry: Boolean) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
                 Box {
                     StatusLine(
-                        lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }.joinToString(" ").replace(DOC_REF, "").trim(),
+                        lines.filterNot { DIAGRAM_LINE.matches(it.trim()) }
+                            .joinToString(if (shown.startsWith("☰")) "\n" else " ").replace(DOC_REF, "").trim(),   // a plan keeps its lines
                         modifier = longPress,
                         color = Space.Gold, style = HudLabel.copy(letterSpacing = 0.5.sp),
                         okColor = Space.Gold, badColor = Space.Red,

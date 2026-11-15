@@ -101,6 +101,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
     var sensitivity by rememberSaveable { mutableStateOf(s.wakeSensitivity) }
     var speak by rememberSaveable { mutableStateOf(s.speakReplies) }
     var followUp by rememberSaveable { mutableStateOf(s.followUp) }
+    var bargeIn by rememberSaveable { mutableStateOf(s.bargeIn) }
     var stayConnected by rememberSaveable { mutableStateOf(s.stayConnected) }
     var testResult by remember { mutableStateOf<String?>(null) }
 
@@ -137,6 +138,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
         s.wakeSensitivity = sensitivity
         s.speakReplies = speak
         s.followUp = followUp
+        s.bargeIn = bargeIn
         s.stayConnected = stayConnected
         (context as? Activity)?.let { app.applySettings(it) }
         onDone()
@@ -217,6 +219,7 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                PersonalitySettings()
                 Text("Theme color", style = MaterialTheme.typography.labelLarge)
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -282,11 +285,14 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                 SettingSwitch("Keep listening after she answers",
                     "Reply without the wake word for a few seconds after she speaks. Saying \"thanks\" or \"that's all\" ends it.",
                     followUp) { followUp = it }
+                SettingSwitch("Interrupt her by talking",
+                    "While she's answering out loud, start talking and she stops and listens. Works best on phones that cancel echo; turn it off if she stops by herself.",
+                    bargeIn) { bargeIn = it }
             }
             SettingsSection("Memory", LineIcons.Memory, "${app.memory.items.size} remembered", startOpen = false) {
                 SettingSwitch(
                     "Learn from conversations",
-                    "After a chat goes quiet, the server picks out lasting facts (projects, tools, preferences) and suggests them in Memory for you to keep or drop.",
+                    "A few minutes after a chat goes quiet, the server picks out lasting facts you said (projects, tools, preferences) and suggests them in Memory for you to keep or drop.",
                     learn,
                 ) { learn = it }
                 Text(
@@ -294,6 +300,18 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = onOpenMemory) { Text("View and edit memories") }
+            }
+            SettingsSection("Skills", LineIcons.Skills, "How-to guides and lessons", startOpen = false) {
+                SkillsSettings()
+            }
+            SettingsSection("Bigger brain", LineIcons.Memory, "A bigger model for hard problems", startOpen = false) {
+                DeepSettings()
+            }
+            SettingsSection("Test set", LineIcons.Check, "Rated replies, replayed with a score", startOpen = false) {
+                TestSetSettings()
+            }
+            SettingsSection("Background jobs", LineIcons.Reminder, "Things she does at set times", startOpen = false) {
+                JobsSettings()
             }
             SettingsSection("Phone access", LineIcons.Phone, "What Stella may do on this phone", startOpen = false) {
                 PhoneAccessSettings()

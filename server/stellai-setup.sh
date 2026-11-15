@@ -1135,7 +1135,7 @@ hub_loop() {
       --diagram-dir "$LLM_DIR/diagrams" --mmdc "$LLM_DIR/mermaid/node_modules/.bin/mmdc" \\
       --image-dir "$LLM_DIR/images" --wakeword-dir "$LLM_DIR/wakewords" --llama "http://127.0.0.1:$PORT" \\
       --model-conf "$LLM_DIR/model.conf" --models-dir "$LLM_DIR/models" --llama-pid "$LLM_DIR/llama.pid" \\
-      --avatar-dir "$LLM_DIR/avatar" "\${UPDATE_ARGS[@]}" "\${EXTRA_ARGS[@]}" &
+      --avatar-dir "$LLM_DIR/avatar" --slot-dir "$LLM_DIR/slots" "\${UPDATE_ARGS[@]}" "\${EXTRA_ARGS[@]}" &
     child=\$!
     wait "\$child"; code=\$?
     if [[ \$code -eq 75 ]]; then after_update=1; echo "StellAI hub updated, restarting it"; continue; fi
@@ -1231,13 +1231,15 @@ while true; do
   # The speed-up the setup's test chose (MTP), and the RAM prompt cache, when this llama.cpp build has them
   SPEC=""; [[ -n "\${SPEC_ARGS:-}" ]] && has_opt "draft-mtp" && SPEC="\$SPEC_ARGS"
   CRAM=""; [[ "\${CACHE_RAM_MB:-}" =~ ^[0-9]+\$ ]] && has_opt "--cache-ram" && CRAM="--cache-ram \$CACHE_RAM_MB"
+  # Saved chat memory: the hub saves the chat being left and restores the one you go back to
+  SLOTS=""; has_opt "--slot-save-path" && { mkdir -p "$LLM_DIR/slots"; SLOTS="--slot-save-path $LLM_DIR/slots"; }
   # Two or more graphics cards: LLAMA_GPUS="0" in model.conf keeps Stella on card 0, leaving the others free
   # for 3D shape jobs and other tools. Empty = llama.cpp spreads her over every card.
   if [[ -n "\${LLAMA_GPUS:-}" ]]; then export CUDA_VISIBLE_DEVICES="\$LLAMA_GPUS"; else unset CUDA_VISIBLE_DEVICES; fi
   # nice 2: speech recognition and Stella's voice get the processor first while the model is writing
   KEY=\$(cat "$KEY_FILE")       # re-read: a move that arrives here brings its own key
   nice -n 2 "$LLM_DIR/llama.cpp/build/bin/llama-server" -m "\$MODEL_FILE" -c "\$CTX" \\
-    -t "\$THREADS" -tb $LOGICAL_CPUS \$GPU_ARGS \$FIT \$VIS \$IDLE \$SPEC \$CRAM -fa on \\
+    -t "\$THREADS" -tb $LOGICAL_CPUS \$GPU_ARGS \$FIT \$VIS \$IDLE \$SPEC \$CRAM \$SLOTS -fa on \\
     --reasoning-budget \$TB --reasoning-budget-message "I have thought enough; time to answer." \\
     --cache-type-k q8_0 --cache-type-v q8_0 --jinja --api-key "\$KEY" --host 0.0.0.0 --port $PORT &
   LLAMA_PID=\$!

@@ -523,17 +523,28 @@ def bench_once(server, model, args, ctx, env=None, timeout=900, n_predict=192, l
     port = _free_port()
     cmd = [server, "-m", model, "-c", str(ctx), "--host", "127.0.0.1", "--port", str(port), "-np", "1"] + list(args)
     started = time.time()
+    # llama-server's log goes to a file: a pipe nobody reads fills up (on Windows after a few KB) and the server
+    # freezes while loading. The end of the file is shown if it stops.
+    import tempfile
+    errf = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+
+    def log_tail():
+        try:
+            errf.flush()
+            errf.seek(0)
+            return " ".join(errf.read()[-3000:].split()[-40:])
+        except (OSError, ValueError):
+            return ""
     try:
-        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace",
-                             env=dict(os.environ, **(env or {})),
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf, env=dict(os.environ, **(env or {})),
                              creationflags=0x08000000 if os.name == "nt" else 0)
     except OSError as e:
+        errf.close()
         return {"ok": False, "error": str(e)}
     try:
         while time.time() - started < timeout:
             if p.poll() is not None:
-                tail = (p.stderr.read() or "")[-600:]
-                return {"ok": False, "error": "llama-server stopped: " + " ".join(tail.split()[-40:])}
+                return {"ok": False, "error": "llama-server stopped: " + log_tail()}
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
                     if r.status == 200:
@@ -542,7 +553,7 @@ def bench_once(server, model, args, ctx, env=None, timeout=900, n_predict=192, l
                 pass
             time.sleep(1)
         else:
-            return {"ok": False, "error": f"didn't load within {timeout} s"}
+            return {"ok": False, "error": f"didn't load within {timeout} s: " + log_tail()}
         load = time.time() - started
         gens, prompts = [], []
         for text in BENCH_PROMPTS:
@@ -565,12 +576,17 @@ def bench_once(server, model, args, ctx, env=None, timeout=900, n_predict=192, l
             p.wait(30)
         except subprocess.TimeoutExpired:
             p.kill()
+        errf.close()
 
 
-def tune(server, model, base_args, ctx, env=None, try_mtp=False, has_opt=lambda o: True, log=print):
-    """The context that actually loads (halving down to 8K if it doesn't), then plain vs MTP speed-up.
-    MTP is kept only if it's at least 10% faster here: on some computers it's slower."""
-    result = {"context": ctx, "mtp": False, "runs": []}
+DRAFT_ARGS = ["--draft-max", "8", "--draft-min", "1"]
+
+
+def tune(server, model, base_args, ctx, env=None, try_mtp=False, has_opt=lambda o: True, log=print, draft_args=None):
+    """The context that actually loads (halving down to 8K if it doesn't), then plain vs the MTP speed-up vs a small
+    draft model guessing ahead (draft_args: its -md options plus anything the real launch adds, like the vision
+    add-on). A speed-up is kept only if it's at least 10% faster here: on some computers it's slower."""
+    result = {"context": ctx, "mtp": False, "draft": False, "runs": []}
     c = ctx
     plain = None
     while c >= 8192:
@@ -598,6 +614,17 @@ def tune(server, model, base_args, ctx, env=None, try_mtp=False, has_opt=lambda 
                 result["gen_tps"] = m["gen_tps"]
         else:
             log("  MTP didn't run here: " + m.get("error", "")[:160])
+    if draft_args and has_opt("--model-draft"):
+        log("Trying the small draft model speed-up...")
+        d = bench_once(server, model, base_args + list(draft_args), c, env)
+        result["runs"].append({"what": "draft", **d})
+        if d["ok"]:
+            log(f"  with the draft model: {d['gen_tps']} tokens/s")
+            result["draft_tps"] = d["gen_tps"]
+            if d["gen_tps"] >= result["gen_tps"] * 1.1:
+                result.update(draft=True, mtp=False, gen_tps=d["gen_tps"])
+        else:
+            log("  the draft model didn't run here: " + d.get("error", "")[:160])
     return result
 
 

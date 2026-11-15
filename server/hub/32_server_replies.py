@@ -13,7 +13,8 @@
 # context {used, limit} · done {error, stopped}
 REPLY_RUNS = {}
 REPLY_LOCK = threading.Lock()
-REPLY_MAX_ROUNDS = 6
+REPLY_MAX_ROUNDS = 8
+REPLY_MAX_ROUNDS_PLAN = 16   # multi-step work with a plan gets more steps
 REPLY_MAX_CONTINUES = 2
 REPLY_CONTINUE = ("(Automatic: your previous reply was cut off because your memory filled up. Continue it exactly "
                   "where it stopped, without repeating anything or adding a preamble.)")
@@ -22,7 +23,7 @@ REPLY_DIAGRAM = re.compile(r"!\[[^\]]*\]\(diagram:[0-9a-f]+\)")
 REPLY_THINK = re.compile(r"<think>[\s\S]*?(</think>|$)")
 REPLY_CODE_MODES = {"programmer", "electronics", "modeler", "cad", "pcb"}
 REPLY_QUICK_MODES = {"general", "programmer", "electronics"}
-REPLY_STICKY = {}          # chat -> tools used so far (kept offered, so the model's cache stays warm)
+REPLY_STICKY = {}          # chat -> tools used or loaded so far (kept offered until the mode changes)
 _REPLY_TS = {"last": 0}
 
 
@@ -47,6 +48,10 @@ class ReplyRun:
         self._send = send
         self.stop = threading.Event()
         self.waiting = {}
+        self.plan = None     # update_plan's checklist for this reply
+        self.fails = {}      # failed tool calls, to stop after the same failure twice
+        self.checked = False # a long answer is checked once
+        self.lane = "fast"
 
     def emit(self, event):
         """Sends one event to the app. If the app has gone (stopped, closed), the reply stops."""
@@ -148,6 +153,12 @@ def _reply_system(client, name, project_text, summary, mode, memory):
     p = instructions_for(client).replace("{name}", name)
     if mode.get("prompt"):
         p += f"\n\n## Current mode: {mode['name']}\n{mode['prompt']}" + (f"\n{MODE_NOTE}" if MODE_NOTE else "")
+    skills = skills_section()
+    if skills:
+        p += "\n\n" + skills
+    learned = lessons_section()
+    if learned:
+        p += "\n\n" + learned
     if memory:
         p += "\n\n" + memory
     if project_text:
@@ -203,7 +214,27 @@ def _reply_prepare(run, mode, auto, n_images):
         refresh = sum(1 for h in history if h["role"] == "user") >= 2 and (start > 0 or used > limit * 0.85)
     else:
         start = max(0, len(history) - 24)
-    tools = [SERVER_TOOLS[n][1] for n in (names if names is not None else SERVER_TOOLS) if n in SERVER_TOOLS]
+    names = [n for n in (names if names is not None else SERVER_TOOLS) if n in SERVER_TOOLS]
+    last_text = REPLY_PHOTO.sub("", users[-1]) if users else ""
+    if not d.get("voice"):
+        if skills_list() and "use_skill" not in names:
+            names.append("use_skill")
+        hits = skills_for(last_text)
+        if hits:
+            extra = (extra + "\n" if extra else "") + "Skills that fit this request: " + ", ".join(hits) + \
+                " (call use_skill first)."
+        if getattr(run, "plan", None) or wants_plan(mode["id"], last_text):
+            if not getattr(run, "plan", None):
+                extra = (extra + "\n" if extra else "") + PLAN_HINT
+    tools = [SERVER_TOOLS[n][1] for n in names]
+    if not d.get("voice") and (getattr(run, "plan", None) or wants_plan(mode["id"], last_text)):
+        tools.append(UPDATE_PLAN_DEF)
+    loader = load_tools_def(set(names)) if mode.get("tools") != "minimal" and not d.get("voice") else None
+    if loader:
+        tools.append(loader)
+    if info:   # the planner counted the chosen server tools; these few extra ones count too
+        info["used"] += sum(count_tokens(json.dumps(t)) for t in tools if t is loader or t is UPDATE_PLAN_DEF
+                            or t["function"]["name"] == "use_skill")
     tools += [t for t in run.client_tools if t.get("function", {}).get("name") not in SERVER_TOOLS]
     if d.get("voice"):
         extra = (extra + "\n" if extra else "") + VOICE_STYLE
@@ -247,9 +278,9 @@ def _reply_compact(run, keep_user_turns, style):
     return True
 
 
-def _reply_stream(run, body):
+def _reply_stream(run, body, url=None):
     """One model call, streamed: {content, reasoning, tool_calls, finish}. Sends delta events as it goes."""
-    req = urllib.request.Request(LLAMA_URL.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
+    req = urllib.request.Request((url or LLAMA_URL).rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  method="POST", headers={"Content-Type": "application/json",
                                                          "Authorization": f"Bearer {API_KEY}"})
     res = {"content": "", "reasoning": "", "tool_calls": [], "finish": ""}
@@ -323,6 +354,7 @@ def _reply_auto(run, fresh):
     r = route_mode({"chat_id": run.conv, "text": text, "level": d.get("auto_level") or "auto", "forced": forced})
     run.emit({"type": "mode", "mode": r["mode"]})
     if r.get("switched") or forced:
+        REPLY_STICKY.pop(run.conv, None)   # the new mode brings its own tools; the old mode's ones go
         _reply_save(run, "tool", "⇄ Auto: " + _reply_mode(r["mode"])["name"] + (f" ({r['reason']})" if r.get("reason") else ""))
     elif r.get("suggest"):
         _reply_save(run, "tool", f"⇄ Suggest: {r.get('suggest_name')} (pick it below to redo)")
@@ -388,7 +420,6 @@ def run_reply(run):
             log(f"reply: couldn't refresh the context ({e})")
     if p["info"]:
         run.emit({"type": "context", **p["info"]})
-    REPLY_STICKY.setdefault(run.conv, set()).update(t["function"]["name"] for t in p["tools"])
     hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
     images = _reply_photos(photos)
     users = [i for i, h in enumerate(p["history"]) if h["role"] == "user"]
@@ -401,11 +432,17 @@ def run_reply(run):
             " ".join(f"[photo {x}]" for x in REPLY_PHOTO.findall(raw["_text"]))
         hist[i] = {"role": "user", "content": [{"type": "text", "text": block + text.strip()}] +
                    [{"type": "image_url", "image_url": {"url": u}} for u in images]}
-    turn, continued = [], 0
-    for _ in range(REPLY_MAX_ROUNDS):
+    run.lane, deep_at = "fast", None
+    last_user = next((REPLY_PHOTO.sub("", h["_text"]) for h in reversed(p["history"]) if h["role"] == "user"), "")
+    if not voice and not images and choose_lane(p["mode"]["id"], last_user, p["think"]) == "deep":
+        deep_at = _reply_go_deep(run, p)
+    pinned = run.lane == "fast" and slot_switch(run.conv, (p["info"] or {}).get("used", 0))
+    turn, continued, rounds = [], 0, 0
+    while rounds < (REPLY_MAX_ROUNDS_PLAN if run.plan else REPLY_MAX_ROUNDS):
+        rounds += 1
         if run.stop.is_set():
             return
-        mode, think = p["mode"], p["think"]
+        mode, think = p["mode"], p["think"] or run.lane == "deep"
         code = mode["id"] in REPLY_CODE_MODES
         body = {"model": "local", "stream": True, "messages": [{"role": "system", "content": p["system"]}, *hist, *turn],
                 "tools": p["tools"], "chat_template_kwargs": {"enable_thinking": think},
@@ -414,17 +451,34 @@ def run_reply(run):
                 "top_p": 0.95 if think else 0.8, "top_k": 20, "min_p": 0, "presence_penalty": 0 if code else 1.5}
         if voice and not think:
             body["max_tokens"] = 700
+        if pinned and run.lane == "fast":
+            body["id_slot"] = 0      # the slot whose chat memory is saved and restored (38_slot_cache.py)
         if not p["tools"]:
             body.pop("tools")
-        run.emit({"type": "status", "text": "Contacting the model…"})
-        res = _reply_stream(run, body)
+        run.emit({"type": "status", "text": "Thinking it through with the bigger model…" if run.lane == "deep"
+                   else "Contacting the model…"})
+        try:
+            res = _reply_stream(run, body, deep_at if run.lane == "deep" else None)
+        except (urllib.error.URLError, ConnectionError, TimeoutError, RuntimeError) as e:
+            if run.lane != "deep":
+                raise
+            log(f"reply: the bigger model failed ({e}); the quick one carries on")
+            run.emit({"type": "status", "text": "The bigger model couldn't answer; carrying on with the quick one…"})
+            run.lane, deep_at = "fast", None
+            body["chat_template_kwargs"] = {"enable_thinking": p["think"]}
+            res = _reply_stream(run, body)
         text = REPLY_THINK.sub("", res["content"]).strip()
         if run.stop.is_set():
             if text:
                 _reply_save(run, "assistant", text, res["reasoning"])
             return
+        if res["tool_calls"] and asks_user(text):
+            # Ask, then wait: she asked the user something, so the tools she also called don't run
+            log(f"reply: she asked a question, so {len(res['tool_calls'])} tool call(s) were held back")
+            res["tool_calls"] = []
+        saved = None
         if text or not res["tool_calls"]:
-            _reply_save(run, "assistant", text or "(no reply)", res["reasoning"])
+            saved = _reply_save(run, "assistant", text or "(no reply)", res["reasoning"])
         assistant = {"role": "assistant", "content": text}
         if res["tool_calls"]:
             assistant["tool_calls"] = [{"id": c["id"], "type": "function",
@@ -434,6 +488,7 @@ def run_reply(run):
         if not res["tool_calls"]:
             if res["finish"] == "length" and text and continued < REPLY_MAX_CONTINUES:
                 continued += 1
+                rounds -= 1
                 _reply_save(run, "tool", "↪ Long reply: making room and continuing")
                 run.emit({"type": "status", "text": "Continuing…"})
                 try:
@@ -444,19 +499,49 @@ def run_reply(run):
                 hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
                 turn = [{"role": "user", "content": REPLY_CONTINUE}]
                 continue
+            if saved and not run.checked and res["finish"] != "length" and wants_check(text, mode["id"], voice) \
+                    and self_check_settings()["enabled"]:
+                _reply_self_check(run, body, saved, last_user, deep_at if run.lane == "deep" else None)
             return
+        defs = {t["function"]["name"]: t for t in p["tools"] if isinstance(t, dict) and t.get("function")}
         for tc in res["tool_calls"]:
             if run.stop.is_set():
                 return
-            try:
-                args = json.loads(tc["arguments"] or "{}")
-                if not isinstance(args, dict):
-                    args = {}
-            except ValueError:
-                args = {}
-            args.pop("approved", None)
             name = tc["name"]
-            result_text = None
+            args, problem = parse_tool_args(tc["arguments"])
+            args.pop("approved", None)
+            if not problem and name in defs:
+                args, problem = check_tool_args(defs[name], args)
+            if problem:   # never run a tool with arguments it can't use: tell her exactly what's wrong instead
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": json.dumps(
+                    {"ok": False, "error": f"Not run: {problem}.",
+                     "note": "Call it again with every required argument filled in correctly."})})
+                continue
+            result_text, line, switched = None, None, None
+            if name == "load_tools":
+                asked, unknown = load_tool_groups(args)
+                REPLY_STICKY.setdefault(run.conv, set()).update(asked)   # kept for the rest of this chat
+                loaded = [n for n in asked if n not in defs]
+                p["tools"] = [t for t in p["tools"] if t.get("function", {}).get("name") != "load_tools"]
+                p["tools"] += [SERVER_TOOLS[n][1] for n in loaded]
+                more = load_tools_def({t["function"]["name"] for t in p["tools"]})
+                if more:
+                    p["tools"].append(more)
+                result_text = json.dumps({"ok": bool(asked), "loaded": asked,
+                                          **({"unknown": unknown} if unknown else {}),
+                                          "note": "These tools are available now." if asked else "Nothing loaded."})
+                run.emit({"type": "status", "text": "Loading tools…"})
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+                continue
+            if name == "update_plan":
+                try:
+                    result_text = json.dumps(update_plan(run, args))
+                except ValueError as e:
+                    result_text = json.dumps({"ok": False, "error": str(e)})
+                if UPDATE_PLAN_DEF not in p["tools"]:
+                    p["tools"].append(UPDATE_PLAN_DEF)
+                turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+                continue
             if name in SERVER_TOOLS:
                 ok_to_run = True
                 if name in APPROVAL_TOOLS:
@@ -481,6 +566,13 @@ def run_reply(run):
                     run.emit({"type": "tool", "name": name})
                     result, summary = run_server_tool(name, args)
                     line = _reply_tool_line(name, result, summary)
+                    if not result.get("ok"):
+                        note = failure_note(run, name, result)
+                        if note == STOP_NOTE and run.lane == "fast" and deep_available():
+                            deep_at = _reply_go_deep(run, p, escalate=True)   # failed twice: the bigger model tries
+                            if deep_at:
+                                note = ESCALATE_NOTE
+                        result = {**result, "note": note}
                     result_text = json.dumps(result)
             elif name in client_names:
                 run.emit({"type": "tool", "name": name})
@@ -491,7 +583,6 @@ def run_reply(run):
                 where = "on the desktop" if run.client == "web" else "here"
                 line = f"✗ {name} isn't available {where}"
                 result_text = json.dumps({"ok": False, "error": f"{name} isn't available in this app."})
-            switched = None
             if name == "switch_mode" and auto:
                 try:
                     switched = json.loads(result_text).get("switched_to")
@@ -499,14 +590,68 @@ def run_reply(run):
                     switched = None
             if switched:   # Stella switched herself: her next step uses that mode's instructions and tools
                 amode = _reply_mode(switched)
+                REPLY_STICKY.pop(run.conv, None)   # the old mode's tools go
                 run.emit({"type": "mode", "mode": switched})
                 _reply_save(run, "tool", f"⇄ Auto: {amode['name']} (Stella switched)")
                 p = _reply_prepare(run, amode, True, 0)
                 hist = [{"role": h["role"], "content": h["content"]} for h in p["history"]]
             else:
                 _reply_save(run, "tool", line)
-            REPLY_STICKY.setdefault(run.conv, set()).add(name)
+                REPLY_STICKY.setdefault(run.conv, set()).add(name)
             turn.append({"role": "tool", "tool_call_id": tc["id"], "name": name, "content": result_text})
+    if not run.stop.is_set():
+        _reply_save(run, "tool", f"⚠ Paused after {rounds} steps: say “continue” to let {run.name} carry on")
+
+
+def _reply_self_check(run, body, saved, request, url=None):
+    """Checks a long answer once; if it has concrete problems, she fixes them and the message is replaced in place."""
+    run.checked = True
+    run.emit({"type": "status", "text": "Checking the answer…"})
+    try:
+        problems = check_reply(request, saved["text"])
+    except (urllib.error.URLError, OSError, ValueError, RuntimeError, KeyError) as e:
+        log(f"self-check skipped: {e}")
+        return
+    if not problems or run.stop.is_set():
+        return
+    run.emit({"type": "status", "text": "Fixing what the check found…"})
+    fix = {**body, "messages": body["messages"] + [
+        {"role": "assistant", "content": saved["text"]},
+        {"role": "user", "content": "(Automatic check of your reply, not from the user. Problems: " + "; ".join(problems)
+                                    + ". Give the corrected complete reply now, without mentioning this check.)"}]}
+    fix.pop("tools", None)
+    try:
+        res = _reply_stream(run, fix, url)
+    except (urllib.error.URLError, ConnectionError, TimeoutError, RuntimeError) as e:
+        log(f"self-check fix failed: {e}")
+        return
+    new = REPLY_THINK.sub("", res["content"]).strip()
+    if run.stop.is_set() or len(new) < 20 or res["finish"] == "length" or res["tool_calls"]:
+        run.emit({"type": "message", "message": saved})   # keep the first answer (the fix was cut short)
+        return
+    m = {**saved, "text": new, "updated_at": _reply_ts(run.conv)}
+    CHATS.sync(0, [], [m])
+    run.emit({"type": "message", "message": m})
+    _reply_save(run, "tool", "✓ Checked and fixed: " + "; ".join(problems)[:240])
+
+
+def _reply_go_deep(run, p, escalate=False):
+    """Switches this reply to the bigger model when it's available and the chat fits its window. Its URL, or None."""
+    s = deep_settings()
+    if p.get("info") and s.get("context") and p["info"]["used"] + 2048 > int(s["context"]):
+        log("reply: the chat is too long for the bigger model's window; the quick one answers")
+        return None
+    try:
+        url = deep_ensure(lambda t: run.emit({"type": "status", "text": t}))
+    except RuntimeError as e:
+        log(f"reply: bigger model unavailable ({e})")
+        run.emit({"type": "status", "text": "The bigger model isn't available; using the quick one…"})
+        return None
+    run.lane = "deep"
+    run.emit({"type": "lane", "lane": "deep", "label": s.get("label") or "bigger model", "escalated": escalate})
+    if escalate:
+        run.fails.clear()
+    return url
 
 
 def start_reply(conv_id, data, send):
@@ -519,6 +664,8 @@ def start_reply(conv_id, data, send):
         ACTIVITY["active"] += 1
     try:
         run_reply(run)
+        if not run.stop.is_set() and not run.data.get("voice"):
+            note_correction(run)
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read() or b"{}").get("error")
@@ -536,5 +683,6 @@ def start_reply(conv_id, data, send):
             ACTIVITY["active"] -= 1
             ACTIVITY["last"] = time.time()
         REPLY_RUNS.pop(run.id, None)
+        LEARN_WAKE.set()
     run.emit({"type": "done", "error": error, "stopped": run.stop.is_set()})
     return run

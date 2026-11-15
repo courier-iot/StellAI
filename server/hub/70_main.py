@@ -18,6 +18,9 @@ def parse_args(argv=None):
     p.add_argument("--backup-dir", default="", help="where nightly backups go (default: backups next to the database)")
     p.add_argument("--model-conf", default="", help="Linux launcher's model.conf (enables switching models from the app)")
     p.add_argument("--models-dir", default="", help="folder with the .gguf models")
+    p.add_argument("--slot-dir", default="", help="llama-server's --slot-save-path (old saved chats are tidied up)")
+    p.add_argument("--llama-server", default="", help="llama-server program for the bigger 'deep' model (default: "
+                                                     "found next to the models folder)")
     p.add_argument("--llama-pid", default="", help="file with llama-server's process id")
     p.add_argument("--avatar-dir", default="", help="avatar screen files: voice, 3D libraries, your character "
                                                     "(default: avatar next to the database)")
@@ -100,6 +103,9 @@ def start(cfg):
         os.makedirs(_avatar_path("bin", kind), exist_ok=True)
     if getattr(cfg, "model_conf", "") and getattr(cfg, "models_dir", ""):
         SERVER_CONTROL = LinuxServerControl(cfg.model_conf, cfg.models_dir, cfg.llama_pid)
+    DEEP["models_dir"] = os.path.abspath(cfg.models_dir) if getattr(cfg, "models_dir", "") else ""
+    DEEP["exe"] = getattr(cfg, "llama_server", "") or ""
+    SLOTS["dir"] = getattr(cfg, "slot_dir", "") or ""
     SEARXNG_URL = getattr(cfg, "searxng", "") or ""
     GITHUB_FILE = os.path.abspath(getattr(cfg, "github_file", "") or
                                   os.path.join(os.path.dirname(os.path.abspath(cfg.db)), "github.json"))
@@ -115,6 +121,8 @@ def start(cfg):
         SUMMARIZER["loop"] = True
         threading.Thread(target=summarizer_loop, daemon=True, name="summaries").start()
         threading.Thread(target=learner_loop, daemon=True, name="learner").start()
+        threading.Thread(target=deep_idle_loop, daemon=True, name="deep-idle").start()
+        threading.Thread(target=jobs_loop, daemon=True, name="jobs").start()
     log(f"hub ready on :{cfg.app_port}, chats in {cfg.db}"
         + ("" if mermaid_command() else " (Mermaid not installed: flowcharts use schemdraw)"))
     return web

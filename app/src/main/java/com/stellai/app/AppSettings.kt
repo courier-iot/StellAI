@@ -27,6 +27,8 @@ class AppSettings(context: Context) {
     var speakReplies by boolPref("speak_replies", true)
     /** After a spoken answer, keep listening for a reply without the wake word. */
     var followUp by boolPref("follow_up", true)
+    /** Talking while she speaks stops her and she listens (after a voice question). */
+    var bargeIn by boolPref("barge_in", true)
     /** Keep running (with a quiet notification) when you switch apps, so the server connection isn't dropped. */
     var stayConnected by boolPref("stay_connected", true)
 

@@ -84,6 +84,7 @@ class App : Application() {
         engine = ChatEngine(this)
         voice = VoiceController(this)
         speaker = Speaker(this)
+        speaker.onStartTalking = { if (::voice.isInitialized) voice.watchWhileSpeaking() }   // interrupting her by talking
         // Stella moved to another server: follow her there (same API key), and say so once
         HubApi.onMoved = { url, name ->
             scope.launch(Dispatchers.Main) {

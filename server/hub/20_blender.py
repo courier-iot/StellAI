@@ -15,6 +15,33 @@ BLENDER_IDLE_S = 15 * 60          # Blender leaves memory after this long withou
 BLENDER_KEEP = 40                 # newest versions kept per workspace (plus the first)
 MODEL_EXTS = ("blend", "glb", "gltf", "vrm", "fbx", "obj", "stl")
 WS_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+NAME_SKIP = {"a", "an", "the", "and", "or", "for", "of", "to", "in", "on", "with", "my", "me", "can", "you", "could",
+             "please", "make", "design", "create", "build", "new", "start", "hey", "hi", "it", "that", "this", "i",
+             "want", "need", "would", "like", "some", "using", "use", "let", "lets", "s", "mode", "cad", "blender",
+             "freecad", "kicad", "workspace", "model", "3d", "print", "printing", "help", "is", "be", "so", "just"}
+
+
+def auto_workspace_name(name, args, exists):
+    """A workspace name: the one given (made lowercase-and-dashes if needed), else one made from the file or the
+    user's newest message ("can-baseplate"), with -2, -3 … if taken. A small model often forgets to give one."""
+    raw = str(name or "").strip().lower()
+    if WS_NAME.fullmatch(raw):
+        return raw
+    source = raw or os.path.splitext(os.path.basename(str((args or {}).get("file") or "")))[0]
+    conv = str((args or {}).get("conversation_id") or "")
+    if not source and conv:
+        try:
+            row = CHATS.db.execute("SELECT text FROM messages WHERE conv_id=? AND role='user' AND deleted=0 "
+                                   "ORDER BY created_at DESC LIMIT 1", (conv,)).fetchone()
+            source = row[0] if row else ""
+        except (sqlite3.Error, AttributeError):
+            source = ""
+    words = [w for w in re.findall(r"[a-z0-9]+", source.lower()) if w not in NAME_SKIP and not w.isdigit()]
+    base = "-".join(words[:3])[:32].strip("-") or "design"
+    out, n = base, 2
+    while exists(out):
+        out, n = f"{base}-{n}", n + 1
+    return out
 BLENDER_VIEWS = ("front", "right", "back", "left", "top", "three_quarter")
 
 BLENDER_WORKER_PY = r'''# StellAI Blender worker. Runs inside Blender ("blender -b -P this_file") and takes one JSON command per line
@@ -948,9 +975,7 @@ def tool_blender_project(args):
         out["can_pause_stella_for_shape_jobs"] = _can_pause_model()
         return out, "Checked 3D workspaces"
     if action == "new":
-        name = str(args.get("name", "")).strip().lower()
-        if not WS_NAME.fullmatch(name):
-            raise ValueError("give a name: lowercase letters, digits and dashes, e.g. vela-halo")
+        name = auto_workspace_name(args.get("name"), args, _ws_versions)
         if _ws_versions(name):
             raise ValueError(f"workspace {name} already exists; use action open, or pick another name")
         os.makedirs(_ws_dir(name, "versions"), exist_ok=True)

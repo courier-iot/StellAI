@@ -78,10 +78,8 @@ class Workspaces:
         return [{"name": n, "latest_version": self.versions(n)[-1]}
                 for n in names if WS_NAME.fullmatch(n) and self.versions(n)]
 
-    def start(self, name):
-        name = str(name or "").strip().lower()
-        if not WS_NAME.fullmatch(name):
-            raise ValueError("give a name: lowercase letters, digits and dashes, e.g. fan-duct")
+    def start(self, name, args=None):
+        name = auto_workspace_name(name, args, self.versions)
         if self.versions(name):
             raise ValueError(f"workspace {name} already exists; use action open, or pick another name")
         for sub in ("versions", "exports", "refs"):
@@ -458,7 +456,7 @@ def tool_cad_project(args):
                                          if f.rsplit(".", 1)[-1].lower() in CAD_FILE_EXTS][:40],
                 "workspaces": CAD.list(), "active": _safe(lambda: CAD.name(""))}, "Checked CAD workspaces"
     if action == "new":
-        name = CAD.start(args.get("name"))
+        name = CAD.start(args.get("name"), args)
         v, path = CAD.next(name)
         job = {"save": path}
         if args.get("file"):

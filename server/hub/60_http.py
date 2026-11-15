@@ -671,6 +671,126 @@ def make_http_handler(cfg, chats):
     def get_prompts(self, path, m):
         return self.send_json(200, prompts_payload())
 
+    @routes.add("GET", "/personality")   # Settings → Stella → Personality (every device)
+    def get_personality(self, path, m):
+        return self.send_json(200, {"text": personality(), "default": PERSONALITY_DEFAULT, "max": PERSONALITY_MAX})
+
+    @routes.add("POST", "/personality")
+    def post_personality(self, path, m):
+        try:
+            return self.send_json(200, save_personality(json.loads(self.read_body(20_000) or b"{}")))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("GET", "/skills")   # Stella's how-to guides: built-in ones and yours
+    def get_skills(self, path, m):
+        return self.send_json(200, {"skills": skills_list()})
+
+    @routes.add("POST", "/skills")   # add or change one of yours: {name, description, body, triggers}
+    def post_skills(self, path, m):
+        try:
+            s = skill_save(json.loads(self.read_body(SKILL_MAX * 4 + 4000) or b"{}"))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"skill": s, "skills": skills_list()})
+
+    @routes.add("DELETE", R(r"/skills/([a-z0-9][a-z0-9-]{1,39})"))
+    def delete_skill(self, path, m):
+        if not skill_delete(m.group(1)):
+            return self.send_json(404, {"error": "that's not one of your skills (built-in skills can't be deleted)"})
+        return self.send_json(200, {"skills": skills_list()})
+
+    def body_json(self, limit=200_000):
+        return json.loads(self.read_body(limit) or b"{}")
+
+    # ---- The bigger model (34_deep_brain.py) --------------------------------------------------------------------
+    @routes.add("GET", "/deep")
+    def get_deep(self, path, m):
+        return self.send_json(200, deep_status())
+
+    @routes.add("POST", "/deep")   # {enabled, lane, idle_min, url}
+    def post_deep(self, path, m):
+        try:
+            return self.send_json(200, save_deep_settings(body_json(self)))
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("POST", "/deep/find")   # find, download and measure the best one that fits (in the background)
+    def post_deep_find(self, path, m):
+        return self.send_json(200, {"started": start_deep_find(), **deep_status()})
+
+    # ---- Ratings, the test set, lessons, checking long answers (35_learning.py) ---------------------------------
+    @routes.add("POST", R(r"/messages/([^/]{1,64})/rate"))   # {rating: 1 | -1 | 0, note}
+    def post_rate(self, path, m):
+        try:
+            d = body_json(self, 20_000)
+            return self.send_json(200, rate_message(m.group(1), d.get("rating", 0), d.get("note", "")))
+        except (ValueError, TypeError, sqlite3.Error) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("GET", R(r"/chats/([^/]{1,64})/ratings"))
+    def get_ratings(self, path, m):
+        return self.send_json(200, {"ratings": ratings_for(m.group(1))})
+
+    @routes.add("GET", "/evals")
+    def get_evals(self, path, m):
+        cases = [{k: v for k, v in c.items() if not k.startswith("_")} for c in eval_cases()]
+        return self.send_json(200, {"cases": cases, "runs": eval_runs(), "running": LEARN_STATE["eval"]})
+
+    @routes.add("POST", "/evals/run")   # {lane: fast | deep}
+    def post_evals_run(self, path, m):
+        try:
+            lane = "deep" if body_json(self, 2000).get("lane") == "deep" else "fast"
+        except ValueError:
+            lane = "fast"
+        return self.send_json(200, {"started": start_evals(lane), "running": LEARN_STATE["eval"]})
+
+    @routes.add("DELETE", R(r"/evals/([0-9a-f]{10})"))
+    def delete_eval(self, path, m):
+        return self.send_json(200 if delete_eval_case(m.group(1)) else 404, {"ok": True})
+
+    @routes.add("GET", "/lessons")
+    def get_lessons(self, path, m):
+        return self.send_json(200, {"lessons": lessons()})
+
+    @routes.add("DELETE", R(r"/lessons/([0-9a-f]{8})"))
+    def delete_lesson_route(self, path, m):
+        return self.send_json(200 if delete_lesson(m.group(1)) else 404, {"lessons": lessons()})
+
+    @routes.add("GET", "/self-check")
+    def get_self_check(self, path, m):
+        return self.send_json(200, self_check_settings())
+
+    @routes.add("POST", "/self-check")
+    def post_self_check(self, path, m):
+        try:
+            return self.send_json(200, save_self_check_settings(body_json(self, 2000)))
+        except (ValueError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    # ---- Background jobs (36_jobs.py) ----------------------------------------------------------------------------
+    @routes.add("GET", "/jobs")
+    def get_jobs(self, path, m):
+        return self.send_json(200, {"jobs": jobs_list()})
+
+    @routes.add("POST", "/jobs")   # add or change: {id?, name, prompt, repeat, time, weekday, date, enabled}
+    def post_jobs(self, path, m):
+        try:
+            return self.send_json(200, {"job": job_save(body_json(self, 20_000)), "jobs": jobs_list()})
+        except (ValueError, TypeError, OSError) as e:
+            return self.send_json(400, {"error": str(e)})
+
+    @routes.add("DELETE", R(r"/jobs/([0-9a-f]{10})"))
+    def delete_job(self, path, m):
+        return self.send_json(200 if job_delete(m.group(1)) else 404, {"jobs": jobs_list()})
+
+    @routes.add("POST", R(r"/jobs/([0-9a-f]{10})/run"))
+    def post_job_run(self, path, m):
+        if not any(j["id"] == m.group(1) for j in jobs_list()):
+            return self.send_json(404, {"error": "no such job"})
+        threading.Thread(target=run_job, args=(m.group(1),), daemon=True).start()
+        return self.send_json(200, {"started": True})
+
     @routes.add("GET", "/modes")
     def get_modes(self, path, m):
         return self.send_json(200, {"modes": chats.modes()})

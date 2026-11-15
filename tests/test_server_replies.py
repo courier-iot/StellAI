@@ -138,6 +138,91 @@ check(call(port, "POST", "/replies/000000000000/answer", {"call_id": "x", "answe
       "an answer for a finished reply is ignored")
 st, p = call(port, "GET", "/prompts")
 check("server_replies" in p.get("features", []), "the apps can see the server runs replies")
+
+# ---- working habits --------------------------------------------------------------------------------------------
+# ask, then wait: a reply that asks the user something doesn't also run tools
+chat("w1", "ask first please", mode="programmer")
+ev = reply("w1", fresh=False)
+check(not any(e["type"] == "tool" for e in ev) and saved("w1")[-1] == ("assistant", "FreeCAD isn't installed. Should I use Blender instead?"),
+      "a question ends the turn: the tool she also called doesn't run", saved("w1"))
+check(h.asks_user("Which size do you want?") and h.asks_user("I can do 3 mm or 4 mm.\nLet me know which.")
+      and not h.asks_user("Making the base plate now.") and not h.asks_user("```python\nx = input('?')\n```\nRunning it."),
+      "questions are recognised")
+
+# tool arguments are checked: a missing one goes back to her instead of running
+chat("w2", "bad args here", mode="programmer")
+ev = reply("w2", fresh=False)
+check(not any(e["type"] == "tool" for e in ev) and "Not run: expression is missing" in saved("w2")[-1][1],
+      "a call missing a required argument isn't run and she's told why", saved("w2")[-1])
+cdef = h.SERVER_TOOLS["cad_step"][1]
+a, prob = h.check_tool_args(cdef, {"Goal": "box", "code": "add('b', box(1,2,3))", "views": "front, top", "check": "false"})
+check(prob is None and a["goal"] == "box" and a["views"] == ["front", "top"] and a["check"] is False,
+      "arguments are repaired (names, lists, true/false)", (a, prob))
+a, prob = h.check_tool_args(h.SERVER_TOOLS["cad_project"][1], {"action": "export", "version": "two"})
+check(prob and "version should be integer" in prob, "a wrong type is reported", prob)
+check(h.parse_tool_args("```json\n{'a': 1, 'b': True,}\n```")[0] == {"a": 1, "b": True}
+      and h.parse_tool_args('{"a": [1,2,],}')[0] == {"a": [1, 2]} and h.parse_tool_args("nope")[1],
+      "broken JSON is repaired when it can be")
+
+# tools on demand
+chat("w3", "load cad tools", mode="general")
+ev = reply("w3", fresh=False, auto_level="off")
+last = saved("w3")[-1][1]
+check(last.startswith("Tools: ") and "cad_step" in last and "load_tools" in last and "blender_step" not in last,
+      "load_tools adds a group for her next step", last)
+check({"cad_step", "cad_project", "cad_inspect"} <= h.REPLY_STICKY.get("w3", set()), "and they stay for the chat")
+chat("w3b", "hi there", mode="general")
+ev = reply("w3b", fresh=False, auto_level="off")
+check("blender_step" not in str(h.REPLY_STICKY.get("w3b", set())), "tools offered but not used don't pile up")
+
+# plan, act, check
+chat("w4", "plan this for me please", mode="cad")
+ev = reply("w4", fresh=False)
+plans = [t for r, t in saved("w4") if t.startswith("☰")]
+check(plans == ["☰ Plan: all 2 done\n1. Draw the base (done)\n2. Add the holes (done)"],
+      "the plan is one checklist message, ticked off in place", saved("w4"))
+run = h.ReplyRun("x", {}, lambda e: None)
+n1 = h.failure_note(run, "cad_step", {"error": "line 3: bad"})
+n2 = h.failure_note(run, "cad_step", {"error": "line 4: bad"})
+check(n1 == h.RETRY_NOTE and n2 == h.STOP_NOTE, "a failed step: retry once, then stop and explain")
+check(h.wants_plan("cad", "design a base plate 120 by 80 with four corner holes for M3 screws")
+      and not h.wants_plan("general", "what's the weather like?"), "multi-step work gets a plan")
+
+# skills
+st, sk = call(port, "GET", "/skills")
+names = [x["name"] for x in sk["skills"]]
+check(st == 200 and "cad-part" in names and "pcb-board" in names, "built-in skills are listed", names)
+st, r = call(port, "POST", "/skills", {"name": "solder-smd", "description": "Soldering SMD parts by hand",
+                                        "triggers": "solder, smd", "body": "1. Flux first.\n2. Tack one pad."})
+check(st == 200 and r["skill"]["source"] == "user", "your own skill is saved", r)
+check(h.skills_for("how do I solder this smd chip") == ["solder-smd"], "trigger words suggest it")
+chat("w5", "use skill solder-smd", mode="programmer")
+reply("w5", fresh=False)
+check("Flux first" in saved("w5")[-1][1] and any(t == "✓ Using the solder-smd skill" for _, t in saved("w5")),
+      "she reads a skill with use_skill", saved("w5"))
+check("solder-smd: Soldering SMD parts by hand" in h.skills_section(), "skills are listed in her instructions")
+st, r = call(port, "POST", "/skills", {"name": "Bad Name!", "description": "x", "body": "y"})
+check(st == 400, "a bad skill name is refused", r)
+st, r = call(port, "DELETE", "/skills/solder-smd")
+check(st == 200 and "solder-smd" not in [x["name"] for x in r["skills"]], "your skill can be deleted")
+st, r = call(port, "DELETE", "/skills/cad-part")
+check(st == 404, "built-in skills can't be deleted")
+
+# personality: the user's words replace the default character everywhere
+st, r = call(port, "POST", "/personality", {"text": "Dry wit, calm, a retired starship engineer."})
+st, p = call(port, "GET", "/prompts")
+check(st == 200 and "Dry wit, calm, a retired starship engineer." in p["instructions"]["phone"]
+      and "space-explorer" not in p["instructions"]["web"] and p["personality"].startswith("Dry wit"),
+      "the personality replaces the default on every device", p["instructions"]["web"][:200])
+st, r = call(port, "POST", "/personality", {"text": "x" * 700})
+check(st == 400, "a too-long personality is refused")
+call(port, "POST", "/personality", {"text": ""})
+check("space-explorer" in h.instructions_for("web"), "empty brings the default back")
+
+# memory learning: no near-copies
+check(h._same_fact("Uses an ESP32-S3 for most projects.", "Uses ESP32-S3 for most of their projects")
+      and not h._same_fact("Has a dog named Max.", "Has a cat named Max."), "near-copies of a fact are spotted")
+
 fl.terminate()
 web.server_close()
 done()
