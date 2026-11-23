@@ -459,7 +459,7 @@ object HubApi {
         false
     }
 
-    private val quickHttp = OkHttpClient.Builder()
+    private val reachHttp = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(4, TimeUnit.SECONDS)
         .build()
@@ -467,7 +467,7 @@ object HubApi {
     /** Fast check (a few seconds at most) that the server answers, used to decide when the phone answers instead. */
     fun reachable(serverUrl: String): Boolean = try {
         val request = Request.Builder().url("${url(serverUrl)}/health").get().build()
-        quickHttp.newCall(request).execute().use { it.isSuccessful }
+        reachHttp.newCall(request).execute().use { it.isSuccessful }
     } catch (e: Exception) {
         false
     }

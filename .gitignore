@@ -1,2 +1,4 @@
 .llama-build/
 app/src/main/jniLibs/
+__pycache__/
+*.pyc
