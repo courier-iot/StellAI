@@ -304,6 +304,11 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
             SettingsSection("Skills", LineIcons.Skills, "How-to guides and lessons", startOpen = false) {
                 SkillsSettings()
             }
+            SettingsSection("On-phone brain", LineIcons.Phone,
+                app.onPhone.installed?.let { "${it.name} · " + when (s.brainSource) { "server" -> "not used"; "phone" -> "always"; else -> "when offline" } }
+                    ?: "Answer without the server", startOpen = false) {
+                OnPhoneSettings()
+            }
             SettingsSection("Bigger brain", LineIcons.Memory, "A bigger model for hard problems", startOpen = false) {
                 DeepSettings()
             }

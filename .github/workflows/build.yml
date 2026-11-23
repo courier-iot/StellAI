@@ -33,6 +33,21 @@ jobs:
           done
           ls -la "$dir"
 
+      # The on-phone brain: llama.cpp's llama-server built for Android (arm64). Cached per llama.cpp version,
+      # so it only compiles (~10–15 minutes) when app/llama/ changes.
+      - name: Cache on-phone brain (llama.cpp for Android)
+        id: llama-cache
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/jniLibs/arm64-v8a
+          key: llama-android-${{ hashFiles('app/llama/**') }}
+
+      - name: Build on-phone brain (llama.cpp for Android)
+        if: steps.llama-cache.outputs.cache-hit != 'true'
+        run: |
+          command -v ninja >/dev/null || sudo apt-get install -y ninja-build
+          bash app/llama/build-llama-android.sh
+
       # The app's own tests (app/src/test): if any fail, nothing is built or released
       - name: Run app tests
         run: gradle testDebugUnitTest --no-daemon --stacktrace

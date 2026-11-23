@@ -558,6 +558,17 @@ class ChatEngine(private val app: App) {
 
     /** fresh: the user just sent this message (not Retry), so the server may answer simple requests at once. */
     private suspend fun runConversation(convId: String, fromVoice: Boolean, newPhotos: List<String>, fresh: Boolean = false) {
+        val brain = try {
+            pickBrain()
+        } catch (e: CancellationException) {
+            busy = false   // stopped while checking the server
+            status = ""
+            throw e
+        }
+        when (brain) {
+            "phone" -> return runOnPhone(convId, fromVoice, fallback = false)
+            "fallback" -> return runOnPhone(convId, fromVoice, fallback = true)
+        }
         if (app.modes.serverReplies) return runOnServer(convId, fromVoice, newPhotos, fresh)
         val gen = generation
         var memoryChanged = false
@@ -776,6 +787,174 @@ class ChatEngine(private val app: App) {
                     else -> app.voice.listenNow(followUp = true)
                 }
             }
+        }
+    }
+
+    // ---- The on-phone brain ------------------------------------------------------------------------------
+    // A small model on this phone (OnPhoneBrain) answers when the server can't be reached (Auto), or always (Phone).
+    // It has no server tools, only phone actions, and a short set of instructions that fits a small model.
+
+    /** Chats that already say the phone is answering (so the note isn't repeated every message). */
+    private val phoneNoted = mutableSetOf<String>()
+
+    /** "server", "phone" (chosen in Settings) or "fallback" (Auto, and the server can't be reached). */
+    private suspend fun pickBrain(): String {
+        val s = app.settings
+        return when (s.brainSource) {
+            "phone" -> "phone"
+            "server" -> "server"
+            else -> {
+                if (app.onPhone.installed == null) return "server"
+                status = "Contacting server…"
+                val noServer = s.serverUrl.isBlank() || s.apiKey.isBlank()
+                if (noServer || !withContext(Dispatchers.IO) { HubApi.reachable(s.serverUrl) }) "fallback" else {
+                    phoneNoted.clear()
+                    "server"
+                }
+            }
+        }
+    }
+
+    private suspend fun runOnPhone(convId: String, fromVoice: Boolean, fallback: Boolean) {
+        val gen = generation
+        var finalReply = ""
+        val speakOut = fromVoice && app.settings.speakReplies
+        val feeder = SentenceFeeder { piece -> main.post { app.speaker.enqueue(piece) } }
+        if (speakOut) main.post { app.speaker.stop() }
+        try {
+            if (fallback && phoneNoted.add(convId)) {
+                addStored(convId, Role.TOOL, "⇄ On this phone: the server can't be reached, so the on-phone brain is answering")
+            }
+            status = if (app.onPhone.engineState == "ready") "Thinking on this phone…" else "Waking the on-phone brain…"
+            val base = app.onPhone.ensureRunning()
+            val key = app.onPhone.engineKey
+            status = "Thinking on this phone…"
+            val mode = modeOf(convId)
+            val list = withContext(Dispatchers.IO) { app.store.messages(convId).map { it.toUi() } }
+            val lastSummary = list.indexOfLast { it.role == Role.SUMMARY }
+            val summary = if (lastSummary >= 0) list[lastSummary].text else ""
+            // the on-phone brain can't see photos: they're mentioned instead
+            val plain = list.drop(lastSummary + 1).map { it.copy(text = it.text.replace(PHOTO_REF, "(a photo, which can't be seen offline)")) }
+            val lastText = plain.lastOrNull { it.role == Role.USER }?.text.orEmpty()
+            val picked = PhoneToolPicker.pick(lastText, fromVoice = false).orEmpty()
+            val tools = JSONArray()
+            val defs = PhoneTools.definitions()
+            for (i in 0 until defs.length()) {
+                val name = defs.optJSONObject(i)?.optJSONObject("function")?.optString("name").orEmpty()
+                if (name in picked && name != "web_search") tools.put(defs.get(i))
+            }
+            val system = onPhoneSystemPrompt(mode, summary)
+            // as much of the chat as fits (about 3 characters a token, keeping room for the reply)
+            val room = (app.onPhone.contextSize - 1024) * 3 - system.length - tools.toString().length
+            var history = buildHistory(plain)
+            while (history.size > 1 && history.sumOf { textOf(it).length } > room) {
+                history = history.drop(1)
+                while (history.size > 1 && history[0].optString("role") != "user") history = history.drop(1)
+            }
+            history = withTurnContext(history, if (fromVoice) app.modes.prompts.voiceStyle else "")
+            val turn = mutableListOf<JSONObject>()
+            repeat(PHONE_TOOL_ROUNDS) { round ->
+                val streamId = STREAMING_PREFIX + UUID.randomUUID()
+                messages.add(UiMessage(streamId, Role.ASSISTANT, ""))
+                feeder.begin()
+                val body = JSONObject()
+                    .put("model", "local")
+                    .put("messages", JSONArray().apply {
+                        put(JSONObject().put("role", "system").put("content", system))
+                        history.forEach { put(it) }
+                        turn.forEach { put(it) }
+                    })
+                    .put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
+                    .put("temperature", mode.temperature ?: 0.7)
+                    .put("top_p", 0.8)
+                    .put("top_k", 20)
+                    .put("min_p", 0.0)
+                    .put("presence_penalty", 0.5)
+                // the last round gets no actions, so it has to answer in words
+                if (tools.length() > 0 && round < PHONE_TOOL_ROUNDS - 1) body.put("tools", tools)
+                val result = withContext(Dispatchers.IO) {
+                    client.streamChat(base, key, body) { content, reasoning ->
+                        main.post {
+                            if (!busy || gen != generation) return@post
+                            val visible = stripThink(content)
+                            if (speakOut) feeder.feed(visible)
+                            status = if (visible.isBlank() && reasoning.isNotBlank()) "Thinking on this phone…" else "Writing…"
+                            updateMessage(streamId) { it.copy(text = visible, reasoning = reasoning) }
+                        }
+                    }
+                }
+                messages.removeAll { it.id == streamId }
+                val finalText = stripThink(result.content).trim()
+                if (speakOut) main.post { feeder.feed(finalText, finish = true) }
+                if (finalText.isNotEmpty() || result.toolCalls.isEmpty()) {
+                    addStored(convId, Role.ASSISTANT, finalText.ifEmpty { "(no reply)" }, result.reasoning)
+                    if (finalText.isNotEmpty()) finalReply = finalText
+                }
+                if (result.toolCalls.isEmpty()) return
+                val assistant = JSONObject().put("role", "assistant").put("content", finalText)
+                assistant.put("tool_calls", JSONArray().apply {
+                    result.toolCalls.forEach { tc ->
+                        put(JSONObject().put("id", tc.id).put("type", "function")
+                            .put("function", JSONObject().put("name", tc.name).put("arguments", tc.arguments)))
+                    }
+                })
+                turn.add(assistant)
+                for (tc in result.toolCalls) {
+                    status = PhoneTools.displayName(tc.name) + "…"
+                    val outcome = if (PhoneTools.definitions().toString().contains("\"${tc.name}\"")) {
+                        PhoneTools.execute(app, tc.name, tc.arguments)
+                    } else {
+                        PhoneTools.Outcome("✗ ${tc.name} isn't available offline",
+                            JSONObject().put("ok", false).put("error", "Not available on the phone").toString())
+                    }
+                    addStored(convId, Role.TOOL, ActionButtons.attach(outcome.summary, outcome.button))
+                    turn.add(JSONObject().put("role", "tool").put("tool_call_id", tc.id).put("name", tc.name)
+                        .put("content", outcome.result))
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!stopRequested && gen == generation) {
+                val why = if (e is java.io.IOException && e.message?.contains("brain") == true) e.message.orEmpty()
+                    else "On-phone brain: " + (e.message ?: e.javaClass.simpleName)
+                messages.add(UiMessage(UUID.randomUUID().toString(), Role.ERROR, why))
+            }
+            if (fromVoice && !stopRequested && app.settings.speakReplies) {
+                app.speaker.speak("Sorry, my on-phone brain couldn't answer.")
+            }
+        } finally {
+            if (gen == generation) {
+                messages.removeAll { it.id.startsWith(STREAMING_PREFIX) }
+                if (stopRequested) messages.add(UiMessage(UUID.randomUUID().toString(), Role.ERROR, "Stopped."))
+                busy = false
+                status = ""
+            }
+            app.store.touchConversation(convId, nextTs())
+            reloadConversations()
+            app.sync.request()   // goes through once the server is back
+            if (fromVoice && finalReply.isNotEmpty() && !stopRequested && app.settings.followUp) {
+                if (speakOut) main.post { app.speaker.whenDone { app.voice.listenNow(followUp = true) } }
+                else app.voice.listenNow(followUp = true)
+            }
+        }
+    }
+
+    /** Short instructions for the small on-phone model (the server's full instructions are too long for it). */
+    private fun onPhoneSystemPrompt(mode: Mode, summary: String): String {
+        val name = app.settings.assistantName.ifBlank { "Stella" }
+        val memory = app.memory.promptSection().take(1500)
+        return buildString {
+            append("You are $name, the user's personal assistant. Right now you are running offline as a small model ")
+            append("on the user's phone, without your server: you can't search the web, open their files or projects, or ")
+            append("use the server's tools. Answer clearly and briefly. If you aren't sure about something, say so instead ")
+            append("of guessing. When the user asks for something on the phone (an alarm, a timer, music, an app), use ")
+            append("the phone actions you are given.")
+            if (mode.id != GENERAL_MODE.id && mode.prompt.isNotBlank()) {
+                append("\n\n## Current mode: ").append(mode.name).append('\n').append(mode.prompt.take(800))
+            }
+            if (memory.isNotBlank()) append("\n\n").append(memory)
+            if (summary.isNotBlank()) append("\n\n## Earlier in this chat\n").append(summary.take(1500))
         }
     }
 
@@ -1228,6 +1407,8 @@ class ChatEngine(private val app: App) {
         val PHOTO_REF = Regex("!\\[[^\\]]*\\]\\(image:([0-9a-f]{16})\\)")
         val DIAGRAM_REF = Regex("!\\[[^\\]]*\\]\\(diagram:[0-9a-f]+\\)")
         private const val MAX_TOOL_ROUNDS = 6
+        /** Rounds of phone actions the on-phone brain may take before it must answer. */
+        private const val PHONE_TOOL_ROUNDS = 3
         /** A reply that runs out of room is continued at most this many times. */
         private const val MAX_CONTINUES = 2
         private const val CONTINUE_PROMPT = "(Automatic: your previous reply was cut off because your memory filled " +

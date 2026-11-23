@@ -83,11 +83,16 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         if (savedInstanceState == null) handleIntent(intent)
+        // On-phone brain: suggest a model for this phone the first time, later a better one now and then
+        app.onPhone.onAppStart()
         setContent {
             StellarTheme {
                 // Open settings first if the app hasn't been set up yet.
                 // "chat", "settings", "memory", or "project:<id>" ("project:new" to create one)
-                var screen by rememberSaveable { mutableStateOf(if (app.settings.apiKey.isBlank()) "settings" else "chat") }
+                // (with an on-phone brain and no server, chatting works straight away)
+                var screen by rememberSaveable {
+                    mutableStateOf(if (app.settings.apiKey.isBlank() && app.onPhone.installed == null) "settings" else "chat")
+                }
                 // A reminder notification asks for the reminders screen
                 LaunchedEffect(requestedScreen) {
                     requestedScreen?.let { s ->
@@ -140,6 +145,8 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                // On-phone brain: the first-run suggestion, or a better model it found
+                OnPhoneOfferDialog()
                 scanMessage?.let { m ->
                     AlertDialog(
                         onDismissRequest = { scanMessage = null },

@@ -12,8 +12,8 @@ android {
         applicationId = "com.stellai.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 49
-        versionName = "0.31.0"
+        versionCode = 50
+        versionName = "0.32.0"
 
         // ONNX Runtime (wake word) ships native code; phones only need ARM.
         ndk {
@@ -39,6 +39,15 @@ android {
         release {
             isMinifyEnabled = false
             if (!keystore.isNullOrBlank()) signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
+    // The on-phone brain (llama-server, built by app/llama/build-llama-android.sh) is a program, not just a
+    // library: it must be unpacked onto the phone at install so it can be started. Android only allows running
+    // files from the app's native library folder, and only when they're stored unpacked like this.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 

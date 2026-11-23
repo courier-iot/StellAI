@@ -32,6 +32,16 @@ class AppSettings(context: Context) {
     /** Keep running (with a quiet notification) when you switch apps, so the server connection isn't dropped. */
     var stayConnected by boolPref("stay_connected", true)
 
+    // On-phone brain (a small model on this phone, see OnPhoneBrain)
+    /** Who answers: "server", "auto" (the phone when the server can't be reached) or "phone" (always the phone). */
+    var brainSource by stringPref("brain_source", "auto")
+    /** Model downloads may use mobile data (otherwise Wi-Fi only). */
+    var onPhoneMobileData by boolPref("onphone_mobile_data", false)
+    /** Look for a better model about once a week and suggest it. */
+    var onPhoneAutoFind by boolPref("onphone_auto_find", true)
+    /** The first-run suggestion has been answered (so it isn't shown again). */
+    var onPhoneAsked by boolPref("onphone_asked", false)
+
     var lastConversation by stringPref("last_conversation", "")
 
     /** Last memories fetched from the server, so Stella still knows you if the server is briefly unreachable. */

@@ -37,6 +37,9 @@ class App : Application() {
         private set
     lateinit var reminders: ReminderManager
         private set
+    /** Stella's on-phone brain (a small model that runs on this phone). */
+    lateinit var onPhone: OnPhoneBrain
+        private set
 
     /** The background service is running (keeps the connection when you switch apps). */
     var assistantRunning by mutableStateOf(false)
@@ -79,6 +82,7 @@ class App : Application() {
         reminders = ReminderManager(this)
         ReminderManager.createChannel(this)
         ReminderManager.startBackgroundSync(this)
+        onPhone = OnPhoneBrain(this)
         store = ChatStore(this)
         sync = SyncManager(this)
         engine = ChatEngine(this)
@@ -102,6 +106,7 @@ class App : Application() {
         appVisible = visible
         refreshPeriodicSync()
         if (visible) {
+            onPhone.onAppVisible()
             sync.request()
             scope.launch { reminders.refresh() }
         }

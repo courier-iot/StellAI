@@ -9,6 +9,19 @@ Meet **Stella**, your personal voice assistant and chat app, powered by the AI m
 - **Chats sync** across every phone and tablet, stored on your server.
 - **Space theme**: starfield background, HUD-style chat, glowing mic, and 8 accent colors (Settings → Stella → Theme color).
 
+## On-phone brain (offline)
+
+Stella can also think on the phone itself, with a small model run by llama.cpp, so she still answers when the server can't be reached, or with no server at all.
+
+- **First start**: the app checks the phone (memory, free storage, 64-bit ARM, Android 9+) and suggests a model that suits it, searched on Hugging Face. Nothing downloads until you say so.
+- **Model size by phone**: 4 GB phones about 1B parameters (under 0.9 GB), 6 GB about 2B (1.4 GB), 8 GB and up about 4B (2.7 GB).
+- **Finds better models itself**: about once a week (Wi-Fi) it searches models from trusted uploaders (Qwen, bartowski, unsloth, LM Studio, ggml-org, Microsoft, IBM Granite, Hugging Face) and asks before switching. Settings → On-phone brain → *Look for a better model now* does it at once.
+- **Your own model**: *Load a model file (.gguf)* picks one from the phone's storage, or paste a Hugging Face link (`owner/repo`, or a link to a `.gguf` file).
+- **Downloads**: Wi-Fi only unless *Downloads may use mobile data* is on (one download can also be OK'd on mobile data). They resume after a dropped connection or a restart and are checked against Hugging Face's checksum.
+- **Who answers** (Settings → On-phone brain): *Server*, *Auto* (the phone only when the server can't be reached; the default) or *This phone* (always).
+- Offline she has phone actions (alarms, timers, music, apps…) and your saved memories, but no web search, projects or server tools. The brain leaves memory after 10 quiet minutes.
+- The brain program is llama.cpp's `llama-server`, built for Android by `app/llama/build-llama-android.sh` during the GitHub build (version in `app/llama/LLAMA_VERSION`; cached, so only the first build after a change takes longer).
+
 ## Get the APK (no PC tools needed)
 
 1. Create a GitHub repository and upload this folder's contents, including the hidden `.github` folder.

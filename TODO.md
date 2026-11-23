@@ -47,6 +47,15 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] **Interrupting her by talking** (0.31.0): phone and avatar screen.
 - [ ] **Linux setup refresh** (S): re-running the setup adds saved chat memory to the launcher; the draft-model trial isn't in stellai-tune.sh yet.
 
+### On-phone brain (0.32.0)
+
+- [x] **Offline brain on the phone**: llama.cpp's llama-server built for Android in GitHub Actions; picks a model for the phone's memory on first start; Server / Auto / This phone.
+- [x] **Finds better models on its own**: weekly Hugging Face search of trusted uploaders, asks before downloading.
+- [x] **Manual models**: load a .gguf from storage or paste a Hugging Face link.
+- [x] **Careful downloads**: Wi-Fi only by default (mobile data allowed in Settings or per download), resume, checksum.
+- [ ] **Check on real phones** (S): load times and speed on a 6 GB and an 8 GB phone; whether downloads survive the app in the background on the owner's phone.
+- [ ] **Offline extras** (M): a download notification, photos with a small vision model, chats learned into memory once the server is back.
+
 ## Also discussed, not yet built
 
 - [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.

@@ -459,6 +459,19 @@ object HubApi {
         false
     }
 
+    private val quickHttp = OkHttpClient.Builder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .build()
+
+    /** Fast check (a few seconds at most) that the server answers, used to decide when the phone answers instead. */
+    fun reachable(serverUrl: String): Boolean = try {
+        val request = Request.Builder().url("${url(serverUrl)}/health").get().build()
+        quickHttp.newCall(request).execute().use { it.isSuccessful }
+    } catch (e: Exception) {
+        false
+    }
+
     /**
      * Set by the app: Stella moved to another server ("move yourself to the server"). The old server answers
      * 410 with her new address; this is called with the new AI server address (http://HOST:8080) and its name.
