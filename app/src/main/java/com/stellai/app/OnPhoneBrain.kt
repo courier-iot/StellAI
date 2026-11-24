@@ -760,6 +760,12 @@ class OnPhoneBrain(private val app: App) {
         return reason
     }
 
+    /** The last error lines the brain program printed (why it stopped), or "" if it printed none. */
+    private fun lastLog(): String = synchronized(log) {
+        log.filter { it.contains("error", true) || it.contains("failed", true) || it.contains("unable", true) }
+            .takeLast(2).joinToString(" ").take(300)
+    }
+
     /** "0.00.040.238 E srv  load_model: …" -> "srv  load_model: …" */
     private fun cleanLine(line: String) = line.replace(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+ [A-Z] "), "")
 
