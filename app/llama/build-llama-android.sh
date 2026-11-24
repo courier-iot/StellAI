@@ -13,7 +13,7 @@ set -euo pipefail
 TAG="${1:-$(cat "$(dirname "$0")/LLAMA_VERSION")}"
 NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="$ROOT/app/src/main/jniLibs/arm64-v8a"
+OUT="${LLAMA_OUT:-$ROOT/app/src/main/jniLibs/arm64-v8a}"
 WORK="${LLAMA_WORK:-$ROOT/.llama-build}"
 
 if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then

@@ -21,8 +21,9 @@ Stella can also think on the phone itself, with a small model run by llama.cpp, 
 - **Who answers** (Settings → On-phone brain): *Server*, *Auto* (the phone only when the server can't be reached; the default) or *This phone* (always).
 - **If the brain won't start**, it tries once more with lighter settings, says why it stopped (for example Android stopping it for memory), and Settings → On-phone brain offers *Find a smaller model*, *Test load* and *Copy brain log*.
 - **Simple phone commands work instantly offline**, without the model: open an app, timers, alarms, flashlight, volume, battery, music controls, play a song, settings pages, websites, the time and date.
+- **Speech without the server** (English): whisper.cpp turns your voice into text on the phone. Pick *Fast* (32 MB), *Balanced* (60 MB, the default) or *Accurate* (190 MB) in Settings → On-phone brain → Speech; *Auto* uses the phone only when the server can't be reached. The first-run suggestion offers it alongside the brain.
 - Offline she has phone actions (alarms, timers, music, apps…) and your saved memories, but no web search, projects or server tools. The brain leaves memory after 10 quiet minutes.
-- The brain program is llama.cpp's `llama-server`, built for Android by `app/llama/build-llama-android.sh` during the GitHub build (version in `app/llama/LLAMA_VERSION`; cached, so only the first build after a change takes longer).
+- The brain program is llama.cpp's `llama-server` and the speech program whisper.cpp's `whisper-cli`, built for Android by `app/llama/build-llama-android.sh` and `build-whisper-android.sh` during the GitHub build (versions in `app/llama/LLAMA_VERSION` and `WHISPER_VERSION`; each is cached, so only the first build after a change takes longer).
 
 ## Get the APK (no PC tools needed)
 

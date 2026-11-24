@@ -2,3 +2,5 @@
 app/src/main/jniLibs/
 __pycache__/
 *.pyc
+.native/
+.whisper-build/

@@ -54,7 +54,9 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] **Manual models**: load a .gguf from storage or paste a Hugging Face link.
 - [x] **Careful downloads**: Wi-Fi only by default (mobile data allowed in Settings or per download), resume, checksum.
 - [ ] **Check on real phones** (S): load times and speed on a 6 GB and an 8 GB phone; whether downloads survive the app in the background on the owner's phone.
-- [ ] **Offline extras** (M): a download notification, photos with a small vision model, chats learned into memory once the server is back.
+- [x] **Speech without the server** (0.33.0): whisper.cpp on the phone, English, three sizes.
+- [x] **Instant phone commands offline** (0.32.4): open apps, timers, alarms… without the model.
+- [ ] **Offline extras** (M): a download notification, photos with a small vision model, chats learned into memory once the server is back, other languages for speech.
 
 ## Also discussed, not yet built
 

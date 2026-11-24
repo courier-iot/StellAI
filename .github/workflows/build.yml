@@ -33,20 +33,40 @@ jobs:
           done
           ls -la "$dir"
 
-      # The on-phone brain: llama.cpp's llama-server built for Android (arm64). Cached per llama.cpp version,
-      # so it only compiles (~10–15 minutes) when app/llama/ changes.
+      # The on-phone brain (llama.cpp's llama-server) and on-phone speech (whisper.cpp's whisper-cli), built for
+      # Android (arm64). Each is cached by its version and build script, so it only compiles when those change
+      # (llama.cpp ~10–15 minutes, whisper.cpp ~3 minutes).
       - name: Cache on-phone brain (llama.cpp for Android)
         id: llama-cache
         uses: actions/cache@v4
         with:
-          path: app/src/main/jniLibs/arm64-v8a
-          key: llama-android-${{ hashFiles('app/llama/**') }}
+          path: .native/llama
+          key: llama-android-${{ hashFiles('app/llama/build-llama-android.sh', 'app/llama/LLAMA_VERSION') }}
 
       - name: Build on-phone brain (llama.cpp for Android)
         if: steps.llama-cache.outputs.cache-hit != 'true'
         run: |
           command -v ninja >/dev/null || sudo apt-get install -y ninja-build
-          bash app/llama/build-llama-android.sh
+          LLAMA_OUT="$PWD/.native/llama" bash app/llama/build-llama-android.sh
+
+      - name: Cache on-phone speech (whisper.cpp for Android)
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: .native/whisper
+          key: whisper-android-${{ hashFiles('app/llama/build-whisper-android.sh', 'app/llama/WHISPER_VERSION') }}
+
+      - name: Build on-phone speech (whisper.cpp for Android)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        run: |
+          command -v ninja >/dev/null || sudo apt-get install -y ninja-build
+          WHISPER_OUT="$PWD/.native/whisper" bash app/llama/build-whisper-android.sh
+
+      - name: Put the on-phone programs into the app
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          cp .native/llama/* .native/whisper/* app/src/main/jniLibs/arm64-v8a/
+          ls -la app/src/main/jniLibs/arm64-v8a
 
       # The app's own tests (app/src/test): if any fail, nothing is built or released
       - name: Run app tests

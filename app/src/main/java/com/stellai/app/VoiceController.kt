@@ -276,11 +276,16 @@ class VoiceController(private val app: App) {
         updatePhase(VoicePhase.TRANSCRIBING)
 
         val text = try {
-            HubApi.transcribe(app.settings.serverUrl, app.settings.apiKey, pcm)
+            // the server, or this phone when the server can't be reached (OnPhoneSpeech)
+            app.speech.transcribe(pcm)
         } catch (e: Exception) {
             Log.w(TAG, "transcribe failed", e)
             postError("Speech recognition failed: ${e.message}")
-            main.post { if (app.settings.speakReplies) app.speaker.speak("I can't reach the server.") }
+            main.post {
+                if (app.settings.speakReplies) {
+                    app.speaker.speak(if (app.speech.ready) "Sorry, I couldn't make that out." else "I can't reach the server.")
+                }
+            }
             return
         }
         val command = stripWakeWord(text)

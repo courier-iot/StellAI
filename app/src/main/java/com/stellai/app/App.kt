@@ -40,6 +40,9 @@ class App : Application() {
     /** Stella's on-phone brain (a small model that runs on this phone). */
     lateinit var onPhone: OnPhoneBrain
         private set
+    /** Speech to text on this phone (whisper.cpp), for when the server can't be reached. */
+    lateinit var speech: OnPhoneSpeech
+        private set
 
     /** The background service is running (keeps the connection when you switch apps). */
     var assistantRunning by mutableStateOf(false)
@@ -83,6 +86,7 @@ class App : Application() {
         ReminderManager.createChannel(this)
         ReminderManager.startBackgroundSync(this)
         onPhone = OnPhoneBrain(this)
+        speech = OnPhoneSpeech(this)
         store = ChatStore(this)
         sync = SyncManager(this)
         engine = ChatEngine(this)

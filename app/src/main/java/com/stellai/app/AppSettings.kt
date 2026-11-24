@@ -39,6 +39,8 @@ class AppSettings(context: Context) {
     var onPhoneMobileData by boolPref("onphone_mobile_data", false)
     /** Look for a better model about once a week and suggest it. */
     var onPhoneAutoFind by boolPref("onphone_auto_find", true)
+    /** Who turns speech into text: "server", "auto" (the phone when the server can't be reached) or "phone". */
+    var speechSource by stringPref("speech_source", "auto")
     /** The first-run suggestion has been answered (so it isn't shown again). */
     var onPhoneAsked by boolPref("onphone_asked", false)
 
