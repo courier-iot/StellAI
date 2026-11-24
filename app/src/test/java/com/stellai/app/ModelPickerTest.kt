@@ -25,6 +25,8 @@ class ModelPickerTest {
         assertNull("needs storage", ModelPicker.budget(phone(8.0, free = 1.1)))
         assertEquals("limited by free storage", 1_500_000_000L, ModelPicker.budget(phone(7.5, free = 2.5))!!.maxFile)
         assertTrue(ModelPicker.whyNot(phone(8.0, sdk = 27)).contains("Android 9"))
+        assertEquals("one size smaller", 2.0, ModelPicker.budget(phone(7.5), stepDown = 1)!!.maxParams, 0.0)
+        assertEquals("never below the smallest", 1.2, ModelPicker.budget(phone(7.5), stepDown = 9)!!.maxParams, 0.0)
     }
 
     @Test
@@ -53,6 +55,7 @@ class ModelPickerTest {
             c("unsloth/gemma-3-1b-it-GGUF", gated = true), // needs an account
             c("bartowski/obscure-1B-GGUF", dl = 12),       // nobody uses it
             c("Unsloth/qwen3-1.7b-gguf"),                  // the same as the first
+            c("someone/Qwen3-1.7B-MTP-GGUF"),              // speed-trick version
         ), b).map { it.repo }
         assertEquals(listOf("unsloth/Qwen3-1.7B-GGUF", "bartowski/Phi-3.5-mini-instruct-GGUF"), kept)
     }
@@ -67,6 +70,7 @@ class ModelPickerTest {
             ModelPicker.RepoFile("Qwen3-4B-Q4_K_M.gguf", 2_500_000_000, "d"),
             ModelPicker.RepoFile("Qwen3-4B-Q4_0.gguf", 2_370_000_000, "e"),
             ModelPicker.RepoFile("mmproj-F16.gguf", 600_000_000, "f"),
+            ModelPicker.RepoFile("mtp-Qwen3-4B-Q4_K_M.gguf", 2_000_000_000, "g"),
             ModelPicker.RepoFile("README.md", 5_000, ""),
         )
         assertEquals("Qwen3-4B-Q4_K_M.gguf", ModelPicker.pickFile(files, b)!!.path)

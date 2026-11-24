@@ -50,18 +50,26 @@ object ModelPicker {
 
     /**
      * The size of model this phone can run, by its memory (phones report a little less than the box says:
-     * an 8 GB phone shows about 7.5 GB). Null: the phone can't run one.
+     * an 8 GB phone shows about 7.5 GB). [stepDown]: go this many sizes smaller (after Android stopped a model for
+     * using too much memory). Null: the phone can't run one.
      */
-    fun budget(d: Device): Budget? {
+    fun budget(d: Device, stepDown: Int = 0): Budget? {
         if (!d.arm64 || d.sdk < MIN_SDK) return null
         val ram = d.totalRam
-        val b = when {
+        val tiers = listOf(
+            Budget("Small (4 GB phone)", 850_000_000L, 1.2, 4096, SMALL_QUANTS),
+            Budget("Medium (6 GB phone)", 1_400_000_000L, 2.0, 4096, SMALL_QUANTS),
+            Budget("Large (8 GB phone)", 2_700_000_000L, 4.5, 8192, SMALL_QUANTS),
+            Budget("Extra large (12 GB+ phone)", 3_600_000_000L, 4.5, 8192, BIG_QUANTS),
+        )
+        val tier = when {
             ram < 3_300_000_000L -> return null
-            ram < 5 * GB -> Budget("Small (4 GB phone)", 850_000_000L, 1.2, 4096, SMALL_QUANTS)
-            ram < 7 * GB -> Budget("Medium (6 GB phone)", 1_400_000_000L, 2.0, 4096, SMALL_QUANTS)
-            ram < 10 * GB -> Budget("Large (8 GB phone)", 2_700_000_000L, 4.5, 8192, SMALL_QUANTS)
-            else -> Budget("Extra large (12 GB+ phone)", 3_600_000_000L, 4.5, 8192, BIG_QUANTS)
+            ram < 5 * GB -> 0
+            ram < 7 * GB -> 1
+            ram < 10 * GB -> 2
+            else -> 3
         }
+        val b = tiers[(tier - stepDown.coerceAtLeast(0)).coerceAtLeast(0)]
         // keep 1 GB of storage free for everything else on the phone
         val room = d.freeStorage - GB
         return if (room < 300_000_000L) null else b.copy(maxFile = minOf(b.maxFile, room))
@@ -78,7 +86,8 @@ object ModelPicker {
     private val PARAMS = Regex("(?i)(?<![\\d.])(\\d{1,3}(?:\\.\\d{1,2})?)\\s*b(?![a-z])")
     private val EXCLUDE = Regex(
         "(?i)(embed|rerank|(?<![a-z])vl(?![a-z])|vision|(?<![a-z])base(?![a-z])|guard|math|coder|draft|abliterat|uncensor|" +
-            "reward|prm(?![a-z])|tts|audio|omni|ocr|nsfw|roleplay|(?<![a-z])rp(?![a-z])|-moe-|test|tiny-random|lora)"
+            "reward|prm(?![a-z])|tts|audio|omni|ocr|nsfw|roleplay|(?<![a-z])rp(?![a-z])|-moe-|test|tiny-random|lora|" +
+            "(?<![a-z])mtp(?![a-z]))"
     )
 
     /** Parameter count (billions) from a model's name, e.g. "Qwen3-1.7B" -> 1.7, "Qwen3-30B-A3B" -> 30. 0 if unknown. */
@@ -98,7 +107,8 @@ object ModelPicker {
     fun pickFile(files: List<RepoFile>, b: Budget): RepoFile? {
         val usable = files.filter { f ->
             val n = f.path.substringAfterLast('/').lowercase()
-            n.endsWith(".gguf") && "mmproj" !in n && !Regex("-\\d{5}-of-\\d{5}").containsMatchIn(n) && f.size in 1..b.maxFile
+            // mtp-…: a version with extra layers for a speed trick, bigger and needing more memory
+            n.endsWith(".gguf") && "mmproj" !in n && !Regex("(?<![a-z])mtp(?![a-z])").containsMatchIn(n) && !Regex("-\\d{5}-of-\\d{5}").containsMatchIn(n) && f.size in 1..b.maxFile
         }
         for (q in b.quants) {
             val hit = usable.filter { quantOf(it.path).equals(q, ignoreCase = true) }.minByOrNull { it.size }

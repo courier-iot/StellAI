@@ -112,7 +112,11 @@ class OnPhoneBrain(private val app: App) {
                 Build.SUPPORTED_64_BIT_ABIS.contains("arm64-v8a"), Build.VERSION.SDK_INT)
         }
 
-    val budget: ModelPicker.Budget? get() = ModelPicker.budget(device)
+    /** Sizes to go down after Android stopped the brain for using too much memory (see [startLocked]). */
+    var stepDown by mutableStateOf(prefs.getInt("step_down", 0))
+        private set
+
+    val budget: ModelPicker.Budget? get() = ModelPicker.budget(device, stepDown)
 
     /** The brain program, unpacked by Android at install (missing in builds made without it). */
     private fun programFile() = File(app.applicationInfo.nativeLibraryDir, "libllama_server.so")
@@ -528,6 +532,7 @@ class OnPhoneBrain(private val app: App) {
     private suspend fun install(m: InstalledModel) {
         val old = installed
         stopEngine()
+        withContext(Dispatchers.Main) { safeMode = false; engineState = "off"; engineError = "" }
         installed = m
         prefs.edit().putString("installed", m.toJson().toString()).apply()
         if (old != null && old.path != m.path) withContext(Dispatchers.IO) { File(old.path).delete() }
@@ -621,7 +626,10 @@ class OnPhoneBrain(private val app: App) {
     private val log = ArrayDeque<String>()
     private var idleJob: Job? = null
 
-    val contextSize: Int get() = budget?.context ?: 4096
+    /** How much of the chat the brain holds (tokens): less when it had to start with the lighter settings. */
+    val contextSize: Int get() = if (safeMode) 2048 else normalContext
+
+    private val normalContext: Int get() = budget?.context ?: 4096
 
     /** Starts the brain if needed (loading the model takes a few seconds) and returns its address. */
     suspend fun ensureRunning(): String = withContext(Dispatchers.IO) { engineLock.withLock { startLocked() } }
@@ -638,13 +646,57 @@ class OnPhoneBrain(private val app: App) {
         val exe = programFile()
         if (!exe.isFile) throw IOException("This build of StellAI doesn't include the on-phone brain program.")
         withContext(Dispatchers.Main) { engineState = "starting"; engineError = "" }
+        logFile().delete()
+        // First try with the normal settings; if the program is stopped (memory, crash), once more in a lighter
+        // way: a shorter memory of the chat, fewer threads, no warm-up.
+        val first = launch(m, exe, safe = false)
+        if (first.url != null) {
+            withContext(Dispatchers.Main) { safeMode = false }
+            return ready(first.url)
+        }
+        if (first.signal == 0) return failed(first)
+        appendLog("---- trying again with lighter settings ----")
+        val second = launch(m, exe, safe = true)
+        if (second.url != null) {
+            withContext(Dispatchers.Main) { safeMode = true }
+            return ready(second.url)
+        }
+        return failed(second)
+    }
+
+    /** Started with the lighter settings (chat memory 2048 tokens); shown in Settings. */
+    var safeMode by mutableStateOf(false)
+        private set
+
+    private class Launch(val url: String?, val exitCode: Int, val signal: Int, val why: String)
+
+    private suspend fun ready(url: String): String {
+        withContext(Dispatchers.Main) { engineState = "ready"; touch() }
+        return url
+    }
+
+    private suspend fun failed(l: Launch): String {
+        // stopped by Android for memory twice: next time suggest (and pick) a smaller model
+        if (l.signal == 9 && stepDown < 3) {
+            withContext(Dispatchers.Main) { stepDown += 1 }
+            prefs.edit().putInt("step_down", stepDown).apply()
+        }
+        withContext(Dispatchers.Main) { engineState = "failed"; engineError = l.why }
+        throw IOException("The on-phone brain couldn't start: ${l.why}")
+    }
+
+    /** Starts the program and waits until the model is loaded. A null url means it stopped (see the codes). */
+    private suspend fun launch(m: InstalledModel, exe: File, safe: Boolean): Launch {
         port = ServerSocket(0).use { it.localPort }
         engineKey = UUID.randomUUID().toString()
         val cores = Runtime.getRuntime().availableProcessors()
-        val threads = if (cores >= 8) 4 else maxOf(2, cores / 2)
-        val cmd = listOf(exe.path, "-m", m.path, "--host", "127.0.0.1", "--port", port.toString(),
-            "-c", contextSize.toString(), "-t", threads.toString(), "-np", "1", "-cram", "0",
+        val threads = if (safe) 2 else if (cores >= 8) 4 else maxOf(2, cores / 2)
+        val ctx = if (safe) 2048 else normalContext
+        val cmd = mutableListOf(exe.path, "-m", m.path, "--host", "127.0.0.1", "--port", port.toString(),
+            "-c", ctx.toString(), "-t", threads.toString(), "-np", "1", "-cram", "0",
             "--reasoning", "off", "--no-webui", "--api-key", engineKey, "-a", "local")
+        if (safe) cmd += "--no-warmup"
+        appendLog("$ " + cmd.joinToString(" ").replace(engineKey, "***"))
         val pb = ProcessBuilder(cmd).redirectErrorStream(true).directory(app.filesDir)
         pb.environment()["LD_LIBRARY_PATH"] = app.applicationInfo.nativeLibraryDir
         val p = pb.start()
@@ -654,10 +706,12 @@ class OnPhoneBrain(private val app: App) {
         Thread {
             try {
                 p.inputStream.bufferedReader().forEachLine { line ->
+                    val clean = cleanLine(line)
                     synchronized(log) {
-                        log.addLast(line)
+                        log.addLast(clean)
                         while (log.size > 60) log.removeFirst()
                     }
+                    appendLog(clean)
                 }
             } catch (_: Exception) {
             }
@@ -667,32 +721,68 @@ class OnPhoneBrain(private val app: App) {
         val deadline = System.currentTimeMillis() + 180_000
         while (true) {
             if (!p.isAlive) {
-                val why = lastLog()
+                delay(300)   // let the last lines arrive
                 process = null
-                withContext(Dispatchers.Main) { engineState = "failed"; engineError = why }
-                throw IOException("The on-phone brain stopped while loading" + if (why.isNotEmpty()) ": $why" else ".")
+                val code = try { p.exitValue() } catch (_: Exception) { -1 }
+                // Java reports "killed by signal N" as 128 + N
+                val signal = if (code > 128) code - 128 else 0
+                appendLog("---- stopped: exit code $code" + (if (signal > 0) " (signal $signal)" else "") + " ----")
+                return Launch(null, code, signal, explain(code, signal, m))
             }
             val ok = try {
                 probe.newCall(Request.Builder().url("$base/health").build()).execute().use { it.code == 200 }
             } catch (_: Exception) {
                 false
             }
-            if (ok) break
+            if (ok) return Launch(base, 0, 0, "")
             if (System.currentTimeMillis() > deadline) {
                 stopEngineLocked()
-                withContext(Dispatchers.Main) { engineState = "failed"; engineError = "Took too long to load." }
-                throw IOException("The on-phone brain took too long to load the model.")
+                return Launch(null, -1, 0, "It took more than 3 minutes to load ${m.name}. Try a smaller model.")
             }
             delay(400)
         }
-        withContext(Dispatchers.Main) { engineState = "ready"; touch() }
-        return base
     }
 
-    /** The last meaningful lines the brain program printed (why it stopped). */
-    private fun lastLog(): String = synchronized(log) {
-        log.filter { it.contains("error", true) || it.contains("failed", true) || it.contains("unable", true) }
-            .takeLast(2).joinToString(" ").ifEmpty { log.lastOrNull().orEmpty() }.take(300)
+    /** Why the program stopped, in words. */
+    private fun explain(code: Int, signal: Int, m: InstalledModel): String {
+        val line = lastLog()
+        val reason = when (signal) {
+            9 -> "Android stopped it for using too much memory while loading ${m.name} " +
+                "(${ModelPicker.sizeText(m.size)}). Close other apps, or use a smaller model."
+            4 -> "This phone's processor couldn't run it (illegal instruction)."
+            6 -> "It gave up while loading ${m.name}" + (if (line.isNotEmpty()) ": $line" else ".")
+            7, 11 -> "It crashed while loading ${m.name}. The model may not be supported yet, or the file may be " +
+                "damaged (remove it and download again)."
+            31 -> "Android blocked something it tried to do (signal 31)."
+            0 -> if (line.isNotEmpty()) line else "It stopped (exit code $code)."
+            else -> "It stopped (signal $signal)."
+        }
+        return reason
+    }
+
+    /** "0.00.040.238 E srv  load_model: …" -> "srv  load_model: …" */
+    private fun cleanLine(line: String) = line.replace(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+ [A-Z] "), "")
+
+    private fun logFile() = File(app.filesDir, "brain.log")
+
+    private fun appendLog(line: String) {
+        try {
+            val f = logFile()
+            if (f.length() < 512 * 1024) f.appendText(line + "\n")
+        } catch (_: Exception) {
+        }
+    }
+
+    /** The brain program's output from its last start (for Settings → Copy log). */
+    fun logText(): String = try { logFile().readText().takeLast(20_000) } catch (_: Exception) { "" }
+
+    /** Settings → "Find a smaller model": searches one size down from the model that didn't fit. */
+    fun searchSmaller() {
+        if (stepDown < 3 && budget?.let { b -> installed?.let { it.params > b.maxParams * 0.75 } } != false) {
+            stepDown += 1
+            prefs.edit().putInt("step_down", stepDown).apply()
+        }
+        searchNow()
     }
 
     /** The brain leaves memory after 10 quiet minutes; the next offline message loads it again. */

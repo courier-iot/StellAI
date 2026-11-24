@@ -94,6 +94,7 @@ fun OnPhoneSettings() {
     var link by remember { mutableStateOf("") }
     var linkStatus by remember { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) brain.importFile(uri)
     }
@@ -113,6 +114,8 @@ fun OnPhoneSettings() {
             "Needs a model on the phone."
     })
 
+    val budget = brain.budget
+
     // The model on the phone
     val m = brain.installed
     if (m != null) {
@@ -125,13 +128,34 @@ fun OnPhoneSettings() {
                 else -> "Sleeping (loads on the next offline message)"
             }
             StatusLine(state, style = MaterialTheme.typography.bodySmall, color = Space.Muted, badColor = Space.Red)
+            if (brain.engineState == "ready" && brain.safeMode) {
+                OnPhoneHint("Running with lighter settings (remembers less of the chat) because the normal start was stopped.")
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (brain.engineState != "ready" && brain.engineState != "starting") {
+                OutlinedButton(onClick = {
+                    scope.launch { try { brain.ensureRunning() } catch (_: Exception) { } }
+                }) { Text("Test load") }
+            }
+            if (brain.engineState == "failed") {
+                OutlinedButton(onClick = { brain.searchSmaller() }, enabled = !brain.searching && budget != null) {
+                    Text("Find a smaller model")
+                }
+            }
+            if (brain.engineState == "failed" || brain.safeMode) {
+                TextButton(onClick = {
+                    val cm = app.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("StellAI brain log", brain.logText()))
+                    copied = true
+                }) { Text(if (copied) "Log copied" else "Copy brain log") }
+            }
         }
     } else {
         Text("No model on this phone yet.", color = Space.Muted)
     }
 
     // The phone
-    val budget = brain.budget
     when {
         !brain.hasProgram -> OnPhoneHint("✗ This build of StellAI doesn't include the on-phone brain program. Install the latest release.")
         budget == null -> OnPhoneHint("✗ " + ModelPicker.whyNot(brain.device))
