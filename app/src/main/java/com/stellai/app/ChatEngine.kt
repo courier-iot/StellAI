@@ -825,12 +825,28 @@ class ChatEngine(private val app: App) {
             if (fallback && phoneNoted.add(convId)) {
                 addStored(convId, Role.TOOL, "⇄ On this phone: the server can't be reached, so the on-phone brain is answering")
             }
+            val list = withContext(Dispatchers.IO) { app.store.messages(convId).map { it.toUi() } }
+            // Simple phone commands ("open Spotify", "timer 5 minutes") are done at once, without the model
+            val asked = list.lastOrNull { it.role == Role.USER }?.text.orEmpty()
+            PhoneCommands.parse(asked, app.settings.assistantName)?.let { cmd ->
+                if (cmd.tool.isEmpty()) {
+                    addStored(convId, Role.ASSISTANT, cmd.reply)
+                    finalReply = cmd.reply
+                    if (speakOut) app.speaker.speak(cmd.reply)
+                    return
+                }
+                status = PhoneTools.displayName(cmd.tool) + "…"
+                val outcome = PhoneTools.execute(app, cmd.tool, cmd.args)
+                addStored(convId, Role.TOOL, ActionButtons.attach(outcome.summary, outcome.button))
+                finalReply = outcome.summary
+                if (speakOut) app.speaker.speak(outcome.summary.removePrefix("✓").removePrefix("✗").trim())
+                return
+            }
             status = if (app.onPhone.engineState == "ready") "Thinking on this phone…" else "Waking the on-phone brain…"
             val base = app.onPhone.ensureRunning()
             val key = app.onPhone.engineKey
             status = "Thinking on this phone…"
             val mode = modeOf(convId)
-            val list = withContext(Dispatchers.IO) { app.store.messages(convId).map { it.toUi() } }
             val lastSummary = list.indexOfLast { it.role == Role.SUMMARY }
             val summary = if (lastSummary >= 0) list[lastSummary].text else ""
             // the on-phone brain can't see photos: they're mentioned instead
@@ -884,22 +900,25 @@ class ChatEngine(private val app: App) {
                     }
                 }
                 messages.removeAll { it.id == streamId }
-                val finalText = stripThink(result.content).trim()
+                // a small model sometimes writes its action as text instead of calling it: use it anyway
+                val written = if (result.toolCalls.isEmpty() && tools.length() > 0) writtenToolCalls(result.content) else emptyList()
+                val calls = result.toolCalls.ifEmpty { written }
+                val finalText = (if (written.isNotEmpty()) stripWrittenCalls(stripThink(result.content)) else stripThink(result.content)).trim()
                 if (speakOut) main.post { feeder.feed(finalText, finish = true) }
-                if (finalText.isNotEmpty() || result.toolCalls.isEmpty()) {
+                if (finalText.isNotEmpty() || calls.isEmpty()) {
                     addStored(convId, Role.ASSISTANT, finalText.ifEmpty { "(no reply)" }, result.reasoning)
                     if (finalText.isNotEmpty()) finalReply = finalText
                 }
-                if (result.toolCalls.isEmpty()) return
+                if (calls.isEmpty()) return
                 val assistant = JSONObject().put("role", "assistant").put("content", finalText)
                 assistant.put("tool_calls", JSONArray().apply {
-                    result.toolCalls.forEach { tc ->
+                    calls.forEach { tc ->
                         put(JSONObject().put("id", tc.id).put("type", "function")
                             .put("function", JSONObject().put("name", tc.name).put("arguments", tc.arguments)))
                     }
                 })
                 turn.add(assistant)
-                for (tc in result.toolCalls) {
+                for (tc in calls) {
                     status = PhoneTools.displayName(tc.name) + "…"
                     val outcome = if (PhoneTools.definitions().toString().contains("\"${tc.name}\"")) {
                         PhoneTools.execute(app, tc.name, tc.arguments)
@@ -940,16 +959,52 @@ class ChatEngine(private val app: App) {
         }
     }
 
+    /**
+     * Actions a small model wrote as text: <tool_call>{"name": …, "arguments": {…}}</tool_call>, or the
+     * <function=name><parameter=x>…</parameter></function> form. Only phone actions are taken.
+     */
+    private fun writtenToolCalls(content: String): List<LlamaClient.ToolCall> {
+        val phone = PhoneTools.definitions().let { d ->
+            (0 until d.length()).mapNotNull { d.optJSONObject(it)?.optJSONObject("function")?.optString("name") }.toSet()
+        }
+        val out = mutableListOf<LlamaClient.ToolCall>()
+        for (m in Regex("(?s)<tool_call>\\s*(\\{.*?\\})\\s*</tool_call>").findAll(content)) {
+            try {
+                val o = JSONObject(m.groupValues[1])
+                val name = o.optString("name")
+                val args = o.optJSONObject("arguments") ?: o.optJSONObject("parameters") ?: JSONObject()
+                if (name in phone) out.add(LlamaClient.ToolCall("written-${out.size}", name, args.toString()))
+            } catch (_: Exception) {
+            }
+        }
+        for (m in Regex("(?s)<function=([\\w-]+)>(.*?)</function>").findAll(content)) {
+            val name = m.groupValues[1]
+            if (name !in phone) continue
+            val args = JSONObject()
+            for (pm in Regex("(?s)<parameter=([\\w-]+)>\\s*(.*?)\\s*</parameter>").findAll(m.groupValues[2])) {
+                val v = pm.groupValues[2]
+                args.put(pm.groupValues[1], v.toLongOrNull() ?: v.toBooleanStrictOrNull() ?: v)
+            }
+            out.add(LlamaClient.ToolCall("written-${out.size}", name, args.toString()))
+        }
+        return out
+    }
+
+    private fun stripWrittenCalls(text: String) = text
+        .replace(Regex("(?s)<tool_call>.*?</tool_call>"), "")
+        .replace(Regex("(?s)<function=[\\w-]+>.*?</function>"), "")
+        .trim()
+
     /** Short instructions for the small on-phone model (the server's full instructions are too long for it). */
     private fun onPhoneSystemPrompt(mode: Mode, summary: String): String {
         val name = app.settings.assistantName.ifBlank { "Stella" }
         val memory = app.memory.promptSection().take(1500)
         return buildString {
-            append("You are $name, the user's personal assistant. Right now you are running offline as a small model ")
-            append("on the user's phone, without your server: you can't search the web, open their files or projects, or ")
-            append("use the server's tools. Answer clearly and briefly. If you aren't sure about something, say so instead ")
-            append("of guessing. When the user asks for something on the phone (an alarm, a timer, music, an app), use ")
-            append("the phone actions you are given.")
+            append("You are $name, the user's personal assistant, running as a small model on the user's phone. ")
+            append("You CAN control this phone: when the user asks you to do something on it (open an app, set an ")
+            append("alarm or timer, play music, call or text someone…), call the matching action you are given. Never ")
+            append("say you can't do something an action does. You can't search the web or open the user's projects ")
+            append("right now. Answer clearly and briefly; if you aren't sure about something, say so instead of guessing.")
             if (mode.id != GENERAL_MODE.id && mode.prompt.isNotBlank()) {
                 append("\n\n## Current mode: ").append(mode.name).append('\n').append(mode.prompt.take(800))
             }

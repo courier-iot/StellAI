@@ -20,6 +20,7 @@ Stella can also think on the phone itself, with a small model run by llama.cpp, 
 - **Downloads**: Wi-Fi only unless *Downloads may use mobile data* is on (one download can also be OK'd on mobile data). They resume after a dropped connection or a restart and are checked against Hugging Face's checksum.
 - **Who answers** (Settings → On-phone brain): *Server*, *Auto* (the phone only when the server can't be reached; the default) or *This phone* (always).
 - **If the brain won't start**, it tries once more with lighter settings, says why it stopped (for example Android stopping it for memory), and Settings → On-phone brain offers *Find a smaller model*, *Test load* and *Copy brain log*.
+- **Simple phone commands work instantly offline**, without the model: open an app, timers, alarms, flashlight, volume, battery, music controls, play a song, settings pages, websites, the time and date.
 - Offline she has phone actions (alarms, timers, music, apps…) and your saved memories, but no web search, projects or server tools. The brain leaves memory after 10 quiet minutes.
 - The brain program is llama.cpp's `llama-server`, built for Android by `app/llama/build-llama-android.sh` during the GitHub build (version in `app/llama/LLAMA_VERSION`; cached, so only the first build after a change takes longer).
 
