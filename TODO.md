@@ -75,6 +75,16 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] The model's status no longer counts a 404 as "running"; the speed test names who answered instead of "not reachable", and its speaking figure no longer rounds 0.6x up to "1x faster" (and Kokoro is warmed up first, like Piper).
 - [ ] **Linux/Proxmox** (S): still fixed at 8080 (stellai-setup.sh); same idea there if it's ever needed.
 
+### Avatar everywhere (0.37.0)
+
+- [x] **Avatar on the phone without the server**: the app carries Stella (phone-sized), her animations and the 3D library (`tools/make_offline_avatar.py`, run by Actions); the avatar screen uses them when the server can't be reached, with the phone's own voice and a made-up mouth rhythm.
+- [x] **3D Stella is the default look** (once, also when her file was already uploaded); identical files in the bin are listed once.
+- [x] **Framing**: measured in her rest pose once she's in place; framed from the top of her hair; tall phone screens show more of her instead of cutting her head off.
+- [x] **Avatar settings on phones**: names above their dropdowns, nothing wider than the screen.
+- [x] **Auto mode**: telling her about something ("I finished the 3D model") only suggests; one mention without a request only suggests; Relaxed / Normal / Eager.
+- [ ] **Check on real phones** (S): the offline avatar (first load time, mouth rhythm with the phone's voice), framing on a few screen shapes.
+- [ ] **Offline extras** (M): her own voice offline (a small Piper voice on the phone), the avatar_gesture tool offline.
+
 ## Also discussed, not yet built
 
 - [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.

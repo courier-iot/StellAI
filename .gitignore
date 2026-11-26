@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .native/
 .whisper-build/
+# made when the APK is built (tools/make_offline_avatar.py); only offline.html is kept in the repo
+app/src/main/assets/avatar/*
+!app/src/main/assets/avatar/offline.html

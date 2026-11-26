@@ -39,6 +39,20 @@ AUTO_BACK = re.compile(r"\b(?:back to|return to|returning to|go back to)\s+(?:th
 AUTO_COMMAND = re.compile(
     r"\b(?:switch|change|go|move|put me)\s+(?:back\s+)?(?:to|into)\s+(?:the\s+)?([a-z0-9 ]{2,24}?)(?:\s+mode)?\b|"
     r"\buse\s+(?:the\s+)?([a-z0-9 ]{2,24}?)\s+mode\b", re.I)
+# Asking for something (switching is worth it) vs talking about something (a mention isn't a request):
+# "can you rig her?" / "let's design a bracket" / "make the halo glow" vs "I just finished making your 3D model".
+AUTO_REQUEST = re.compile(
+    r"\?|\b(can|could|would|will) you\b|\bhelp me\b|\blet'?s\b|\bplease\b|\bi (want|need|would like|'d like) (to|you|help|a|an|some)\b|"
+    r"\bhow (do|can|would|should|to)\b|\bshow me\b|\btell me\b|\bi'?m (going|trying|about) to\b|"
+    r"^\W*(design|make|build|create|draw|model|sculpt|rig|add|fix|edit|change|open|start|write|plan|check|"
+    r"explain|teach|find|set up|convert|export|import|render|print|turn|give)\b", re.I)
+AUTO_DONE = re.compile(
+    r"\b(i|we)\s+(just\s+|finally\s+|already\s+)?(finished|completed|made|built|did|wrapped up|got done|"
+    r"was done|am done|'m done|have done|'ve done|have finished|'ve finished|have made|'ve made)\b|"
+    r"\b(is|are|it'?s|they'?re)\s+(done|finished|complete|ready)\b", re.I)
+# How eager Auto mode is (the level setting): relaxed only switches when you ask for something and the topic is
+# clear; normal switches when you ask, or the topic is clear; eager switches on any mention (the old behaviour).
+AUTO_SENSITIVITY = {"relaxed", "auto", "eager"}
 AUTO_STATE = {"lock": threading.Lock(), "path": ""}
 
 
@@ -79,8 +93,15 @@ def _mode_by_name(name):
     return aliases.get(n) or (n if n in AUTO_MODES else "")
 
 
+def _asks(text, sens, hits):
+    """Enough to switch? normal: a request, or the topic named twice; relaxed: a request and the topic named twice."""
+    request = bool(AUTO_REQUEST.search(text))
+    return (request and hits >= 2) if sens == "relaxed" else (request or hits >= 2)
+
+
 def route_mode(data):
-    """Which mode the next reply should use. In: chat_id, text, level (auto|ask|off), forced (a mode the user
+    """Which mode the next reply should use. In: chat_id, text, level (auto|relaxed|eager|ask|off; auto = normal),
+    forced (a mode the user
     chose for this message), current (the mode the chat was in). Out: mode, switched, suggest, reason."""
     chat = str(data.get("chat_id") or "")[:80]
     text = str(data.get("text") or "")[:4000]
@@ -109,13 +130,16 @@ def route_mode(data):
             if best_lane and want & _words(best_lane["title"]):
                 mode, reason = best_lane["mode"], "back to an earlier topic"
         elif level != "off":
+            sens = level if level in AUTO_SENSITIVITY else "auto"
             weight = {"modeler": 3, "cad": 3, "pcb": 3}
-            scores = {m: len(rx.findall(text)) * weight.get(m, 2) for m, (_n, rx) in AUTO_MODES.items() if rx}
+            hits = {m: len(rx.findall(text)) for m, (_n, rx) in AUTO_MODES.items() if rx}
+            scores = {m: n * weight.get(m, 2) for m, n in hits.items()}
             words = _words(text)
             for l in db.get("learned", []):      # corrections the user made before
                 lw = _words(l["text"])
                 if lw and len(words & lw) / max(1, len(words | lw)) >= 0.5 and l["mode"] in scores:
                     scores[l["mode"]] += 4
+                    hits[l["mode"]] += 2         # a correction counts as clear evidence
             best = max(scores, key=lambda m: scores[m]) if scores else "general"
             top, here = scores.get(best, 0), scores.get(current, 0)
             cue = bool(AUTO_TOPIC_CUE.search(text))
@@ -129,6 +153,13 @@ def route_mode(data):
                 pass
             elif current in AUTO_WORK_MODES and not soft and top < 6:
                 suggest, reason = best, "in the middle of a job"
+            elif sens != "eager" and (_done := bool(AUTO_DONE.search(text)) and not AUTO_REQUEST.search(text)):
+                # "I just finished making your 3D model": talking about it, not asking for it
+                if sens == "auto":
+                    suggest = best
+                reason = "you're telling me about it, not asking"
+            elif sens != "eager" and not soft and not _asks(text, sens, hits.get(best, 0)):
+                suggest, reason = best, "only mentioned"
             elif top >= here + 2:
                 mode, reason = best, "new topic" if soft else "the message is about this"
             else:

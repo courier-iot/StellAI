@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Stella</title>
+<!-- The avatar screen inside the phone app, for when the server can't be reached. The app (AvatarScreen.kt) loads it
+     from its own files and tells it what Stella is doing through window.stella.event(state, text). Everything it
+     needs (avatar.js, three.js, Stella.vrm, her animations) is put next to it when the APK is built
+     (tools/make_offline_avatar.py). -->
+<script type="importmap">{"imports":{"three":"./lib/build/three.module.js","three/addons/":"./lib/examples/jsm/",
+"@pixiv/three-vrm":"./lib/three-vrm.module.min.js","@pixiv/three-vrm-animation":"./lib/three-vrm-animation.module.min.js"}}</script>
+<style>
+:root{--void:#04060d;--line:#26335c;--text:#e6ecff;--muted:#8a96bf;--accent:#5ce1e6}
+html,body{margin:0;height:100%;background:var(--void);color:var(--text);overflow:hidden;
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-user-select:none;user-select:none}
+#stage{position:absolute;inset:0;overflow:hidden}
+#host{position:absolute;left:0;right:0;top:0;bottom:calc(clamp(78px,17vh,132px) + 120px)}
+#name{position:absolute;top:56px;left:60px;font:600 13px ui-monospace,Consolas,monospace;letter-spacing:6px;color:var(--accent)}
+#note{position:absolute;top:78px;left:60px;font-size:12px;color:var(--muted)}
+#status{position:absolute;top:100px;left:60px;right:16px;font-size:12px;color:var(--muted)}
+#cap{position:absolute;left:50%;transform:translateX(-50%);bottom:110px;width:calc(100% - 28px);box-sizing:border-box;
+  height:clamp(78px,17vh,132px);overflow:auto;padding:10px 14px;border:1px solid var(--line);border-radius:12px;
+  background:rgba(8,12,24,.82);opacity:.45;transition:opacity .3s;z-index:2}
+#cap.on{opacity:1}
+#cap:empty::before{content:"Subtitles appear here when she talks";color:var(--muted);font-size:13px}
+#cap .who{display:block;font:10px ui-monospace,Consolas,monospace;letter-spacing:3px;color:var(--accent);margin-bottom:3px}
+</style>
+</head>
+<body>
+<div id="stage"><div id="host"></div></div>
+<div id="name">STELLA</div><div id="note">On this phone (the server isn't reachable)</div><div id="status"></div>
+<div id="cap"></div>
+<script type="module">
+const app = window.StellaiApp;
+const $ = s => document.querySelector(s);
+const status = t => { $("#status").textContent = t || ""; };
+window.addEventListener("error", e => { try { app && app.error(String(e.message || e)); } catch {} });
+window.addEventListener("unhandledrejection", e => { try { app && app.error(String(e.reason && e.reason.message || e.reason)); } catch {} });
+
+let capTimer = 0;
+function caption(text, who) {
+  const el = $("#cap");
+  el.innerHTML = text ? `<span class="who">${who === "you" ? "YOU" : "STELLA"}</span>` : "";
+  if (text) el.appendChild(document.createTextNode(text));
+  el.classList.toggle("on", !!text);
+  clearTimeout(capTimer);
+  if (text && who !== "you") capTimer = setTimeout(() => { if (!talking) el.classList.remove("on"); }, 12000);
+}
+
+const { createAvatar, looksLikeSlowDevice } = await import("./avatar.js");
+const avatar = createAvatar($("#host"), {
+  camera: "upper", height: 172.7, light: looksLikeSlowDevice(), gestures: true, neon: { on: false }, stageHost: $("#stage"),
+  onError: e => status("3D character: " + e.message), onInfo: m => status(m),
+  onProgress: (got, total) => status(total && got < total ? `Loading Stella… ${Math.round(got / total * 100)}%` : ""),
+});
+try { app && app.ready(); } catch {}
+await avatar.setStyle("orb");
+const anims = await (await fetch("./anims.json")).json();
+avatar.setAnimations(anims.map(a => ({ ...a, url: "./animations/" + encodeURIComponent(a.file) })));
+avatar.setStyle("vrm", "./Stella.vrm", "Stella@offline").then(() => {
+  avatar.setAnimations(anims.map(a => ({ ...a, url: "./animations/" + encodeURIComponent(a.file) })));
+  status("");
+});
+
+// The phone's own voice speaks offline; the page can't hear it, so her mouth follows a made-up rhythm of syllables.
+let talking = false, mouthTimer = 0, state = "idle";
+function setTalking(on) {
+  talking = on;
+  clearInterval(mouthTimer);
+  if (on) {
+    const t0 = performance.now();
+    mouthTimer = setInterval(() => {
+      const t = (performance.now() - t0) / 1000;
+      const syllable = Math.abs(Math.sin(t * 8.5 + Math.sin(t * 2.3) * 1.7));
+      const pause = Math.sin(t * 0.9) > 0.85 ? 0.2 : 1;
+      avatar.setLevel((0.15 + 0.55 * syllable) * pause);
+    }, 50);
+    avatar.setState("talking");
+  } else {
+    avatar.setLevel(0);
+    avatar.setState(state === "talking" ? "idle" : state);
+  }
+}
+
+// What Stella is doing, from the app: listening, thinking, reply (with its text), talking / quiet (her voice),
+// idle, gesture (an animation by name or moment).
+window.stella = {
+  event(kind, text) {
+    if (kind === "talking") return setTalking(true);
+    if (kind === "quiet") return setTalking(false);
+    if (kind === "gesture") return avatar.queue && avatar.queue(text);
+    if (kind === "reply") { caption(text, "stella"); avatar.react(text); state = "idle"; if (!talking) avatar.setState("idle"); return; }
+    state = kind;
+    if (kind === "listening") caption("…", "you");
+    if (!talking) avatar.setState(kind === "idle" ? "idle" : kind);
+  },
+};
+</script>
+</body>
+</html>

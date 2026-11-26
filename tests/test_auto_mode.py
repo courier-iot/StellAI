@@ -29,6 +29,15 @@ check(h.route_mode({"chat_id": "c2", "text": "design a holder for my phone", "fo
 check(h.route_mode({"chat_id": "c3", "text": "design a holder for my tablet phone"})["name"] == "CAD Designer", "corrections are learned")
 r = h.route_mode({"chat_id": "c4", "text": "check my kicad board for drc errors", "level": "ask"})
 check(not r["switched"] and r["suggest"] == "pcb", "the ask level suggests instead of switching", r)
+# talking about something isn't asking for it; sensitivity: relaxed / normal (auto) / eager
+cases = [("its going well! I just finished making your 3D model", {"relaxed": (False, None), "auto": (False, "modeler"), "eager": (True, None)}),
+         ("I love the 3D model you made", {"relaxed": (False, "modeler"), "auto": (False, "modeler"), "eager": (True, None)}),
+         ("can you fix the 3D model's hair in blender?", {"relaxed": (True, None), "auto": (True, None), "eager": (True, None)}),
+         ("rig her arms", {"relaxed": (False, "modeler"), "auto": (True, None), "eager": (True, None)})]
+for text, want in cases:
+    for lvl, (sw, sug) in want.items():
+        r = h.route_mode({"chat_id": f"s-{lvl}-{text}", "text": text, "level": lvl})
+        check(r["switched"] == sw and r.get("suggest") == sug, f"{lvl}: “{text[:36]}”", (r["switched"], r.get("suggest"), r["reason"]))
 msgs = [{"role": "user", "content": flow[0][0]}, {"role": "assistant", "content": "Use Room for the database. We decided on 3 screens."},
         {"role": "user", "content": flow[3][0]}, {"role": "assistant", "content": "Bracket base is 70 mm x 70 mm, 3 mm thick; saved as v2."},
         {"role": "user", "content": flow[7][0]}, {"role": "assistant", "content": "Board 80 x 40 mm."}]

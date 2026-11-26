@@ -56,8 +56,17 @@ class App : Application() {
     @Volatile
     var avatarScreenOpen = false
 
+    /** True while the avatar screen shows the copy inside the app (the server can't be reached): the phone speaks. */
+    @Volatile
+    var avatarOffline = false
+
+    /** Set by the offline avatar screen: what Stella is doing goes straight to its page (main thread). */
+    @Volatile
+    var localAvatar: ((String, String) -> Unit)? = null
+
     /** Tells avatar screens what Stella is doing on this phone (listening, thinking, a reply). Best effort. */
     fun avatarEvent(state: String, text: String = "", voice: Boolean = false) {
+        localAvatar?.let { sink -> scope.launch(Dispatchers.Main) { sink(state, text) } }
         if (settings.serverUrl.isBlank()) return
         scope.launch(Dispatchers.IO) {
             try {
@@ -93,6 +102,7 @@ class App : Application() {
         voice = VoiceController(this)
         speaker = Speaker(this)
         speaker.onStartTalking = { if (::voice.isInitialized) voice.watchWhileSpeaking() }   // interrupting her by talking
+        speaker.onTalkingChanged = { on -> localAvatar?.invoke(if (on) "talking" else "quiet", "") }
         // Stella moved to another server: follow her there (same API key), and say so once
         HubApi.onMoved = { url, name ->
             scope.launch(Dispatchers.Main) {
@@ -132,7 +142,7 @@ class App : Application() {
     }
 
     /** True while the avatar screen is open and on screen (in the background the phone speaks for itself). */
-    val avatarSpeaking: Boolean get() = avatarScreenOpen && appVisible
+    val avatarSpeaking: Boolean get() = avatarScreenOpen && appVisible && !avatarOffline
 
     /**
      * Keeps the phone awake while a reply is on its way, so it still arrives with the screen off or

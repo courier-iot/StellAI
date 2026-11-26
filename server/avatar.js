@@ -398,10 +398,18 @@ async function createVRM(host, url, o) {
   const hipsRest = bones.hips ? bones.hips.position.clone() : new THREE.Vector3();
 
   // ---- size: scale the character to the chosen height (default 5'8" = 172.7 cm)
+  // Measured once, in her rest pose, with every bone in place first (a skinned mesh's box comes from its bones;
+  // measured too early it came out wrong and the camera aimed at her legs until something re-measured her).
+  vrm.update(0); vrm.scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(vrm.scene);
-  const nativeHeight = Math.max(0.3, box.max.y - box.min.y);
+  const headRest = (raw("head") || vrm.scene).getWorldPosition(new THREE.Vector3());
+  // the top of her head/hair; if the box looks wrong, estimate from the head bone (the head is ~12% of a body)
+  let nativeTop = box.max.y, nativeHeight = box.max.y - box.min.y;
+  if (!(nativeHeight > headRest.y * 1.02 && nativeHeight < headRest.y * 1.4)) { nativeTop = headRest.y * 1.12; nativeHeight = nativeTop; }
+  nativeHeight = Math.max(0.3, nativeHeight);
   const headPos = new THREE.Vector3();
-  function measureHead() { vrm.scene.updateMatrixWorld(true); (raw("head") || vrm.scene).getWorldPosition(headPos); }
+  let topY = 0;
+  function measureHead() { const s = vrm.scene.scale.y; headPos.copy(headRest).multiplyScalar(s); topY = nativeTop * s; }
   function setHeight(cm) {
     const s = clamp((+cm || 172.7) / 100, 1.2, 2.2) / nativeHeight;
     vrm.scene.scale.setScalar(s);
@@ -477,12 +485,19 @@ async function createVRM(host, url, o) {
   // ---- camera framing
   let cameraMode = o.camera || "upper";
   const camGoal = new THREE.Vector3(), camAim = new THREE.Vector3(), aimNow = new THREE.Vector3();
+  // Frames from the top of her hair (with a little room) down to her chin, mid-chest or feet, and backs off far
+  // enough that she also fits across: on a tall phone screen the width decides, so the top stays put and more of
+  // her shows below instead of her head being cut off.
   function setCamera(mode, jump) {
     cameraMode = mode;
-    const y = headPos.y, hgt = y / 0.93;
-    if (mode === "face") { camAim.set(0, y + 0.02, 0); camGoal.set(0, y + 0.04, 0.75); }
-    else if (mode === "full") { camAim.set(0, hgt * 0.52, 0); camGoal.set(0, hgt * 0.58, hgt * 2.5); }
-    else { camAim.set(0, y - 0.18, 0); camGoal.set(0, y - 0.08, 1.75); }
+    const H = Math.max(0.5, topY);                                   // her height on screen, in metres
+    const top = Math.max(topY, headPos.y + 0.08 * H) + 0.035 * H;
+    const lo = mode === "face" ? headPos.y - 0.07 * H : mode === "full" ? -0.02 * H : headPos.y - 0.24 * H;
+    const halfW = mode === "face" ? 0.09 * H : mode === "full" ? 0.26 * H : 0.15 * H;
+    const tanV = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)), tanH = tanV * clamp(cam.aspect || 1, 0.3, 3);
+    const d = Math.max((top - lo) / 2 / tanV, halfW / tanH);
+    const mid = mode === "full" ? (top + lo) / 2 : top - d * tanV;    // full body centred; otherwise keep the top
+    camAim.set(0, mid, 0); camGoal.set(0, mid + 0.015 * H, d);
     if (jump) { cam.position.copy(camGoal); aimNow.copy(camAim); }
   }
   setHeight(o.height);
@@ -529,12 +544,13 @@ async function createVRM(host, url, o) {
     cssGlow();
   }
 
-  let lastW = 0, lastH = 0;
+  let lastW = 0, lastH = 0, framed = false;
   function resize() {
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
     if (w === lastW && h === lastH) return;
     lastW = w; lastH = h;
     renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+    setCamera(cameraMode, !framed); framed = framed || (w > 1 && h > 1);   // the shape of the screen changes the framing
     try { renderer.render(scene, cam); } catch {}        // redraw now so the screen doesn't blink
   }
   const ro = new ResizeObserver(resize); ro.observe(host); resize();

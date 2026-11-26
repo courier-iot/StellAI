@@ -124,6 +124,26 @@ check("Twirl" in r["her_animations"] and "Wave" in r["her_animations"], "it list
 st, _ = call(port, "POST", "/avatar/event", {"state": "gesture", "text": "dance"})
 check(st == 200, "screens accept gesture events")
 
-for d in (av, av2, av3):
+# ---- an earlier upload of the same files: duplicates are hidden (the shipped copy is kept), and 3D becomes the look
+av4 = tempfile.mkdtemp(prefix="stellai-av4-")
+h.AVATAR["dir"] = av4
+os.makedirs(os.path.join(av4, "bin", "characters")); os.makedirs(os.path.join(av4, "bin", "animations"))
+shutil.copyfile(os.path.join(DEFAULTS, "Stella.vrm"), os.path.join(av4, "bin", "characters", "Stella.vrm"))   # same name
+shutil.copyfile(os.path.join(DEFAULTS, "animations", "Twirl@dance.vrma"), os.path.join(av4, "bin", "animations", "twirl.vrma"))
+h.save_avatar_config({"style": "orb"})
+h.seed_default_avatar()
+cfg = h.avatar_config()
+check(cfg["style"] == "vrm" and cfg["character"] == "Stella.vrm", "3D Stella becomes the look even when her file was already there",
+      (cfg["style"], cfg["character"]))
+names = [a["file"] for a in cfg["animations"]]
+check("twirl.vrma" not in names and "Twirl@dance.vrma" in names and len(names) == len(set(names)),
+      "an animation uploaded twice is listed once, as the shipped copy", names)
+h.save_avatar_config({"style": "orb"})
+h.seed_default_avatar()
+check(h.avatar_config()["style"] == "orb", "after that, choosing the orb sticks")
+h.AVATAR["dir"] = tempfile.mkdtemp()
+check(h.avatar_config()["style"] == "orb", "with no character at all she's still the orb")
+
+for d in (av, av2, av3, av4):
     shutil.rmtree(d, ignore_errors=True)
 done()

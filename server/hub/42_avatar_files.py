@@ -41,9 +41,37 @@ def _bin_files(kind, exts):
     return sorted(out, key=lambda x: -x[1])
 
 
+_HASHES = {}
+
+
+def _content_hash(kind, name, v, size):
+    """sha256 of a bin file, cached by name, time and size (a few MB each; only read again when they change)."""
+    key = (kind, name, v, size)
+    if key not in _HASHES:
+        try:
+            _HASHES[key] = _sha256_file(_avatar_path("bin", kind, name))
+        except OSError:
+            _HASHES[key] = key
+    return _HASHES[key]
+
+
+def _unique(kind, files):
+    """Files with the same contents as another are hidden (the one that ships with Stella is kept, otherwise the
+    newest), so the same animation uploaded twice doesn't play twice as often or crowd the settings."""
+    shipped = {rel.split("/", 1)[1] for rel in DEFAULT_AVATAR if rel.startswith(kind + "/")}
+    keep, seen = [], set()
+    for n, v, size in sorted(files, key=lambda f: (f[0] not in shipped, -f[1])):
+        h_ = _content_hash(kind, n, v, size)
+        if h_ in seen:
+            continue
+        seen.add(h_)
+        keep.append((n, v, size))
+    return sorted(keep, key=lambda f: -f[1])
+
+
 def list_characters():
     return [{"file": n, "name": os.path.splitext(n)[0].replace("_", " "), "v": v, "size": size}
-            for n, v, size in _bin_files("characters", (".vrm",))]
+            for n, v, size in _unique("characters", _bin_files("characters", (".vrm",)))]
 
 
 def _anim_meta():
@@ -69,7 +97,7 @@ def _anim_id(name, v, size):
 
 def list_animations():
     meta, out = _anim_meta(), []
-    for n, v, size in _bin_files("animations", (".vrma", ".fbx")):
+    for n, v, size in _unique("animations", _bin_files("animations", (".vrma", ".fbx"))):
         base, ext = os.path.splitext(n)
         m = re.fullmatch(rf"(.*?)@((?:{_WHEN_RX})(?:\+(?:{_WHEN_RX}))*)", base, re.I)
         when = valid_when((meta.get(n) or {}).get("when")) or (valid_when(m.group(2)) if m else "") or "idle"
@@ -427,6 +455,26 @@ def seed_default_avatar(repo="", fetch=None):
         state["chosen"] = True
         with open(state_path, "w") as f:
             json.dump(state, f, indent=1)
+    if not state.get("style3d"):
+        # Once (0.37.0): Stella in 3D is the default look, also on servers where her file was already there (an
+        # earlier upload of the same name, which the step above leaves alone) or that were set to the orb by default.
+        chars = [c["file"] for c in list_characters()]
+        if chars:
+            try:
+                with open(_avatar_path("config.json")) as f:
+                    cfg = json.load(f)
+            except (OSError, ValueError):
+                cfg = {}
+            cfg["style"] = "vrm"
+            if DEFAULT_CHARACTER in chars and (not state.get("chosen") or cfg.get("character") not in chars):
+                cfg["character"] = DEFAULT_CHARACTER
+            with open(_avatar_path("config.json.part"), "w") as f:
+                json.dump(cfg, f, indent=1)
+            os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
+            state.update(style3d=True, chosen=True)
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=1)
+            _REV_CACHE["t"] = 0
     if added:
         _REV_CACHE["t"] = 0
         log("avatar: added Stella's " + ", ".join(r.split("/")[-1] for r in added))

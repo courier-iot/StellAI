@@ -9020,6 +9020,20 @@ AUTO_BACK = re.compile(r"\b(?:back to|return to|returning to|go back to)\s+(?:th
 AUTO_COMMAND = re.compile(
     r"\b(?:switch|change|go|move|put me)\s+(?:back\s+)?(?:to|into)\s+(?:the\s+)?([a-z0-9 ]{2,24}?)(?:\s+mode)?\b|"
     r"\buse\s+(?:the\s+)?([a-z0-9 ]{2,24}?)\s+mode\b", re.I)
+# Asking for something (switching is worth it) vs talking about something (a mention isn't a request):
+# "can you rig her?" / "let's design a bracket" / "make the halo glow" vs "I just finished making your 3D model".
+AUTO_REQUEST = re.compile(
+    r"\?|\b(can|could|would|will) you\b|\bhelp me\b|\blet'?s\b|\bplease\b|\bi (want|need|would like|'d like) (to|you|help|a|an|some)\b|"
+    r"\bhow (do|can|would|should|to)\b|\bshow me\b|\btell me\b|\bi'?m (going|trying|about) to\b|"
+    r"^\W*(design|make|build|create|draw|model|sculpt|rig|add|fix|edit|change|open|start|write|plan|check|"
+    r"explain|teach|find|set up|convert|export|import|render|print|turn|give)\b", re.I)
+AUTO_DONE = re.compile(
+    r"\b(i|we)\s+(just\s+|finally\s+|already\s+)?(finished|completed|made|built|did|wrapped up|got done|"
+    r"was done|am done|'m done|have done|'ve done|have finished|'ve finished|have made|'ve made)\b|"
+    r"\b(is|are|it'?s|they'?re)\s+(done|finished|complete|ready)\b", re.I)
+# How eager Auto mode is (the level setting): relaxed only switches when you ask for something and the topic is
+# clear; normal switches when you ask, or the topic is clear; eager switches on any mention (the old behaviour).
+AUTO_SENSITIVITY = {"relaxed", "auto", "eager"}
 AUTO_STATE = {"lock": threading.Lock(), "path": ""}
 
 
@@ -9060,8 +9074,15 @@ def _mode_by_name(name):
     return aliases.get(n) or (n if n in AUTO_MODES else "")
 
 
+def _asks(text, sens, hits):
+    """Enough to switch? normal: a request, or the topic named twice; relaxed: a request and the topic named twice."""
+    request = bool(AUTO_REQUEST.search(text))
+    return (request and hits >= 2) if sens == "relaxed" else (request or hits >= 2)
+
+
 def route_mode(data):
-    """Which mode the next reply should use. In: chat_id, text, level (auto|ask|off), forced (a mode the user
+    """Which mode the next reply should use. In: chat_id, text, level (auto|relaxed|eager|ask|off; auto = normal),
+    forced (a mode the user
     chose for this message), current (the mode the chat was in). Out: mode, switched, suggest, reason."""
     chat = str(data.get("chat_id") or "")[:80]
     text = str(data.get("text") or "")[:4000]
@@ -9090,13 +9111,16 @@ def route_mode(data):
             if best_lane and want & _words(best_lane["title"]):
                 mode, reason = best_lane["mode"], "back to an earlier topic"
         elif level != "off":
+            sens = level if level in AUTO_SENSITIVITY else "auto"
             weight = {"modeler": 3, "cad": 3, "pcb": 3}
-            scores = {m: len(rx.findall(text)) * weight.get(m, 2) for m, (_n, rx) in AUTO_MODES.items() if rx}
+            hits = {m: len(rx.findall(text)) for m, (_n, rx) in AUTO_MODES.items() if rx}
+            scores = {m: n * weight.get(m, 2) for m, n in hits.items()}
             words = _words(text)
             for l in db.get("learned", []):      # corrections the user made before
                 lw = _words(l["text"])
                 if lw and len(words & lw) / max(1, len(words | lw)) >= 0.5 and l["mode"] in scores:
                     scores[l["mode"]] += 4
+                    hits[l["mode"]] += 2         # a correction counts as clear evidence
             best = max(scores, key=lambda m: scores[m]) if scores else "general"
             top, here = scores.get(best, 0), scores.get(current, 0)
             cue = bool(AUTO_TOPIC_CUE.search(text))
@@ -9110,6 +9134,13 @@ def route_mode(data):
                 pass
             elif current in AUTO_WORK_MODES and not soft and top < 6:
                 suggest, reason = best, "in the middle of a job"
+            elif sens != "eager" and (_done := bool(AUTO_DONE.search(text)) and not AUTO_REQUEST.search(text)):
+                # "I just finished making your 3D model": talking about it, not asking for it
+                if sens == "auto":
+                    suggest = best
+                reason = "you're telling me about it, not asking"
+            elif sens != "eager" and not soft and not _asks(text, sens, hits.get(best, 0)):
+                suggest, reason = best, "only mentioned"
             elif top >= here + 2:
                 mode, reason = best, "new topic" if soft else "the message is about this"
             else:
@@ -11648,6 +11679,14 @@ body.docs #docs{display:flex}
 .dialog h2{margin:0 0 10px;font-size:18px}.dialog .btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .list .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(38,51,92,.6)}
 .list .row .t{flex:1;min-width:0}
+/* nothing in a dialog may be wider than it (long dropdown labels pushed the avatar settings sideways on phones) */
+.dialog{overflow-x:hidden}.dialog select,.dialog input:not([type=checkbox]):not([type=radio]),.dialog textarea{max-width:100%;min-width:0}
+@media (max-width:640px){
+  .list .row{flex-wrap:wrap}
+  #animList .row .t{flex:1 1 100%}                       /* the animation's name on its own line… */
+  #animList .row select{flex:1 1 0;width:100%!important}  /* …and its moment below it, full width */
+  .dialog div[style*="display:flex"]{flex-wrap:wrap}
+  .dialog{padding:14px 14px}}
 .pick{display:flex;gap:10px;align-items:center;padding:9px 8px;border-radius:10px;cursor:pointer}.pick:hover{background:rgba(255,255,255,.04)}
 .li{width:1.2em;height:1.2em;vertical-align:-.22em;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;margin-right:.4em}
 .li.solo{margin-right:0}.li.ok{color:var(--accent)}.li.bad{color:var(--red)}.pick .ic .li,.check .ic .li{margin:0}
@@ -12656,7 +12695,8 @@ async function openSettings() {
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
-    <select id="am">${[["auto", "Auto: switch when sure"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <select id="am">${[["relaxed", "Auto, relaxed: only when I ask for something on that topic"], ["auto", "Auto: when I ask, or the topic is clear"],
+      ["eager", "Auto, eager: on any mention"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <h3 class="hud" style="margin-top:18px">GitHub</h3>
     <p class="sub">${gh.token_set ? (gh.user ? "Connected as <b>" + esc(gh.user) + "</b>." : "Token saved" + (gh.error ? ": " + esc(gh.error) : ".")) : "Not connected: public repositories only, read-only."}
     For private repos and commits, create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens) with access to your repos and permissions: Contents read/write, Pull requests read/write, Actions read, Issues read.</p>
@@ -13528,11 +13568,11 @@ async function alarmAnswer(snooze) {
   if (!snooze && AV.avatar && AV.avatar.queue) AV.avatar.queue("greeting");
 }
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
-const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
-  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (10 quiet minutes)"], ["happy", "When she's happy"],
+const WHEN = [["idle", "While idle"], ["wake", "Waking up (opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "Bored (10 quiet minutes)"], ["happy", "When she's happy"],
   ["surprise", "When she's surprised"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"],
-  ["sleep", "Sleeping/waiting: settling down (20 quiet minutes)"], ["sleeping", "Sleeping/waiting: the loop"],
-  ["sleepend", "Sleeping/waiting: getting back up"], ["off", "Off"]];
+  ["sleep", "Sleeping: settling down (20 min)"], ["sleeping", "Sleeping: the loop"],
+  ["sleepend", "Sleeping: getting back up"], ["off", "Off"]];
 const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
   .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {
@@ -13798,7 +13838,7 @@ def _avatar_path(*parts):
 
 
 def avatar_config():
-    cfg = {"style": "orb", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
+    cfg = {"style": "vrm", "voice": DEFAULT_VOICE, "speak": True, "speak_others": True, "speed": 1.0,
            "name_tag": True, "camera": "upper", "height_cm": 172.7, "light": "auto", "wake": True,
            "wake_word": "hey_jarvis", "wake_sensitivity": 0.5, "gestures": True, "character": "",
            "engine": "piper", "kokoro_voice": "af_heart", "followup": True, "barge_in": True,
@@ -14595,9 +14635,37 @@ def _bin_files(kind, exts):
     return sorted(out, key=lambda x: -x[1])
 
 
+_HASHES = {}
+
+
+def _content_hash(kind, name, v, size):
+    """sha256 of a bin file, cached by name, time and size (a few MB each; only read again when they change)."""
+    key = (kind, name, v, size)
+    if key not in _HASHES:
+        try:
+            _HASHES[key] = _sha256_file(_avatar_path("bin", kind, name))
+        except OSError:
+            _HASHES[key] = key
+    return _HASHES[key]
+
+
+def _unique(kind, files):
+    """Files with the same contents as another are hidden (the one that ships with Stella is kept, otherwise the
+    newest), so the same animation uploaded twice doesn't play twice as often or crowd the settings."""
+    shipped = {rel.split("/", 1)[1] for rel in DEFAULT_AVATAR if rel.startswith(kind + "/")}
+    keep, seen = [], set()
+    for n, v, size in sorted(files, key=lambda f: (f[0] not in shipped, -f[1])):
+        h_ = _content_hash(kind, n, v, size)
+        if h_ in seen:
+            continue
+        seen.add(h_)
+        keep.append((n, v, size))
+    return sorted(keep, key=lambda f: -f[1])
+
+
 def list_characters():
     return [{"file": n, "name": os.path.splitext(n)[0].replace("_", " "), "v": v, "size": size}
-            for n, v, size in _bin_files("characters", (".vrm",))]
+            for n, v, size in _unique("characters", _bin_files("characters", (".vrm",)))]
 
 
 def _anim_meta():
@@ -14623,7 +14691,7 @@ def _anim_id(name, v, size):
 
 def list_animations():
     meta, out = _anim_meta(), []
-    for n, v, size in _bin_files("animations", (".vrma", ".fbx")):
+    for n, v, size in _unique("animations", _bin_files("animations", (".vrma", ".fbx"))):
         base, ext = os.path.splitext(n)
         m = re.fullmatch(rf"(.*?)@((?:{_WHEN_RX})(?:\+(?:{_WHEN_RX}))*)", base, re.I)
         when = valid_when((meta.get(n) or {}).get("when")) or (valid_when(m.group(2)) if m else "") or "idle"
@@ -14981,6 +15049,26 @@ def seed_default_avatar(repo="", fetch=None):
         state["chosen"] = True
         with open(state_path, "w") as f:
             json.dump(state, f, indent=1)
+    if not state.get("style3d"):
+        # Once (0.37.0): Stella in 3D is the default look, also on servers where her file was already there (an
+        # earlier upload of the same name, which the step above leaves alone) or that were set to the orb by default.
+        chars = [c["file"] for c in list_characters()]
+        if chars:
+            try:
+                with open(_avatar_path("config.json")) as f:
+                    cfg = json.load(f)
+            except (OSError, ValueError):
+                cfg = {}
+            cfg["style"] = "vrm"
+            if DEFAULT_CHARACTER in chars and (not state.get("chosen") or cfg.get("character") not in chars):
+                cfg["character"] = DEFAULT_CHARACTER
+            with open(_avatar_path("config.json.part"), "w") as f:
+                json.dump(cfg, f, indent=1)
+            os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
+            state.update(style3d=True, chosen=True)
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=1)
+            _REV_CACHE["t"] = 0
     if added:
         _REV_CACHE["t"] = 0
         log("avatar: added Stella's " + ", ".join(r.split("/")[-1] for r in added))
@@ -15394,10 +15482,18 @@ async function createVRM(host, url, o) {
   const hipsRest = bones.hips ? bones.hips.position.clone() : new THREE.Vector3();
 
   // ---- size: scale the character to the chosen height (default 5'8" = 172.7 cm)
+  // Measured once, in her rest pose, with every bone in place first (a skinned mesh's box comes from its bones;
+  // measured too early it came out wrong and the camera aimed at her legs until something re-measured her).
+  vrm.update(0); vrm.scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(vrm.scene);
-  const nativeHeight = Math.max(0.3, box.max.y - box.min.y);
+  const headRest = (raw("head") || vrm.scene).getWorldPosition(new THREE.Vector3());
+  // the top of her head/hair; if the box looks wrong, estimate from the head bone (the head is ~12% of a body)
+  let nativeTop = box.max.y, nativeHeight = box.max.y - box.min.y;
+  if (!(nativeHeight > headRest.y * 1.02 && nativeHeight < headRest.y * 1.4)) { nativeTop = headRest.y * 1.12; nativeHeight = nativeTop; }
+  nativeHeight = Math.max(0.3, nativeHeight);
   const headPos = new THREE.Vector3();
-  function measureHead() { vrm.scene.updateMatrixWorld(true); (raw("head") || vrm.scene).getWorldPosition(headPos); }
+  let topY = 0;
+  function measureHead() { const s = vrm.scene.scale.y; headPos.copy(headRest).multiplyScalar(s); topY = nativeTop * s; }
   function setHeight(cm) {
     const s = clamp((+cm || 172.7) / 100, 1.2, 2.2) / nativeHeight;
     vrm.scene.scale.setScalar(s);
@@ -15473,12 +15569,19 @@ async function createVRM(host, url, o) {
   // ---- camera framing
   let cameraMode = o.camera || "upper";
   const camGoal = new THREE.Vector3(), camAim = new THREE.Vector3(), aimNow = new THREE.Vector3();
+  // Frames from the top of her hair (with a little room) down to her chin, mid-chest or feet, and backs off far
+  // enough that she also fits across: on a tall phone screen the width decides, so the top stays put and more of
+  // her shows below instead of her head being cut off.
   function setCamera(mode, jump) {
     cameraMode = mode;
-    const y = headPos.y, hgt = y / 0.93;
-    if (mode === "face") { camAim.set(0, y + 0.02, 0); camGoal.set(0, y + 0.04, 0.75); }
-    else if (mode === "full") { camAim.set(0, hgt * 0.52, 0); camGoal.set(0, hgt * 0.58, hgt * 2.5); }
-    else { camAim.set(0, y - 0.18, 0); camGoal.set(0, y - 0.08, 1.75); }
+    const H = Math.max(0.5, topY);                                   // her height on screen, in metres
+    const top = Math.max(topY, headPos.y + 0.08 * H) + 0.035 * H;
+    const lo = mode === "face" ? headPos.y - 0.07 * H : mode === "full" ? -0.02 * H : headPos.y - 0.24 * H;
+    const halfW = mode === "face" ? 0.09 * H : mode === "full" ? 0.26 * H : 0.15 * H;
+    const tanV = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)), tanH = tanV * clamp(cam.aspect || 1, 0.3, 3);
+    const d = Math.max((top - lo) / 2 / tanV, halfW / tanH);
+    const mid = mode === "full" ? (top + lo) / 2 : top - d * tanV;    // full body centred; otherwise keep the top
+    camAim.set(0, mid, 0); camGoal.set(0, mid + 0.015 * H, d);
     if (jump) { cam.position.copy(camGoal); aimNow.copy(camAim); }
   }
   setHeight(o.height);
@@ -15525,12 +15628,13 @@ async function createVRM(host, url, o) {
     cssGlow();
   }
 
-  let lastW = 0, lastH = 0;
+  let lastW = 0, lastH = 0, framed = false;
   function resize() {
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
     if (w === lastW && h === lastH) return;
     lastW = w; lastH = h;
     renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+    setCamera(cameraMode, !framed); framed = framed || (w > 1 && h > 1);   // the shape of the screen changes the framing
     try { renderer.render(scene, cam); } catch {}        // redraw now so the screen doesn't blink
   }
   const ro = new ResizeObserver(resize); ro.observe(host); resize();

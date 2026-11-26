@@ -54,10 +54,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.runtime.key
+import androidx.webkit.WebViewAssetLoader
+import org.json.JSONObject
+
+/** The avatar inside the app (assets/avatar, filled in when the APK is built), for when the server can't be reached. */
+private const val OFFLINE_PAGE = "https://appassets.androidplatform.net/assets/avatar/offline.html"
 
 /**
  * Full-screen avatar (the server's /avatar page): turns a spare phone or tablet into Stella's screen.
  * Talking uses the app's own microphone and wake word; the avatar speaks replies with the server's voice.
+ * Without a reachable server it shows the copy built into the app instead: same character and animations, the
+ * phone's own voice, and what she's doing passed straight to the page.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -73,6 +81,18 @@ fun AvatarScreen(onDone: () -> Unit) {
     var timedOut by remember { mutableStateOf(false) }
     var serverOk by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    val offlineAvailable = remember {
+        try {
+            context.assets.list("avatar")?.contains("offline.html") == true && !context.assets.list("avatar/lib").isNullOrEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+    var offline by remember { mutableStateOf(false) }
+    DisposableEffect(offline) {
+        app.avatarOffline = offline
+        onDispose { app.avatarOffline = false; app.localAvatar = null }
+    }
     // In the background the page sleeps (the phone speaks replies itself); it catches up when you come back
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -88,12 +108,20 @@ fun AvatarScreen(onDone: () -> Unit) {
     }
     // Check first that the server has an avatar screen (servers from before it was added don't)
     LaunchedEffect(s.serverUrl) {
-        if (s.serverUrl.isBlank()) return@LaunchedEffect
+        if (s.serverUrl.isBlank()) {
+            offline = offlineAvailable
+            return@LaunchedEffect
+        }
         try {
             withContext(Dispatchers.IO) { HubApi.avatarConfig(s.serverUrl, s.apiKey) }
             serverOk = true
         } catch (e: Exception) {
             val m = e.message.orEmpty()
+            // no answer at all (away from home, server off): she's on this phone instead
+            if (!m.startsWith("HTTP") && offlineAvailable) {
+                offline = true
+                return@LaunchedEffect
+            }
             loadError = when {
                 m.startsWith("HTTP 404") -> "Your StellAI server is older than this app and doesn't have the avatar screen yet. " +
                     "Update it: on Windows, StellAI updates itself from GitHub within 30 minutes once a new version is " +
@@ -104,8 +132,8 @@ fun AvatarScreen(onDone: () -> Unit) {
         }
     }
     // If the page hasn't said it's running after a while, show why
-    LaunchedEffect(serverOk) {
-        if (!serverOk) return@LaunchedEffect
+    LaunchedEffect(serverOk, offline) {
+        if (!serverOk && !offline) return@LaunchedEffect
         delay(20_000)
         if (!ready && loadError == null) {
             timedOut = true
@@ -128,10 +156,12 @@ fun AvatarScreen(onDone: () -> Unit) {
     }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF04060D))) {
-        if (s.serverUrl.isBlank()) {
+        if (s.serverUrl.isBlank() && !offlineAvailable) {
             Text("Connect to your StellAI server first (Settings).", Modifier.align(Alignment.Center).padding(24.dp))
-        } else {
-            if (serverOk) AndroidView(
+        } else if (serverOk || offline) key(offline) {
+            val loader = if (offline) WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context)).build() else null
+            AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     WebView(ctx).apply {
@@ -162,6 +192,10 @@ fun AvatarScreen(onDone: () -> Unit) {
                             }
                         }
                         webViewClient = object : WebViewClient() {
+                            // the offline page and everything it loads come from the app's own files
+                            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                                loader?.shouldInterceptRequest(request.url)
+
                             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                                 if (request.isForMainFrame) loadError = "Couldn't open the avatar screen: ${error.description}. " +
                                     "Is StellAI Server running and up to date?"
@@ -172,18 +206,30 @@ fun AvatarScreen(onDone: () -> Unit) {
                                     "(HTTP ${response.statusCode}). Update StellAI Server, then try again."
                             }
                         }
-                        loadUrl(HubApi.avatarPageUrl(s.serverUrl, s.apiKey))
+                        if (offline) {
+                            loadUrl(OFFLINE_PAGE)
+                            val view = this
+                            app.localAvatar = { state, text ->
+                                view.evaluateJavascript("window.stella&&stella.event(${JSONObject.quote(state)},${JSONObject.quote(text)})", null)
+                            }
+                        } else {
+                            loadUrl(HubApi.avatarPageUrl(s.serverUrl, s.apiKey))
+                        }
                         webView = this
                     }
                 },
-                onRelease = { webView = null; it.destroy() },
+                onRelease = { webView = null; app.localAvatar = null; it.destroy() },
             )
         }
         loadError?.let { Text(it, color = Space.Red, modifier = Modifier.align(Alignment.Center).padding(24.dp)) }
-        if (loadError == null && !ready && s.serverUrl.isNotBlank()) {
+        if (loadError == null && !ready && (s.serverUrl.isNotBlank() || offline)) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Space.Accent, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
-                Text(if (serverOk) "Waking Stella up…" else "Checking the server…", color = Space.Muted,
+                Text(when {
+                    offline -> "Waking Stella up on this phone…"
+                    serverOk -> "Waking Stella up…"
+                    else -> "Checking the server…"
+                }, color = Space.Muted,
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 10.dp))
             }
         }

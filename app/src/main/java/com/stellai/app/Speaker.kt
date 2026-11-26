@@ -21,6 +21,8 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
         private set
     /** Called (main thread) when she starts talking. */
     var onStartTalking: (() -> Unit)? = null
+    /** Called (main thread) when she starts (true) or stops (false) talking: the offline avatar moves her mouth. */
+    var onTalkingChanged: ((Boolean) -> Unit)? = null
     private var doneCallback: (() -> Unit)? = null
     private val main = Handler(Looper.getMainLooper())
 
@@ -46,6 +48,7 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
             if (!talking) {
                 talking = true
                 onStartTalking?.invoke()
+                onTalkingChanged?.invoke(true)
             }
             engine.speak(clean, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
         } else {
@@ -58,6 +61,7 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
         pending.clear()
         doneCallback = null
         speaking = false
+        if (talking) onTalkingChanged?.invoke(false)
         talking = false
         if (ready) tts?.stop()
     }
@@ -80,6 +84,7 @@ class Speaker(private val context: Context) : TextToSpeech.OnInitListener {
         main.post {
             if (id != lastId) return@post
             speaking = false
+            if (talking) onTalkingChanged?.invoke(false)
             talking = false
             val cb = doneCallback
             doneCallback = null

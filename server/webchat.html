@@ -84,6 +84,14 @@ body.docs #docs{display:flex}
 .dialog h2{margin:0 0 10px;font-size:18px}.dialog .btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .list .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(38,51,92,.6)}
 .list .row .t{flex:1;min-width:0}
+/* nothing in a dialog may be wider than it (long dropdown labels pushed the avatar settings sideways on phones) */
+.dialog{overflow-x:hidden}.dialog select,.dialog input:not([type=checkbox]):not([type=radio]),.dialog textarea{max-width:100%;min-width:0}
+@media (max-width:640px){
+  .list .row{flex-wrap:wrap}
+  #animList .row .t{flex:1 1 100%}                       /* the animation's name on its own line… */
+  #animList .row select{flex:1 1 0;width:100%!important}  /* …and its moment below it, full width */
+  .dialog div[style*="display:flex"]{flex-wrap:wrap}
+  .dialog{padding:14px 14px}}
 .pick{display:flex;gap:10px;align-items:center;padding:9px 8px;border-radius:10px;cursor:pointer}.pick:hover{background:rgba(255,255,255,.04)}
 .li{width:1.2em;height:1.2em;vertical-align:-.22em;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;margin-right:.4em}
 .li.solo{margin-right:0}.li.ok{color:var(--accent)}.li.bad{color:var(--red)}.pick .ic .li,.check .ic .li{margin:0}
@@ -1092,7 +1100,8 @@ async function openSettings() {
     <label class="sub" style="display:block;margin-top:10px">Thinking before answering</label>
     <select id="th">${[["auto", "Auto: only for hard questions"], ["on", "Always"], ["off", "Never"]].map(([v, l]) => `<option value="${v}" ${thinkPref({}) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <p class="sub" style="margin-top:12px">Switching modes by herself: in General chats ${esc(NAME())} picks the mode that fits each message and shows a chip you can change.</p>
-    <select id="am">${[["auto", "Auto: switch when sure"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <select id="am">${[["relaxed", "Auto, relaxed: only when I ask for something on that topic"], ["auto", "Auto: when I ask, or the topic is clear"],
+      ["eager", "Auto, eager: on any mention"], ["ask", "Ask first: only suggest"], ["off", "Off: only the mode I pick"]].map(([v, l]) => `<option value="${v}" ${store.get("autoModes", "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
     <h3 class="hud" style="margin-top:18px">GitHub</h3>
     <p class="sub">${gh.token_set ? (gh.user ? "Connected as <b>" + esc(gh.user) + "</b>." : "Token saved" + (gh.error ? ": " + esc(gh.error) : ".")) : "Not connected: public repositories only, read-only."}
     For private repos and commits, create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens) with access to your repos and permissions: Contents read/write, Pull requests read/write, Actions read, Issues read.</p>
@@ -1964,11 +1973,11 @@ async function alarmAnswer(snooze) {
   if (!snooze && AV.avatar && AV.avatar.queue) AV.avatar.queue("greeting");
 }
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
-const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
-  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (10 quiet minutes)"], ["happy", "When she's happy"],
+const WHEN = [["idle", "While idle"], ["wake", "Waking up (opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "Bored (10 quiet minutes)"], ["happy", "When she's happy"],
   ["surprise", "When she's surprised"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"],
-  ["sleep", "Sleeping/waiting: settling down (20 quiet minutes)"], ["sleeping", "Sleeping/waiting: the loop"],
-  ["sleepend", "Sleeping/waiting: getting back up"], ["off", "Off"]];
+  ["sleep", "Sleeping: settling down (20 min)"], ["sleeping", "Sleeping: the loop"],
+  ["sleepend", "Sleeping: getting back up"], ["off", "Off"]];
 const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
   .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {

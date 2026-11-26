@@ -33,6 +33,18 @@ jobs:
           done
           ls -la "$dir"
 
+      # Stella's avatar inside the app, for the avatar screen without the server: her phone-sized model, her
+      # animations, the avatar code and the 3D library (the same files the server uses), next to offline.html
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Put Stella's avatar into the app
+        run: |
+          pip install --quiet pillow
+          python tools/make_offline_avatar.py
+          ls -la app/src/main/assets/avatar app/src/main/assets/avatar/lib
+
       # The on-phone brain (llama.cpp's llama-server) and on-phone speech (whisper.cpp's whisper-cli), built for
       # Android (arm64). Each is cached by its version and build script, so it only compiles when those change
       # (llama.cpp ~10–15 minutes, whisper.cpp ~3 minutes).

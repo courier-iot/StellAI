@@ -241,9 +241,22 @@ fun SettingsScreen(onDone: () -> Unit, onOpenMemory: () -> Unit, onScan: () -> U
                 Hint("In General chats Stella picks the mode that fits each message (CAD for a bracket, PCB for a board) " +
                     "and shows a chip you can tap to change it. Ask: she only suggests. Off: modes are only what you pick. " +
                     "Picking a mode for a chat keeps it there.")
+                // "auto" is Auto at normal sensitivity; "relaxed" and "eager" are Auto at the other two
+                val autoOn = autoModes in setOf("auto", "relaxed", "eager")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("auto" to "Auto", "ask" to "Ask first", "off" to "Off").forEach { (v, label) ->
-                        FilterChip(selected = autoModes == v, onClick = { autoModes = v }, label = { Text(label) })
+                        FilterChip(selected = if (v == "auto") autoOn else autoModes == v,
+                            onClick = { if (!(v == "auto" && autoOn)) autoModes = v }, label = { Text(label) })
+                    }
+                }
+                if (autoOn) {
+                    Hint("How sure she needs to be: Relaxed switches only when you ask for something on that topic; " +
+                        "Normal also when the topic is clear; Eager on any mention. Just telling her about something " +
+                        "(\"I finished the 3D model\") only shows a suggestion.")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("relaxed" to "Relaxed", "auto" to "Normal", "eager" to "Eager").forEach { (v, label) ->
+                            FilterChip(selected = autoModes == v, onClick = { autoModes = v }, label = { Text(label) })
+                        }
                     }
                 }
             }
