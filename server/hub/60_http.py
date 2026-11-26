@@ -327,7 +327,8 @@ def make_http_handler(cfg, chats):
             data = json.loads(self.read_body(200_000) or b"{}")
             if path == "/reminders":
                 due = int(data["due_at"]) if data.get("due_at") else _parse_when(data.get("when", ""))
-                return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none")))
+                return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none"),
+                                                               alarm=bool(data.get("alarm"))))
             if path == "/github":
                 return self.send_json(200, save_github_config(data))
             m = re.fullmatch(r"/reminders/([0-9a-f]{10})", path)

@@ -18,9 +18,9 @@ INSTRUCTION_LINES = [   # (which apps, line)
     ("all", "Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows "
             "automatically; if it fails, fix it and retry once)."),
     ("all", "Describe photos only from what you actually see."),
-    ("phone", "Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for "
-              "wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links."),
-    ("web", "Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then "
+    ("phone", "Save lasting facts with remember. Reminders: set_reminder (rings on all their phones). Wake-ups: "
+              "set_wake_alarm (you ring it on your avatar screen); set_alarm only for the phone's clock app. Lists: add_to_list. Current info: web_search then fetch_page, citing links."),
+    ("web", "Save lasting facts with remember. Reminders: set_reminder. Wake-ups: set_wake_alarm. Lists: add_to_list. Current info: web_search then "
             "fetch_page, citing links."),
     ("all", "A user message may start with an automatic context block (time, memories, file excerpts); the user didn't "
             "write it."),

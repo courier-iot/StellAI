@@ -381,6 +381,7 @@ TOOL_GROUPS = {
     "pcb": ["pcb_project", "pcb_check", "pcb_circuit", "pcb_library", "pcb_step"],
     "move": ["move_stella"],
     "code": ["run_python"],
+    "avatar": ["set_wake_alarm", "avatar_gesture"],
 }
 TOOL_TRIGGERS = {
     "code": re.compile(r"\b(python|script|run (this|the|it|my) code|test (this|the|my) (code|function)|plot|graph|"
@@ -392,6 +393,9 @@ TOOL_TRIGGERS = {
     "electronics": re.compile(r"resist|volt|ohm|\bleds?\b|circuit|schemat|diagram|flow ?chart|capacit|filter|divider|"
                               r"current|\bamps?\b|watt|pcb|timing|waveform|state machine|e12|e24|e96|draw|sketch|"
                               r"inductor|transistor|mosfet|op.?amp|\bmah\b|frequency|\bhz\b", re.I),
+    "avatar": re.compile(r"\bwake me|\balarm|\bwake[- ]?up\b|\bscare me|\bboo\b|jump ?scare|\btwirl|\bspin\b|"
+                         r"\bdance|\bpeace sign|finger ?guns?|pull the trigger|\bwave\b|blow (me )?a kiss|"
+                         r"\banimation|\bgesture|\bavatar", re.I),
     "lists": re.compile(r"remind|\blists?\b|shopping|check(ed)? off|tick|cancel|to.?do|groceries|forget|"
                         r"don'?t remember|wrong about", re.I),
     "github": re.compile(r"github|\brepo|commit|branch|pull request|\bpr\b|actions|\bbuild|workflow|\bissues?\b|"

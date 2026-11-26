@@ -101,6 +101,9 @@ def start(cfg):
     migrate_avatar_files()
     for kind in ("characters", "animations"):
         os.makedirs(_avatar_path("bin", kind), exist_ok=True)
+    if not os.environ.get("STELLAI_NO_DEFAULT_AVATAR"):     # Stella's own character and animations (see 42_avatar_files)
+        threading.Thread(target=lambda: _safe_seed(getattr(cfg, "update_repo", "")), daemon=True,
+                         name="avatar-defaults").start()
     if getattr(cfg, "model_conf", "") and getattr(cfg, "models_dir", ""):
         SERVER_CONTROL = LinuxServerControl(cfg.model_conf, cfg.models_dir, cfg.llama_pid)
     DEEP["models_dir"] = os.path.abspath(cfg.models_dir) if getattr(cfg, "models_dir", "") else ""

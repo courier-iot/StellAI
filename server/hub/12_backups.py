@@ -71,7 +71,7 @@ def backup_now():
                             full = os.path.join(root, f)
                             z.write(full, os.path.join(label, os.path.relpath(full, path)))
                 # the avatar's settings, character and animations (not its downloads)
-                for f in ["config.json", "animations.json"] + (
+                for f in ["config.json", "animations.json", "defaults.json"] + (
                         ["bin/characters/" + c["file"] for c in list_characters()] +
                         ["bin/animations/" + a["file"] for a in list_animations()] if AVATAR["dir"] else []):
                     if AVATAR["dir"] and os.path.isfile(_avatar_path(*f.split("/"))):

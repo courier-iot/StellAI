@@ -272,6 +272,30 @@ def tool_set_reminder(args):
             "note": "It will ring on all the user's phones."}, f"Reminder set for {_fmt_time(r['due_at'])}{rep}: {r['text']}"
 
 
+def tool_set_wake_alarm(args):
+    due = _parse_when(args.get("when", ""))
+    label = " ".join(str(args.get("label") or "").split())[:120] or "Wake up"
+    r = CHATS.add_reminder(label, due, str(args.get("repeat") or "none"), alarm=True)
+    rep = "" if r["repeat"] == "none" else f", repeats {r['repeat']}"
+    return {"id": r["id"], "label": r["text"], "rings": _fmt_time(r["due_at"]), "repeat": r["repeat"],
+            "note": "Stella rings it herself on her avatar screens (beeping, her voice and her wake-up animation) "
+                    "until they tap I'm up or Snooze; it also rings on all their phones as a reminder."}, \
+        f"Wake-up alarm set for {_fmt_time(r['due_at'])}{rep}"
+
+
+BUILTIN_GESTURES = ("Wave", "Blow a kiss", "Hip sway", "Bounce", "Head tilt", "Look around", "Stretch")   # avatar.js
+
+
+def tool_avatar_gesture(args):
+    what = " ".join(str(args.get("animation") or "").split())[:60]
+    if not what:
+        raise ValueError("which animation? e.g. Twirl, Peace, Jumpscare, Wave, Blow a kiss, or a moment like dance")
+    names = [a["name"] for a in list_animations()] if AVATAR["dir"] else []
+    AVATAR_BUS.post({"state": "gesture", "text": what, "source": "stella", "device": "stella"})
+    return {"playing": what, "her_animations": names + list(BUILTIN_GESTURES),
+            "note": "Plays on every open avatar screen as soon as she finishes talking."}, f"Avatar: {what}"
+
+
 def tool_list_reminders(args):
     items = [r for r in CHATS.reminders(0) if not r["done"]]
     return {"reminders": [{"id": r["id"], "text": r["text"], "due": _fmt_time(r["due_at"]), "repeat": r["repeat"]}
@@ -324,11 +348,25 @@ def tool_check_off(args):
 SERVER_TOOLS["set_reminder"] = (tool_set_reminder, _fn(
     "set_reminder",
     "Set a reminder that rings on all the user's phones at a given time, e.g. 'remind me to reflow the board at 5'. "
-    "Use this for reminders; use set_alarm only for wake-up alarms in the phone's clock app.",
+    "Use this for reminders; for wake-ups use set_wake_alarm (or set_alarm for the phone's clock app).",
     {"text": _p("What to remind about, short, e.g. 'Reflow the board'"),
      "when": _p("Date and time in ISO 8601 with the user's UTC offset, e.g. 2026-11-04T17:00:00-06:00. Work it out "
                 "from the current date and time in your instructions."),
      "repeat": _p("none (default), daily, weekdays, weekly or monthly")}, ["text", "when"]))
+SERVER_TOOLS["set_wake_alarm"] = (tool_set_wake_alarm, _fn(
+    "set_wake_alarm",
+    "Wake-up alarm that Stella rings herself on her avatar screens (alarm tone, her voice, her jumpscare) and on all "
+    "the user's phones. Use for 'wake me up at 7'. Use set_alarm instead only when they ask for an alarm in the "
+    "phone's clock app.",
+    {"when": _p("Date and time in ISO 8601 with the user's UTC offset, e.g. 2026-11-27T07:00:00-06:00"),
+     "label": _p("Optional short note shown and read out, e.g. 'Dentist at 9'"),
+     "repeat": _p("none (default), daily, weekdays, weekly or monthly")}, ["when"]))
+SERVER_TOOLS["avatar_gesture"] = (tool_avatar_gesture, _fn(
+    "avatar_gesture",
+    "Play one of Stella's animations on her avatar screens, when the user asks her to (\"do a twirl\", \"scare me\", "
+    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Wave, Blow a kiss, Hip sway, Bounce, Stretch, "
+    "or a moment: dance, wake, greeting, farewell, happy.",
+    {"animation": _p("Animation name or moment, e.g. 'Twirl' or 'dance'")}, ["animation"]))
 SERVER_TOOLS["list_reminders"] = (tool_list_reminders, _fn(
     "list_reminders", "List the user's upcoming reminders.", {}, []))
 SERVER_TOOLS["cancel_reminder"] = (tool_cancel_reminder, _fn(

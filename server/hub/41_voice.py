@@ -789,7 +789,7 @@ class AvatarBus:
 
     def post(self, ev):
         state = str(ev.get("state", ""))
-        if state not in ("idle", "listening", "thinking", "talking", "reply"):
+        if state not in ("idle", "listening", "thinking", "talking", "reply", "gesture"):
             raise ValueError("unknown state")
         with self.lock:
             self.seq += 1

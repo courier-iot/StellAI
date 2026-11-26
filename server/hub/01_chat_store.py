@@ -61,6 +61,9 @@ class TaskStoreMixin:
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS list_name ON list_items(list);
         """)
+        if "alarm" not in {r[1] for r in self.db.execute("PRAGMA table_info(reminders)")}:
+            # 1 = a wake-up alarm Stella rings herself on her avatar screens (phones ring it as a reminder too)
+            self.db.execute("ALTER TABLE reminders ADD COLUMN alarm INTEGER NOT NULL DEFAULT 0")
 
     def reminders(self, include_done_days=3):
         now = int(time.time() * 1000)
@@ -74,12 +77,12 @@ class TaskStoreMixin:
             self.db.execute("DELETE FROM reminders WHERE done=1 AND updated_at < ?", (now - 30 * 86400_000,))
             self.db.commit()
             rows = self.db.execute(
-                "SELECT id, text, due_at, repeat, done, updated_at FROM reminders WHERE done=0 OR updated_at > ? "
+                "SELECT id, text, due_at, repeat, done, updated_at, alarm FROM reminders WHERE done=0 OR updated_at > ? "
                 "ORDER BY due_at", (now - include_done_days * 86400_000,)).fetchall()
-        return [{"id": r[0], "text": r[1], "due_at": r[2], "repeat": r[3], "done": bool(r[4]), "updated_at": r[5]}
-                for r in rows]
+        return [{"id": r[0], "text": r[1], "due_at": r[2], "repeat": r[3], "done": bool(r[4]), "updated_at": r[5],
+                 "alarm": bool(r[6])} for r in rows]
 
-    def add_reminder(self, text, due_at, repeat="none"):
+    def add_reminder(self, text, due_at, repeat="none", alarm=False):
         text = " ".join(str(text).split())[:300]
         if not text:
             raise ValueError("what should the reminder say?")
@@ -91,9 +94,11 @@ class TaskStoreMixin:
             due_at = _next_due(due_at, repeat, now)
         rid = uuid.uuid4().hex[:10]
         with self.lock:
-            self.db.execute("INSERT INTO reminders VALUES(?,?,?,?,?,?,?)", (rid, text, int(due_at), repeat, 0, now, now))
+            self.db.execute("INSERT INTO reminders(id, text, due_at, repeat, done, created_at, updated_at, alarm) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (rid, text, int(due_at), repeat, 0, now, now, 1 if alarm else 0))
             self.db.commit()
-        return {"id": rid, "text": text, "due_at": int(due_at), "repeat": repeat, "done": False, "updated_at": now}
+        return {"id": rid, "text": text, "due_at": int(due_at), "repeat": repeat, "done": False, "updated_at": now,
+                "alarm": bool(alarm)}
 
     def update_reminder(self, rid, done=None, snooze_minutes=None, cancel=False):
         now = int(time.time() * 1000)

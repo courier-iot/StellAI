@@ -120,6 +120,10 @@ body[data-cap=off] #caption{display:none}
 #avState{position:absolute;top:36px;left:18px;font-family:var(--mono);font-size:12px;letter-spacing:2px;color:var(--muted)}
 #avStatus{position:absolute;top:58px;left:18px;right:18px;font-size:12px;color:var(--gold);display:none}
 #stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
+#alarm{position:absolute;left:50%;bottom:12%;transform:translateX(-50%);display:none;flex-direction:column;align-items:center;gap:10px;
+  padding:18px 26px;border-radius:18px;background:rgba(7,11,26,.88);border:1px solid var(--red);box-shadow:0 0 28px rgba(255,107,122,.45);z-index:4;text-align:center}
+#alarm.on{display:flex}#alarm .time{font-size:46px;font-weight:700;letter-spacing:2px;color:var(--red);text-shadow:0 0 16px rgba(255,107,122,.7)}
+#alarm .what{font-size:17px;max-width:70vw}#alarm .btns{display:flex;gap:10px}#alarm button{font-size:17px;padding:10px 18px}
 #tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
 #mic.on{background:var(--red);border-color:var(--red);color:#fff}
 body.avatar #side,body.avatar #bar,body.avatar #docs{display:none}
@@ -176,6 +180,8 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
       <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat"><span data-ic="chat" data-solo></span></button>
         <button class="ghost" id="avSet" title="Avatar settings"><span data-ic="settings" data-solo></span></button><button class="ghost" id="avFull" title="Full screen"><span data-ic="fullscreen" data-solo></span></button></div>
       <div id="caption"></div>
+      <div id="alarm"><div class="time" id="alarmTime"></div><div class="what" id="alarmWhat"></div>
+        <div class="btns"><button class="primary" id="alarmUp">I'm up</button><button id="alarmSnooze">Snooze 9 min</button></div></div>
       <div id="tapStart"><div><span data-ic="sparkle"></span>Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
     </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
@@ -650,6 +656,10 @@ async function send() {
   if (S.busy) { stop(); return; }
   const text = $("#input").value.trim(); const photos = S.attachments.slice();
   if (!text && !photos.length) return;
+  if (AVATAR_MODE && ALARM.ringing && ALARM_WORDS.test(text)) {     // "I'm up", "snooze": answers the alarm, not a chat
+    $("#input").value = ""; autosize(); return alarmAnswer(/snooze|five more|5 more|later/i.test(text));
+  }
+  if (AVATAR_MODE) morningCheck();
   if (S.editing) { truncateFrom(S.editing); S.editing = null; }
   $("#input").value = ""; autosize(); S.attachments = []; renderAtts();
   let convId = S.current;
@@ -1048,7 +1058,7 @@ async function openTasks() {
   const fmt = ms => new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const up = r.reminders.filter(x => !x.done);
   const d = dialog(`<h2>${icon("alarm")}Reminders & lists</h2>
-    <div class="list">${up.map(x => `<div class="row"><div class="t">${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
+    <div class="list">${up.map(x => `<div class="row"><div class="t">${x.alarm ? icon("alarm") : ""}${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}${x.alarm ? ` · wake-up alarm (${esc(NAME())} rings it on her screen)` : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
     <div style="display:flex;gap:8px;margin-top:8px"><input id="rt" placeholder="New reminder"><input id="rw" type="datetime-local" style="max-width:220px"><button id="radd">Add</button></div>
     ${Object.entries(l.lists).map(([name, items]) => `<h3 class="hud" style="margin-top:16px">${esc(name)} <button class="ghost" data-clear="${esc(name)}">Clear ticked</button></h3>
       <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">${icon("trash", "solo")}</button></div>`).join("")}</div>
@@ -1866,13 +1876,99 @@ async function pollAvatarEvents() {
         const fresh = !document.hidden && (!r.now || !ev.ts || r.now - ev.ts < 25);
         if (AV.cfg.speak && ev.text && fresh && speaksFor(ev)) { SPEAK.cancel(); SPEAK.say(ev.text); }
       } else if (ev.state === "idle") { AV.remote = null; }
-      else { AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
+      else if (ev.state === "gesture") { AV.avatar && AV.avatar.queue && AV.avatar.queue(ev.text); }
+      else { if (ev.state === "listening" || ev.state === "thinking") morningCheck();
+        AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
         if (ev.state === "listening") avatarCaption("…", "you"); }
     }
   } catch {}
 }
+// ---- wake-ups: her wake-up animation (the jumpscare) when the screen opens (avatar.js), when it comes back after
+// 5+ minutes asleep or in the background, and on the first chat of the morning (4 am to noon), once a day per screen
+const WOKE = { hiddenAt: 0 };
+function localDay() { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; }
+function isMorning() { const h = new Date().getHours(); return h >= 4 && h < 12; }
+function avatarWake() {
+  if (!AV.avatar || !AV.avatar.queue) return;
+  if (isMorning()) store.set("avatarMorning", localDay());
+  AV.avatar.queue("wake");
+}
+function morningCheck() { if (AVATAR_MODE && isMorning() && store.get("avatarMorning", "") !== localDay()) avatarWake(); }
+document.addEventListener("visibilitychange", () => {
+  if (!AVATAR_MODE) return;
+  if (document.hidden) WOKE.hiddenAt = Date.now();
+  else if (WOKE.hiddenAt && Date.now() - WOKE.hiddenAt > 5 * 60_000) { WOKE.hiddenAt = 0; avatarWake(); }
+  else WOKE.hiddenAt = 0;
+});
+
+// ---- Stella's wake-up alarms (set_wake_alarm): she rings them herself on every avatar screen with a beeping tone,
+// her wake-up animation and her voice, until you tap "I'm up" or "Snooze" (or say it). They also ring on the
+// phones as reminders, so you're woken even with no screen on. An alarm missed by more than 30 minutes is skipped.
+const ALARM = { ringing: null, beep: 0, check: 0, talk: 0, scare: 0, stopAt: 0, answered: new Set() };
+const ALARM_WORDS = /\b(i'?m (up|awake)|i am (up|awake)|stop( the alarm)?|turn (it )?off|snooze|five more|5 more|ok(ay)?,? i'?m)\b/i;
+async function checkAlarms() {
+  if (!AVATAR_MODE || !KEY) return;
+  let r; try { r = await api("/reminders"); } catch { return; }
+  const now = r.now || Date.now(), list = r.reminders || [];
+  if (ALARM.ringing) {        // answered on another screen or a phone: stop here too
+    const a = list.find(x => x.id === ALARM.ringing.id);
+    if (!a || a.done || a.due_at !== ALARM.ringing.due_at) alarmStop();
+    return;
+  }
+  const due = list.find(x => x.alarm && !x.done && x.due_at <= now && now - x.due_at < 30 * 60_000 && !ALARM.answered.has(x.id + ":" + x.due_at));
+  if (due) alarmRing(due);
+}
+function alarmBeep() {
+  if (SPEAK.speaking) return;                      // quiet while she talks
+  const ctx = SPEAK.audio(); if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+  const t0 = ctx.currentTime;
+  for (const [at, f] of [[0, 880], [0.18, 880], [0.36, 1175]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "square"; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t0 + at);
+    g.gain.exponentialRampToValueAtTime(0.18, t0 + at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.14);
+    o.connect(g); g.connect(ctx.destination); o.start(t0 + at); o.stop(t0 + at + 0.16);
+  }
+}
+function alarmSay() {
+  const a = ALARM.ringing; if (!a) return;
+  const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const extra = a.text && !/^wake up$/i.test(a.text) ? ` ${a.text}.` : "";
+  const line = `Wake up! It's ${time}.${extra}`;
+  avatarCaption(line, "stella");
+  if (AV.cfg && AV.cfg.speak !== false) { SPEAK.enabled = true; SPEAK.say(line); }
+}
+function alarmRing(a) {
+  ALARM.ringing = a; ALARM.stopAt = Date.now() + 15 * 60_000;
+  $("#alarmTime").textContent = new Date(a.due_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("#alarmWhat").textContent = a.text || "Wake up";
+  $("#alarm").classList.add("on");
+  if (AV.avatar && AV.avatar.queue) AV.avatar.queue("wake");
+  alarmSay();
+  ALARM.beep = setInterval(alarmBeep, 1100);
+  ALARM.talk = setInterval(alarmSay, 45_000);
+  ALARM.scare = setInterval(() => AV.avatar && AV.avatar.queue && AV.avatar.queue("wake"), 90_000);
+  ALARM.check = setInterval(() => { if (Date.now() > ALARM.stopAt) alarmStop(); else checkAlarms(); }, 5000);
+}
+function alarmStop() {
+  const a = ALARM.ringing; if (!a) return;
+  ALARM.answered.add(a.id + ":" + a.due_at); ALARM.ringing = null;
+  for (const k of ["beep", "talk", "scare", "check"]) { clearInterval(ALARM[k]); ALARM[k] = 0; }
+  $("#alarm").classList.remove("on"); SPEAK.cancel();
+}
+async function alarmAnswer(snooze) {
+  const a = ALARM.ringing; if (!a) return;
+  alarmStop();
+  try { await api("/reminders/" + a.id, { method: "POST", json: snooze ? { snooze_minutes: 9 } : { done: true } }); } catch {}
+  const line = snooze ? "Okay, nine more minutes." : ["Good morning!", "Morning, sleepyhead!", "Rise and shine!"][Math.floor(Math.random() * 3)];
+  avatarCaption(line, "stella"); if (AV.cfg && AV.cfg.speak !== false) SPEAK.say(line);
+  if (!snooze && AV.avatar && AV.avatar.queue) AV.avatar.queue("greeting");
+}
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
-const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["quiet", "After a long quiet"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"], ["off", "Off"]];
+const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (long quiet)"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"],
+  ["dance", "When asked to dance"], ["off", "Off"]];
+const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
+  .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {
   const c = AV.cfg;
   const anims = c.animations || [];
@@ -1888,7 +1984,7 @@ function openAvatarSettings() {
       <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
       <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
       <p class="sub" style="margin-top:8px">${icon("folder")}<b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
-      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
+      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@wake</code>, <code>@greeting</code>, <code>@farewell</code>, <code>@quiet</code>, <code>@happy</code> or <code>@dance</code> to a file name to choose when it plays; join several with <code>+</code>). Every screen picks up new, changed and deleted files within seconds.</p></div>
     <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
     <label class="sub" style="display:block;margin-top:10px">Camera</label>
@@ -1904,11 +2000,11 @@ function openAvatarSettings() {
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
     <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
-      <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <select data-when="${a.id}" style="width:auto">${whenOptions(a.when)}</select>
       <button class="ghost" data-play="${a.id}" title="Play">${icon("play", "solo")}</button><button class="ghost" data-adel="${a.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("")
       || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
-      <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <select id="anWhen" style="width:auto">${WHEN.filter(w => w[0] !== "off").map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
       <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
     <h3 class="hud" style="margin-top:16px">Voice</h3>
     <select id="eng" style="margin-bottom:6px"><option value="piper" ${c.engine !== "kokoro" ? "selected" : ""}>Piper: fast, works everywhere</option>
@@ -2026,6 +2122,9 @@ async function startAvatarScreen() {
     $("#tapStart").onclick = go; document.addEventListener("keydown", go, { once: true });
   }
   setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
+  $("#alarmUp").onclick = () => alarmAnswer(false); $("#alarmSnooze").onclick = () => alarmAnswer(true);
+  if (isMorning()) store.set("avatarMorning", localDay());      // opening the screen in the morning was the wake-up
+  setInterval(checkAlarms, 20_000); setTimeout(checkAlarms, 3000);
   (function loop() {
     if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); if (!MIC.rec) { const v = SPEAK.visemes(); if (v) AV.avatar.setVisemes(v); } updateAvatarState(); }
     requestAnimationFrame(loop);

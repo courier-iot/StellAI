@@ -922,6 +922,11 @@ fi
 
 # Hub: phone speech-to-text, chat sync between devices, and Stella's server tools
 install_companion stellai_hub.py "$LLM_DIR/stellai_hub.py"
+# Stella's own character and animations: the hub copies them into the avatar bin on its first start (from here when
+# setup runs from a copy of the repo, otherwise it downloads them from GitHub itself)
+if [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/avatar_defaults" && ! "$SCRIPT_DIR/avatar_defaults" -ef "$LLM_DIR/avatar_defaults" ]]; then
+  rm -rf "$LLM_DIR/avatar_defaults" && cp -r "$SCRIPT_DIR/avatar_defaults" "$LLM_DIR/avatar_defaults"
+fi
 rm -f "$LLM_DIR/voice_bridge.py" "$LLM_DIR/laptop_hub.py"   # older versions
 
 # 4. Download the model (big models come in several parts) ----------------------

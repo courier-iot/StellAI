@@ -22,10 +22,17 @@ COMPACT_TOOLS = {
     "project_note": ("Save a note (decision, spec, pinout, TODO) to this chat's project.", {"note": "one or two sentences"}),
     "project_search": ("Search this project's files.", {"query": "keywords, e.g. ADC reference voltage"}),
     "library_search": ("Search the user's document library (any chat).", {"query": "plain words"}),
-    "set_reminder": ("Reminder that rings on all the user's phones. (Wake-up alarms: set_alarm.)",
+    "set_reminder": ("Reminder that rings on all the user's phones. (Wake-ups: set_wake_alarm.)",
                      {"text": "short, e.g. Reflow the board",
                       "when": "ISO 8601 with the user's UTC offset, e.g. 2026-11-04T17:00:00-06:00",
                       "repeat": "none, daily, weekdays, weekly or monthly"}),
+    "set_wake_alarm": ("Wake-up alarm Stella rings herself (avatar screens + phones). For 'wake me up at 7'; "
+                       "set_alarm only for the phone's clock app.",
+                       {"when": "ISO 8601 with the user's UTC offset", "label": "optional note",
+                        "repeat": "none, daily, weekdays, weekly or monthly"}),
+    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, "
+                       "Wave, Blow a kiss, Hip sway, Bounce, Stretch) or a moment (dance, wake, greeting, farewell).",
+                       {"animation": "name or moment"}),
     "list_reminders": ("List upcoming reminders.", {}),
     "cancel_reminder": ("Cancel a reminder.", {"reminder": "id or words"}),
     "add_to_list": ("Add items to a named list (shopping, parts, to-do…); created as needed.",

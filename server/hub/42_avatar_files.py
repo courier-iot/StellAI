@@ -1,10 +1,21 @@
 # Part of stellai_hub.py: build_hub.py joins server/hub/*.py in order into one file (one shared namespace).
 # ---- The avatar "bin": one shared folder on the server with every character and animation.
 #   bin/characters/*.vrm               characters (the newest is used unless you pick one)
-#   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy)
+#   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy,
+#                                      kiss, dance, farewell, wake); "name@greeting+farewell.vrma" plays at both
 # Drop files in (file manager, network share, scp) or upload them on any avatar screen. Every screen checks the
 # bin's revision about once a second and loads what's new; deleted files disappear from every screen.
-ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "off")
+ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "off")
+_WHEN_RX = "|".join(w for w in ANIM_WHEN)
+
+
+def valid_when(when):
+    """One moment ("dance") or several joined with + ("greeting+farewell"); "off" only on its own."""
+    parts = str(when or "").lower().split("+")
+    if parts == ["off"]:
+        return "off"
+    parts = [p for p in dict.fromkeys(parts) if p in ANIM_WHEN and p != "off"]
+    return "+".join(parts) if parts else ""
 BIN_NAME = re.compile(r"[^/\\\x00]{1,120}")
 _REV_CACHE = {"t": 0.0, "rev": ""}
 
@@ -58,8 +69,8 @@ def list_animations():
     meta, out = _anim_meta(), []
     for n, v, size in _bin_files("animations", (".vrma", ".fbx")):
         base, ext = os.path.splitext(n)
-        m = re.fullmatch(r"(.*?)@(idle|greeting|quiet|happy|kiss|dance|off)", base, re.I)
-        when = (meta.get(n) or {}).get("when") or (m.group(2).lower() if m else "idle")
+        m = re.fullmatch(rf"(.*?)@((?:{_WHEN_RX})(?:\+(?:{_WHEN_RX}))*)", base, re.I)
+        when = valid_when((meta.get(n) or {}).get("when")) or (valid_when(m.group(2)) if m else "") or "idle"
         out.append({"id": _anim_id(n, v, size), "file": n, "type": ext[1:].lower(), "v": v,
                     "name": (m.group(1) if m else base).replace("_", " ").strip() or base, "when": when})
     return sorted(out, key=lambda a: a["name"].lower())
@@ -254,7 +265,7 @@ def add_animation(data, name, when, ext):
     with open(os.path.join(folder, fname), "wb") as f:
         f.write(data)
     meta = _anim_meta()
-    meta[fname] = {"when": when if when in ANIM_WHEN else "idle"}
+    meta[fname] = {"when": valid_when(when) or "idle"}
     _save_anim_meta(meta)
     _REV_CACHE["t"] = 0
     return list_animations()
@@ -271,8 +282,8 @@ def update_animation(aid, change):
             except OSError:
                 pass
             meta.pop(a["file"], None)
-        elif change.get("when") in ANIM_WHEN:
-            meta.setdefault(a["file"], {})["when"] = change["when"]
+        elif valid_when(change.get("when")):
+            meta.setdefault(a["file"], {})["when"] = valid_when(change["when"])
         _save_anim_meta(meta)
         _REV_CACHE["t"] = 0
         return list_animations()
@@ -303,6 +314,123 @@ def migrate_avatar_files():
             _save_anim_meta(new_meta)
     except OSError as e:
         log(f"avatar: couldn't move old files into the bin: {e}")
+
+
+# ---- Stella's own character and animations, shipped with StellAI ----------------------------------------
+# They live in the repo (server/avatar_defaults/) and in the Windows app. Each server copies them into its bin once:
+# from a local copy when there is one, otherwise downloaded from GitHub. A file you delete stays deleted, and a file
+# you replaced (same name, different contents) is left alone. When a newer version ships, an untouched copy is
+# swapped for it. The first time Stella arrives she becomes the character on every screen.
+DEFAULT_AVATAR = {   # bin path -> sha256 of the shipped file (tests check these match server/avatar_defaults)
+    "characters/Stella.vrm": "d48851d4af1d21ae0ddd00ec42be72dbbbaf2e8484452ec9eb88bca6444343b1",
+    "animations/Peace@greeting+farewell.vrma": "6f66b6b5c0214a7b825498050380ea43a3f782b5ea24ce46f7096acf15866d75",
+    "animations/Twirl@dance.vrma": "f45abc44800c647fa106537a2e31a84cb83b74cf3dd8a0ee71c6915f1555ac57",
+    "animations/Pull_the_trigger@quiet.vrma": "c40c1a7b0dbcac5aa9582f45498474255e4b0ca5642a71ffaf43878c27bedf70",
+    "animations/Jumpscare@wake.vrma": "6322bbe2df7716529dd53e2a61816e67b946416d3761c672b8d50ee2829825bb",
+}
+DEFAULT_AVATAR_REPO = "courier-iot/StellAI"
+DEFAULT_CHARACTER = "Stella.vrm"
+
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _default_avatar_sources():
+    """Folders that may hold a local copy of server/avatar_defaults (repo checkout, setup folder, Windows app)."""
+    here = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0].endswith(".py") else __file__))
+    out = [os.path.join(here, "avatar_defaults"), os.path.join(os.path.dirname(here), "server", "avatar_defaults")]
+    if getattr(sys, "_MEIPASS", ""):
+        out.insert(0, os.path.join(sys._MEIPASS, "avatar_defaults"))
+    return [d for d in out if os.path.isdir(d)]
+
+
+def seed_default_avatar(repo="", fetch=None):
+    """Puts Stella's shipped character and animations into the bin (see above). Returns the files added."""
+    if not AVATAR["dir"]:
+        return []
+    state_path = _avatar_path("defaults.json")
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    first_time = not state
+    added = []
+    for rel, sha in DEFAULT_AVATAR.items():
+        dest = _avatar_path("bin", *rel.split("/"))
+        had = state.get(rel)
+        if had == sha:
+            continue                                        # already have this version (or deleted it on purpose)
+        if had:
+            # an older shipped version: update it only if it's still there and untouched
+            if not os.path.isfile(dest) or _sha256_file(dest) != had:
+                state[rel] = sha
+                continue
+        elif os.path.isfile(dest):
+            state[rel] = sha if _sha256_file(dest) == sha else "user"     # same name already there: keep theirs
+            continue
+        data = None
+        for folder in _default_avatar_sources():
+            src = os.path.join(folder, *rel.split("/")[1:]) if rel.startswith("characters/") else \
+                os.path.join(folder, *rel.split("/"))
+            if os.path.isfile(src) and _sha256_file(src) == sha:
+                with open(src, "rb") as f:
+                    data = f.read()
+                break
+        if data is None:
+            url = (f"{RAW_BASE}/{repo or DEFAULT_AVATAR_REPO}/HEAD/server/avatar_defaults/"
+                   + "/".join(urllib.parse.quote(x) for x in rel.split("/")[1 if rel.startswith("characters/") else 0:]))
+            try:
+                data = (fetch or _fetch)(url, "", 300)
+            except Exception as e:      # offline, GitHub down: try again next start
+                log(f"avatar: couldn't download Stella's {rel.split('/')[-1]}: {e}")
+                continue
+            import hashlib
+            if hashlib.sha256(data).hexdigest() != sha:
+                log(f"avatar: the downloaded {rel.split('/')[-1]} didn't match; skipped")
+                continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest + ".part", "wb") as f:
+            f.write(data)
+        os.replace(dest + ".part", dest)
+        state[rel] = sha
+        added.append(rel)
+    os.makedirs(AVATAR["dir"], exist_ok=True)
+    with open(state_path + ".part", "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(state_path + ".part", state_path)
+    if "characters/" + DEFAULT_CHARACTER in added and (first_time or not state.get("chosen")):
+        # Stella arrives: she becomes the character, shown in 3D
+        try:
+            with open(_avatar_path("config.json")) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            cfg = {}
+        cfg.update(character=DEFAULT_CHARACTER, style="vrm")
+        with open(_avatar_path("config.json.part"), "w") as f:
+            json.dump(cfg, f, indent=1)
+        os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
+        state["chosen"] = True
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=1)
+    if added:
+        _REV_CACHE["t"] = 0
+        log("avatar: added Stella's " + ", ".join(r.split("/")[-1] for r in added))
+    return added
+
+
+def _safe_seed(repo):
+    try:
+        seed_default_avatar(repo)
+    except Exception as e:        # never stops the hub from starting
+        log(f"avatar: couldn't add Stella's default files: {e}")
 
 
 AVATAR_JS = EMBED("avatar.js")  # end of avatar script  (build_hub.py puts avatar.js here)

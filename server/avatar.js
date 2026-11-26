@@ -74,6 +74,7 @@ export function createAvatar(host, opts = {}) {
     setAnimations(list) { o.animations = list || []; call("setAnimations", o.animations); },
     play(what) { return call("play", what); },
     trigger(tag) { call("trigger", tag); },
+    queue(what) { return call("queue", what); },
     react(text) { call("react", text); },
     fps() { return impl && impl.fps ? impl.fps() : 0; },
     destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; stage.destroy(); host.innerHTML = ""; },
@@ -457,7 +458,9 @@ async function createVRM(host, url, o) {
     const sh = bones[sd + "UpperArm"].getWorldPosition(new V3());
     const spot = n => n === "lips" ? head.clone().add(new V3(sx * 0.03 * k, -0.06 * k, 0.13 * k))
       : n === "front" ? sh.clone().add(new V3(sx * 0.1 * k, 0.12 * k, 0.48 * k))
-      : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k)) : head.clone();
+      : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k))
+      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.045 * k, -0.07 * k, 0.15 * k))
+      : head.clone();
     const T = spot(spec.at);
     if (spec.to) T.lerp(spot(spec.to), spec.mix || 0);
     return T;
@@ -597,11 +600,11 @@ async function createVRM(host, url, o) {
   let visemes = null, visemesAt = 0; const vshape = {};
   let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
   let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
-  const sm = { lean: 0, tilt: 0, nod: 0 };
+  const sm = { lean: 0, tilt: 0, nod: 0, stance: 0, shift: 0, side: Math.random() < 0.5 ? 1 : -1, switchAt: 6 };
   const emo = { happy: 0, sad: 0, surprised: 0, relaxed: 0 };
   function candidates(tag) {
     const out = [];
-    for (const [id, c] of clips) if (c.when === tag) out.push({ kind: "clip", id, name: c.name, clip: c.clip });
+    for (const [id, c] of clips) if (String(c.when || "").split("+").includes(tag)) out.push({ kind: "clip", id, name: c.name, clip: c.clip });
     if (o.gestures !== false) for (const [name, g] of Object.entries(GESTURES)) if (g.tags.includes(tag)) out.push({ kind: "gesture", name, g });
     // uploaded animations are preferred when there are any for this moment
     const up = out.filter(x => x.kind === "clip");
@@ -621,15 +624,25 @@ async function createVRM(host, url, o) {
     if (now) { if (anim.action) anim.action.stop(); anim = null; } else anim.out = true;
   }
   let pending = null;   // a gesture to play as soon as she's finished talking
+  const WAITS = ["kiss", "dance", "wake", "greeting", "farewell"];     // moments worth waiting for
   function trigger(tag) {
-    if (state !== "idle" && tag !== "happy") { if (tag === "kiss" || tag === "dance") pending = tag; return; }
-    const list = candidates(tag);
-    if (list.length) start(list[Math.floor(Math.random() * list.length)]);
+    if (state !== "idle" && tag !== "happy") { if (WAITS.includes(tag)) pending = tag; return false; }
+    let list = candidates(tag);
+    if (!list.length && tag === "wake") list = candidates("greeting");   // no wake-up animation: a hello instead
+    return list.length ? start(list[Math.floor(Math.random() * list.length)]) : false;
   }
   function play(what) {
     for (const [id, c] of clips) if (id === what || c.name === what) return start({ kind: "clip", id, name: c.name, clip: c.clip });
     if (GESTURES[what]) return start({ kind: "gesture", name: what, g: GESTURES[what] });
+    const low = String(what || "").toLowerCase();       // forgiving: "twirl", "peace sign", "jump scare"
+    for (const [id, c] of clips) { const n = c.name.toLowerCase();
+      if (n.replace(/\s+/g, "") === low.replace(/\s+/g, "") || (low.length > 3 && (n.includes(low) || low.includes(n)))) return start({ kind: "clip", id, name: c.name, clip: c.clip }); }
     return false;
+  }
+  // An animation by name or a moment ("wake", "dance"), now if she's free, otherwise once she's finished talking
+  function queue(what) {
+    if (state === "idle" && !anim) return play(what) || trigger(what);
+    pending = what; return true;
   }
   function react(text) {
     const s = String(text || "").toLowerCase();
@@ -640,7 +653,44 @@ async function createVRM(host, url, o) {
     if (e) { emotion = e; emotionUntil = t + 3.5; }
     if (/\b(love you|good ?night|sweet dreams|kisses?|xoxo|mwah)\b|💋|😘|😚/.test(s)) pending = "kiss";
     else if (/\b(danc(e|es|ing)|let'?s groove|💃)/.test(s) || /💃/.test(s)) pending = "dance";
+    else if (/(^|[\s"“])boo+!/.test(s)) pending = "wake";
+    else if (/\b(good ?bye|bye( for now)?|see (you|ya)( later| soon| tomorrow)?|talk (to you )?(soon|later)|catch you later|take care)\b/.test(s)) pending = "farewell";
+    else if (/^\W*(hi|hello|hey|hiya|howdy|good (morning|afternoon|evening)|welcome back)\b/.test(s)) pending = "greeting";
     else if (e === "happy" && Math.random() < 0.35) setTimeout(() => trigger("happy"), 400);
+  }
+
+  // Her resting stance (shy and cute): hands loosely clasped in front, toes turned a little in, shoulders up a touch,
+  // head tipped down and to one side. Her weight rests on one hip and moves to the other every 12-25 s: that hip
+  // goes out, the other knee softens, and her spine leans back the other way (a gentle S-curve). She eases out of the
+  // stance whenever a gesture or animation plays, and back into it afterwards.
+  // Directions checked against the standing frames of her shipped .vrma clips (motion-captured): arms down at about
+  // -1.28 / +1.25 rad on z, a soft knee is upper leg -x with lower leg +x, foot +y turns the toes toward her left.
+  function standShy(dt) {
+    sm.stance = lerp(sm.stance, anim ? 0 : 1, 1 - Math.exp(-dt * (anim ? 8 : 2.5)));
+    if (t > sm.switchAt) { sm.side = -sm.side; sm.switchAt = t + 12 + Math.random() * 13; }
+    sm.shift = lerp(sm.shift, sm.side, 1 - Math.exp(-dt * 1.6));     // ~1.5 s to move her weight across
+    const e = sm.stance; if (e < 0.01) return;
+    const shift = sm.shift * e;                                    // + = weight on her left
+    const tilt = 0.07 * shift, twist = 0.035 * shift;
+    const slide = Math.asin(clamp(0.03 * shift / 0.8, -0.2, 0.2));
+    const bentL = Math.max(0, -shift), bentR = Math.max(0, shift);   // the leg without the weight bends
+    const tin = 0.16 * e * rightSign;                                  // toes in
+    P("hips", 0, twist, tilt);
+    if (bones.hips) bones.hips.position.x += -rightSign * 0.03 * shift / vrm.scene.scale.x;
+    if (bones.hips) bones.hips.position.y -= 0.006 * e / vrm.scene.scale.y;
+    P("leftUpperLeg", -0.07 * bentL, 0.4 * tin, -tilt - slide); P("rightUpperLeg", -0.07 * bentR, -0.4 * tin, -tilt - slide);
+    P("leftLowerLeg", 0.17 * bentL, 0, 0); P("rightLowerLeg", 0.17 * bentR, 0, 0);
+    P("leftFoot", -0.1 * bentL, tin, 0); P("rightFoot", -0.1 * bentR, -tin, 0);
+    P("spine", 0.02 * e, -0.5 * twist, -0.6 * tilt); P(bones.chest ? "chest" : "upperChest", 0.01 * e, -0.25 * twist, -0.3 * tilt);
+    P("leftShoulder", 0, 0, 0.05 * e * A); P("rightShoulder", 0, 0, -0.05 * e * A);
+    P("neck", 0.03 * e, 0, -0.2 * tilt + 0.05 * e); P("head", 0.05 * e, -0.03 * e, 0.07 * e);
+    const k = (o.height || 172.7) / 170;
+    for (const sd of ["left", "right"]) {
+      const S = bones[sd + "UpperArm"]; if (!S) continue;
+      const sx = sd === "right" ? rightSign : -rightSign;
+      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.35 * k, -0.25 * k, -0.15 * k));   // elbows out and back
+      reach(sd, ikTargets({ at: "clasp" }, sd), pole, e);
+    }
   }
 
   const qProc = {}; for (const n in bones) qProc[n] = new THREE.Quaternion();
@@ -654,7 +704,7 @@ async function createVRM(host, url, o) {
     if (state !== "idle") { lastActive = t; quietDone = false; if (anim && anim.kind === "clip" ? true : anim && !(anim.name === "Bounce" || anim.name === "Head tilt")) stopAnim(false); }
 
     // scheduler: an idle animation every 20–60 s; a stretch after 10 quiet minutes
-    if (state === "idle" && !anim && pending) { const tg = pending; pending = null; trigger(tg); lastActive = t; }
+    if (state === "idle" && !anim && pending) { const tg = pending; pending = null; play(tg) || trigger(tg); lastActive = t; }
     if (state === "idle" && !anim) {
       if (!quietDone && t - lastActive > 600) { quietDone = true; trigger("quiet"); }
       else if (t - lastActive > nextIdleAt) { trigger("idle"); lastActive = t; nextIdleAt = 20 + Math.random() * 40; }
@@ -671,6 +721,7 @@ async function createVRM(host, url, o) {
     P("head", sm.nod, 0, 0);
     const sway = Math.sin(t * 0.9) * 0.03;
     P("leftUpperArm", 0, 0, sway * A); P("rightUpperArm", 0, 0, -sway * A);
+    standShy(dt);
 
     // 2. a built-in gesture adds on top; an uploaded clip blends in and out
     let extra = {}, look = 0;
@@ -750,8 +801,10 @@ async function createVRM(host, url, o) {
     renderer.render(scene, cam);
   }
   raf = requestAnimationFrame(frame);
-  setTimeout(() => trigger("greeting"), 1200);    // a little wave when the screen opens
-  setAnimations(o.animations);
+  // the screen opens: her wake-up animation (or a little wave), once her animations have loaded (at most 8 s)
+  const loaded = setAnimations(o.animations);
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  Promise.race([Promise.all([loaded, pause(1200)]), pause(8000)]).then(() => { if (raf) trigger("wake"); });
   setNeon(o.neon);
   return {
     setState(s) { state = s; },
@@ -760,10 +813,10 @@ async function createVRM(host, url, o) {
     setCamera: m => setCamera(m),
     setHeight,
     setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); cssGlow(); },
-    setNeon, setAnimations, play, trigger, react,
+    setNeon, setAnimations, play, trigger, react, queue,
     fps: () => fps,
     destroy() {
-      cancelAnimationFrame(raf); ro.disconnect(); mixer.stopAllAction();
+      cancelAnimationFrame(raf); raf = 0; ro.disconnect(); mixer.stopAllAction();
       try { VRMUtils.deepDispose && VRMUtils.deepDispose(vrm.scene); } catch {}
       renderer.dispose(); renderer.domElement.remove();
     },

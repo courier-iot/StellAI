@@ -164,6 +164,9 @@ class TaskStoreMixin:
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS list_name ON list_items(list);
         """)
+        if "alarm" not in {r[1] for r in self.db.execute("PRAGMA table_info(reminders)")}:
+            # 1 = a wake-up alarm Stella rings herself on her avatar screens (phones ring it as a reminder too)
+            self.db.execute("ALTER TABLE reminders ADD COLUMN alarm INTEGER NOT NULL DEFAULT 0")
 
     def reminders(self, include_done_days=3):
         now = int(time.time() * 1000)
@@ -177,12 +180,12 @@ class TaskStoreMixin:
             self.db.execute("DELETE FROM reminders WHERE done=1 AND updated_at < ?", (now - 30 * 86400_000,))
             self.db.commit()
             rows = self.db.execute(
-                "SELECT id, text, due_at, repeat, done, updated_at FROM reminders WHERE done=0 OR updated_at > ? "
+                "SELECT id, text, due_at, repeat, done, updated_at, alarm FROM reminders WHERE done=0 OR updated_at > ? "
                 "ORDER BY due_at", (now - include_done_days * 86400_000,)).fetchall()
-        return [{"id": r[0], "text": r[1], "due_at": r[2], "repeat": r[3], "done": bool(r[4]), "updated_at": r[5]}
-                for r in rows]
+        return [{"id": r[0], "text": r[1], "due_at": r[2], "repeat": r[3], "done": bool(r[4]), "updated_at": r[5],
+                 "alarm": bool(r[6])} for r in rows]
 
-    def add_reminder(self, text, due_at, repeat="none"):
+    def add_reminder(self, text, due_at, repeat="none", alarm=False):
         text = " ".join(str(text).split())[:300]
         if not text:
             raise ValueError("what should the reminder say?")
@@ -194,9 +197,11 @@ class TaskStoreMixin:
             due_at = _next_due(due_at, repeat, now)
         rid = uuid.uuid4().hex[:10]
         with self.lock:
-            self.db.execute("INSERT INTO reminders VALUES(?,?,?,?,?,?,?)", (rid, text, int(due_at), repeat, 0, now, now))
+            self.db.execute("INSERT INTO reminders(id, text, due_at, repeat, done, created_at, updated_at, alarm) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (rid, text, int(due_at), repeat, 0, now, now, 1 if alarm else 0))
             self.db.commit()
-        return {"id": rid, "text": text, "due_at": int(due_at), "repeat": repeat, "done": False, "updated_at": now}
+        return {"id": rid, "text": text, "due_at": int(due_at), "repeat": repeat, "done": False, "updated_at": now,
+                "alarm": bool(alarm)}
 
     def update_reminder(self, rid, done=None, snooze_minutes=None, cancel=False):
         now = int(time.time() * 1000)
@@ -2318,6 +2323,7 @@ TOOL_GROUPS = {
     "pcb": ["pcb_project", "pcb_check", "pcb_circuit", "pcb_library", "pcb_step"],
     "move": ["move_stella"],
     "code": ["run_python"],
+    "avatar": ["set_wake_alarm", "avatar_gesture"],
 }
 TOOL_TRIGGERS = {
     "code": re.compile(r"\b(python|script|run (this|the|it|my) code|test (this|the|my) (code|function)|plot|graph|"
@@ -2329,6 +2335,9 @@ TOOL_TRIGGERS = {
     "electronics": re.compile(r"resist|volt|ohm|\bleds?\b|circuit|schemat|diagram|flow ?chart|capacit|filter|divider|"
                               r"current|\bamps?\b|watt|pcb|timing|waveform|state machine|e12|e24|e96|draw|sketch|"
                               r"inductor|transistor|mosfet|op.?amp|\bmah\b|frequency|\bhz\b", re.I),
+    "avatar": re.compile(r"\bwake me|\balarm|\bwake[- ]?up\b|\bscare me|\bboo\b|jump ?scare|\btwirl|\bspin\b|"
+                         r"\bdance|\bpeace sign|finger ?guns?|pull the trigger|\bwave\b|blow (me )?a kiss|"
+                         r"\banimation|\bgesture|\bavatar", re.I),
     "lists": re.compile(r"remind|\blists?\b|shopping|check(ed)? off|tick|cancel|to.?do|groceries|forget|"
                         r"don'?t remember|wrong about", re.I),
     "github": re.compile(r"github|\brepo|commit|branch|pull request|\bpr\b|actions|\bbuild|workflow|\bissues?\b|"
@@ -3214,6 +3223,30 @@ def tool_set_reminder(args):
             "note": "It will ring on all the user's phones."}, f"Reminder set for {_fmt_time(r['due_at'])}{rep}: {r['text']}"
 
 
+def tool_set_wake_alarm(args):
+    due = _parse_when(args.get("when", ""))
+    label = " ".join(str(args.get("label") or "").split())[:120] or "Wake up"
+    r = CHATS.add_reminder(label, due, str(args.get("repeat") or "none"), alarm=True)
+    rep = "" if r["repeat"] == "none" else f", repeats {r['repeat']}"
+    return {"id": r["id"], "label": r["text"], "rings": _fmt_time(r["due_at"]), "repeat": r["repeat"],
+            "note": "Stella rings it herself on her avatar screens (beeping, her voice and her wake-up animation) "
+                    "until they tap I'm up or Snooze; it also rings on all their phones as a reminder."}, \
+        f"Wake-up alarm set for {_fmt_time(r['due_at'])}{rep}"
+
+
+BUILTIN_GESTURES = ("Wave", "Blow a kiss", "Hip sway", "Bounce", "Head tilt", "Look around", "Stretch")   # avatar.js
+
+
+def tool_avatar_gesture(args):
+    what = " ".join(str(args.get("animation") or "").split())[:60]
+    if not what:
+        raise ValueError("which animation? e.g. Twirl, Peace, Jumpscare, Wave, Blow a kiss, or a moment like dance")
+    names = [a["name"] for a in list_animations()] if AVATAR["dir"] else []
+    AVATAR_BUS.post({"state": "gesture", "text": what, "source": "stella", "device": "stella"})
+    return {"playing": what, "her_animations": names + list(BUILTIN_GESTURES),
+            "note": "Plays on every open avatar screen as soon as she finishes talking."}, f"Avatar: {what}"
+
+
 def tool_list_reminders(args):
     items = [r for r in CHATS.reminders(0) if not r["done"]]
     return {"reminders": [{"id": r["id"], "text": r["text"], "due": _fmt_time(r["due_at"]), "repeat": r["repeat"]}
@@ -3266,11 +3299,25 @@ def tool_check_off(args):
 SERVER_TOOLS["set_reminder"] = (tool_set_reminder, _fn(
     "set_reminder",
     "Set a reminder that rings on all the user's phones at a given time, e.g. 'remind me to reflow the board at 5'. "
-    "Use this for reminders; use set_alarm only for wake-up alarms in the phone's clock app.",
+    "Use this for reminders; for wake-ups use set_wake_alarm (or set_alarm for the phone's clock app).",
     {"text": _p("What to remind about, short, e.g. 'Reflow the board'"),
      "when": _p("Date and time in ISO 8601 with the user's UTC offset, e.g. 2026-11-04T17:00:00-06:00. Work it out "
                 "from the current date and time in your instructions."),
      "repeat": _p("none (default), daily, weekdays, weekly or monthly")}, ["text", "when"]))
+SERVER_TOOLS["set_wake_alarm"] = (tool_set_wake_alarm, _fn(
+    "set_wake_alarm",
+    "Wake-up alarm that Stella rings herself on her avatar screens (alarm tone, her voice, her jumpscare) and on all "
+    "the user's phones. Use for 'wake me up at 7'. Use set_alarm instead only when they ask for an alarm in the "
+    "phone's clock app.",
+    {"when": _p("Date and time in ISO 8601 with the user's UTC offset, e.g. 2026-11-27T07:00:00-06:00"),
+     "label": _p("Optional short note shown and read out, e.g. 'Dentist at 9'"),
+     "repeat": _p("none (default), daily, weekdays, weekly or monthly")}, ["when"]))
+SERVER_TOOLS["avatar_gesture"] = (tool_avatar_gesture, _fn(
+    "avatar_gesture",
+    "Play one of Stella's animations on her avatar screens, when the user asks her to (\"do a twirl\", \"scare me\", "
+    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Wave, Blow a kiss, Hip sway, Bounce, Stretch, "
+    "or a moment: dance, wake, greeting, farewell, happy.",
+    {"animation": _p("Animation name or moment, e.g. 'Twirl' or 'dance'")}, ["animation"]))
 SERVER_TOOLS["list_reminders"] = (tool_list_reminders, _fn(
     "list_reminders", "List the user's upcoming reminders.", {}, []))
 SERVER_TOOLS["cancel_reminder"] = (tool_cancel_reminder, _fn(
@@ -3725,10 +3772,17 @@ COMPACT_TOOLS = {
     "project_note": ("Save a note (decision, spec, pinout, TODO) to this chat's project.", {"note": "one or two sentences"}),
     "project_search": ("Search this project's files.", {"query": "keywords, e.g. ADC reference voltage"}),
     "library_search": ("Search the user's document library (any chat).", {"query": "plain words"}),
-    "set_reminder": ("Reminder that rings on all the user's phones. (Wake-up alarms: set_alarm.)",
+    "set_reminder": ("Reminder that rings on all the user's phones. (Wake-ups: set_wake_alarm.)",
                      {"text": "short, e.g. Reflow the board",
                       "when": "ISO 8601 with the user's UTC offset, e.g. 2026-11-04T17:00:00-06:00",
                       "repeat": "none, daily, weekdays, weekly or monthly"}),
+    "set_wake_alarm": ("Wake-up alarm Stella rings herself (avatar screens + phones). For 'wake me up at 7'; "
+                       "set_alarm only for the phone's clock app.",
+                       {"when": "ISO 8601 with the user's UTC offset", "label": "optional note",
+                        "repeat": "none, daily, weekdays, weekly or monthly"}),
+    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, "
+                       "Wave, Blow a kiss, Hip sway, Bounce, Stretch) or a moment (dance, wake, greeting, farewell).",
+                       {"animation": "name or moment"}),
     "list_reminders": ("List upcoming reminders.", {}),
     "cancel_reminder": ("Cancel a reminder.", {"reminder": "id or words"}),
     "add_to_list": ("Add items to a named list (shopping, parts, to-do…); created as needed.",
@@ -4042,7 +4096,7 @@ def backup_now():
                             full = os.path.join(root, f)
                             z.write(full, os.path.join(label, os.path.relpath(full, path)))
                 # the avatar's settings, character and animations (not its downloads)
-                for f in ["config.json", "animations.json"] + (
+                for f in ["config.json", "animations.json", "defaults.json"] + (
                         ["bin/characters/" + c["file"] for c in list_characters()] +
                         ["bin/animations/" + a["file"] for a in list_animations()] if AVATAR["dir"] else []):
                     if AVATAR["dir"] and os.path.isfile(_avatar_path(*f.split("/"))):
@@ -5027,9 +5081,9 @@ INSTRUCTION_LINES = [   # (which apps, line)
     ("all", "Use the calculate/electronics tools for any maths. Use render_diagram when a picture helps (it shows "
             "automatically; if it fails, fix it and retry once)."),
     ("all", "Describe photos only from what you actually see."),
-    ("phone", "Save lasting facts with remember. Reminders: set_reminder (rings on all their phones); set_alarm is only for "
-              "wake-up alarms. Lists: add_to_list. Current info: web_search then fetch_page, citing links."),
-    ("web", "Save lasting facts with remember. Reminders: set_reminder. Lists: add_to_list. Current info: web_search then "
+    ("phone", "Save lasting facts with remember. Reminders: set_reminder (rings on all their phones). Wake-ups: "
+              "set_wake_alarm (you ring it on your avatar screen); set_alarm only for the phone's clock app. Lists: add_to_list. Current info: web_search then fetch_page, citing links."),
+    ("web", "Save lasting facts with remember. Reminders: set_reminder. Wake-ups: set_wake_alarm. Lists: add_to_list. Current info: web_search then "
             "fetch_page, citing links."),
     ("all", "A user message may start with an automatic context block (time, memories, file excerpts); the user didn't "
             "write it."),
@@ -11604,6 +11658,10 @@ body[data-cap=off] #caption{display:none}
 #avState{position:absolute;top:36px;left:18px;font-family:var(--mono);font-size:12px;letter-spacing:2px;color:var(--muted)}
 #avStatus{position:absolute;top:58px;left:18px;right:18px;font-size:12px;color:var(--gold);display:none}
 #stageBar{position:absolute;top:10px;right:12px;display:flex;gap:6px;opacity:.4;transition:opacity .2s;z-index:2}#stageBar:hover{opacity:1}
+#alarm{position:absolute;left:50%;bottom:12%;transform:translateX(-50%);display:none;flex-direction:column;align-items:center;gap:10px;
+  padding:18px 26px;border-radius:18px;background:rgba(7,11,26,.88);border:1px solid var(--red);box-shadow:0 0 28px rgba(255,107,122,.45);z-index:4;text-align:center}
+#alarm.on{display:flex}#alarm .time{font-size:46px;font-weight:700;letter-spacing:2px;color:var(--red);text-shadow:0 0 16px rgba(255,107,122,.7)}
+#alarm .what{font-size:17px;max-width:70vw}#alarm .btns{display:flex;gap:10px}#alarm button{font-size:17px;padding:10px 18px}
 #tapStart{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(4,6,13,.6);font-size:22px;cursor:pointer;z-index:3}
 #mic.on{background:var(--red);border-color:var(--red);color:#fff}
 body.avatar #side,body.avatar #bar,body.avatar #docs{display:none}
@@ -11660,6 +11718,8 @@ body.inapp[data-cap=below] #avatarHost,body.inapp[data-cap=side] #avatarHost{bot
       <div id="stageBar"><button class="ghost" id="avNew" title="New chat">＋</button><button class="ghost" id="avChat" title="Show the chat"><span data-ic="chat" data-solo></span></button>
         <button class="ghost" id="avSet" title="Avatar settings"><span data-ic="settings" data-solo></span></button><button class="ghost" id="avFull" title="Full screen"><span data-ic="fullscreen" data-solo></span></button></div>
       <div id="caption"></div>
+      <div id="alarm"><div class="time" id="alarmTime"></div><div class="what" id="alarmWhat"></div>
+        <div class="btns"><button class="primary" id="alarmUp">I'm up</button><button id="alarmSnooze">Snooze 9 min</button></div></div>
       <div id="tapStart"><div><span data-ic="sparkle"></span>Tap to wake Stella</div><div class="sub">Browsers need one tap before a page can talk</div></div>
     </div>
     <div id="msgs"><div class="wrap" id="wrap"></div></div>
@@ -12134,6 +12194,10 @@ async function send() {
   if (S.busy) { stop(); return; }
   const text = $("#input").value.trim(); const photos = S.attachments.slice();
   if (!text && !photos.length) return;
+  if (AVATAR_MODE && ALARM.ringing && ALARM_WORDS.test(text)) {     // "I'm up", "snooze": answers the alarm, not a chat
+    $("#input").value = ""; autosize(); return alarmAnswer(/snooze|five more|5 more|later/i.test(text));
+  }
+  if (AVATAR_MODE) morningCheck();
   if (S.editing) { truncateFrom(S.editing); S.editing = null; }
   $("#input").value = ""; autosize(); S.attachments = []; renderAtts();
   let convId = S.current;
@@ -12532,7 +12596,7 @@ async function openTasks() {
   const fmt = ms => new Date(ms).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const up = r.reminders.filter(x => !x.done);
   const d = dialog(`<h2>${icon("alarm")}Reminders & lists</h2>
-    <div class="list">${up.map(x => `<div class="row"><div class="t">${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
+    <div class="list">${up.map(x => `<div class="row"><div class="t">${x.alarm ? icon("alarm") : ""}${esc(x.text)}<div class="sub">${fmt(x.due_at)}${x.repeat !== "none" ? " · " + x.repeat : ""}${x.alarm ? ` · wake-up alarm (${esc(NAME())} rings it on her screen)` : ""}</div></div><button class="ghost" data-cancel="${x.id}">Cancel</button></div>`).join("") || `<div class="sub">No upcoming reminders. Ask ${esc(NAME())}: “remind me to…”.</div>`}</div>
     <div style="display:flex;gap:8px;margin-top:8px"><input id="rt" placeholder="New reminder"><input id="rw" type="datetime-local" style="max-width:220px"><button id="radd">Add</button></div>
     ${Object.entries(l.lists).map(([name, items]) => `<h3 class="hud" style="margin-top:16px">${esc(name)} <button class="ghost" data-clear="${esc(name)}">Clear ticked</button></h3>
       <div class="list">${items.map(i => `<div class="row"><input type="checkbox" style="width:auto" data-tick="${i.id}" ${i.done ? "checked" : ""}><div class="t" style="${i.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(i.text)}</div><button class="ghost" data-deli="${i.id}">${icon("trash", "solo")}</button></div>`).join("")}</div>
@@ -13350,13 +13414,99 @@ async function pollAvatarEvents() {
         const fresh = !document.hidden && (!r.now || !ev.ts || r.now - ev.ts < 25);
         if (AV.cfg.speak && ev.text && fresh && speaksFor(ev)) { SPEAK.cancel(); SPEAK.say(ev.text); }
       } else if (ev.state === "idle") { AV.remote = null; }
-      else { AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
+      else if (ev.state === "gesture") { AV.avatar && AV.avatar.queue && AV.avatar.queue(ev.text); }
+      else { if (ev.state === "listening" || ev.state === "thinking") morningCheck();
+        AV.remote = ev.state; AV.remoteUntil = Date.now() + (ev.state === "thinking" ? 120000 : 15000);
         if (ev.state === "listening") avatarCaption("…", "you"); }
     }
   } catch {}
 }
+// ---- wake-ups: her wake-up animation (the jumpscare) when the screen opens (avatar.js), when it comes back after
+// 5+ minutes asleep or in the background, and on the first chat of the morning (4 am to noon), once a day per screen
+const WOKE = { hiddenAt: 0 };
+function localDay() { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; }
+function isMorning() { const h = new Date().getHours(); return h >= 4 && h < 12; }
+function avatarWake() {
+  if (!AV.avatar || !AV.avatar.queue) return;
+  if (isMorning()) store.set("avatarMorning", localDay());
+  AV.avatar.queue("wake");
+}
+function morningCheck() { if (AVATAR_MODE && isMorning() && store.get("avatarMorning", "") !== localDay()) avatarWake(); }
+document.addEventListener("visibilitychange", () => {
+  if (!AVATAR_MODE) return;
+  if (document.hidden) WOKE.hiddenAt = Date.now();
+  else if (WOKE.hiddenAt && Date.now() - WOKE.hiddenAt > 5 * 60_000) { WOKE.hiddenAt = 0; avatarWake(); }
+  else WOKE.hiddenAt = 0;
+});
+
+// ---- Stella's wake-up alarms (set_wake_alarm): she rings them herself on every avatar screen with a beeping tone,
+// her wake-up animation and her voice, until you tap "I'm up" or "Snooze" (or say it). They also ring on the
+// phones as reminders, so you're woken even with no screen on. An alarm missed by more than 30 minutes is skipped.
+const ALARM = { ringing: null, beep: 0, check: 0, talk: 0, scare: 0, stopAt: 0, answered: new Set() };
+const ALARM_WORDS = /\b(i'?m (up|awake)|i am (up|awake)|stop( the alarm)?|turn (it )?off|snooze|five more|5 more|ok(ay)?,? i'?m)\b/i;
+async function checkAlarms() {
+  if (!AVATAR_MODE || !KEY) return;
+  let r; try { r = await api("/reminders"); } catch { return; }
+  const now = r.now || Date.now(), list = r.reminders || [];
+  if (ALARM.ringing) {        // answered on another screen or a phone: stop here too
+    const a = list.find(x => x.id === ALARM.ringing.id);
+    if (!a || a.done || a.due_at !== ALARM.ringing.due_at) alarmStop();
+    return;
+  }
+  const due = list.find(x => x.alarm && !x.done && x.due_at <= now && now - x.due_at < 30 * 60_000 && !ALARM.answered.has(x.id + ":" + x.due_at));
+  if (due) alarmRing(due);
+}
+function alarmBeep() {
+  if (SPEAK.speaking) return;                      // quiet while she talks
+  const ctx = SPEAK.audio(); if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+  const t0 = ctx.currentTime;
+  for (const [at, f] of [[0, 880], [0.18, 880], [0.36, 1175]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "square"; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t0 + at);
+    g.gain.exponentialRampToValueAtTime(0.18, t0 + at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.14);
+    o.connect(g); g.connect(ctx.destination); o.start(t0 + at); o.stop(t0 + at + 0.16);
+  }
+}
+function alarmSay() {
+  const a = ALARM.ringing; if (!a) return;
+  const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const extra = a.text && !/^wake up$/i.test(a.text) ? ` ${a.text}.` : "";
+  const line = `Wake up! It's ${time}.${extra}`;
+  avatarCaption(line, "stella");
+  if (AV.cfg && AV.cfg.speak !== false) { SPEAK.enabled = true; SPEAK.say(line); }
+}
+function alarmRing(a) {
+  ALARM.ringing = a; ALARM.stopAt = Date.now() + 15 * 60_000;
+  $("#alarmTime").textContent = new Date(a.due_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("#alarmWhat").textContent = a.text || "Wake up";
+  $("#alarm").classList.add("on");
+  if (AV.avatar && AV.avatar.queue) AV.avatar.queue("wake");
+  alarmSay();
+  ALARM.beep = setInterval(alarmBeep, 1100);
+  ALARM.talk = setInterval(alarmSay, 45_000);
+  ALARM.scare = setInterval(() => AV.avatar && AV.avatar.queue && AV.avatar.queue("wake"), 90_000);
+  ALARM.check = setInterval(() => { if (Date.now() > ALARM.stopAt) alarmStop(); else checkAlarms(); }, 5000);
+}
+function alarmStop() {
+  const a = ALARM.ringing; if (!a) return;
+  ALARM.answered.add(a.id + ":" + a.due_at); ALARM.ringing = null;
+  for (const k of ["beep", "talk", "scare", "check"]) { clearInterval(ALARM[k]); ALARM[k] = 0; }
+  $("#alarm").classList.remove("on"); SPEAK.cancel();
+}
+async function alarmAnswer(snooze) {
+  const a = ALARM.ringing; if (!a) return;
+  alarmStop();
+  try { await api("/reminders/" + a.id, { method: "POST", json: snooze ? { snooze_minutes: 9 } : { done: true } }); } catch {}
+  const line = snooze ? "Okay, nine more minutes." : ["Good morning!", "Morning, sleepyhead!", "Rise and shine!"][Math.floor(Math.random() * 3)];
+  avatarCaption(line, "stella"); if (AV.cfg && AV.cfg.speak !== false) SPEAK.say(line);
+  if (!snooze && AV.avatar && AV.avatar.queue) AV.avatar.queue("greeting");
+}
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
-const WHEN = [["idle", "While idle"], ["greeting", "When the screen opens"], ["quiet", "After a long quiet"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"], ["off", "Off"]];
+const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (long quiet)"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"],
+  ["dance", "When asked to dance"], ["off", "Off"]];
+const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
+  .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {
   const c = AV.cfg;
   const anims = c.animations || [];
@@ -13372,7 +13522,7 @@ function openAvatarSettings() {
       <div style="display:flex;gap:8px;margin-top:6px"><button id="upl">${c.has_model ? "Add another character…" : "Upload character…"}</button>${c.has_model ? `<button class="ghost" id="rm">Remove this one</button>` : ""}</div>
       <input type="file" id="vrmFile" accept=".vrm" hidden><div id="uplState"></div>
       <p class="sub" style="margin-top:8px">${icon("folder")}<b>Shared folder</b> on the server: <code>${esc(c.bin || "")}</code><br>Drop <code>.vrm</code> files in <code>characters</code> and
-      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@greeting</code>, <code>@quiet</code> or <code>@happy</code> to a file name to choose when it plays). Every screen picks up new, changed and deleted files within seconds.</p></div>
+      <code>.vrma</code>/<code>.fbx</code> in <code>animations</code> (add <code>@wake</code>, <code>@greeting</code>, <code>@farewell</code>, <code>@quiet</code>, <code>@happy</code> or <code>@dance</code> to a file name to choose when it plays; join several with <code>+</code>). Every screen picks up new, changed and deleted files within seconds.</p></div>
     <label class="sub" style="display:block;margin-top:10px">Height: <b id="hv">${cmToFtIn(c.height_cm)}</b> <span id="hcm">(${(+c.height_cm).toFixed(0)} cm)</span></label>
     <input id="ht" type="range" min="140" max="200" step="0.5" value="${c.height_cm}">
     <label class="sub" style="display:block;margin-top:10px">Camera</label>
@@ -13388,11 +13538,11 @@ function openAvatarSettings() {
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ges" style="width:auto" ${c.gestures ? "checked" : ""}> Built-in gestures (wave, look around, head tilt, stretch…)</label>
     <div class="sub" style="margin:4px 0">Try: ${["Wave", "Look around", "Head tilt", "Weight shift", "Shoulder roll", "Stretch", "Bounce", "Blow a kiss", "Hip sway"].map(g => `<button class="ghost" data-try="${g}" style="padding:3px 8px;margin:2px">${g}</button>`).join("")}</div>
     <div class="list" id="animList">${anims.map(a => `<div class="row" data-id="${a.id}"><span class="t">${esc(a.name)} <span class="sub">.${a.type}</span></span>
-      <select data-when="${a.id}" style="width:auto">${WHEN.map(([v, l]) => `<option value="${v}" ${a.when === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <select data-when="${a.id}" style="width:auto">${whenOptions(a.when)}</select>
       <button class="ghost" data-play="${a.id}" title="Play">${icon("play", "solo")}</button><button class="ghost" data-adel="${a.id}" title="Delete">${icon("close", "solo")}</button></div>`).join("")
       || `<p class="sub">No uploaded animations yet. Add <b>.vrma</b> files (VRoid Hub, BOOTH) or Mixamo <b>.fbx</b> files (download "Without Skin").</p>`}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px"><button id="anUp">Add animation…</button>
-      <select id="anWhen" style="width:auto">${WHEN.slice(0, 6).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+      <select id="anWhen" style="width:auto">${WHEN.filter(w => w[0] !== "off").map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
       <input type="file" id="anFile" accept=".vrma,.fbx" multiple hidden></div><div id="anState" class="sub"></div>
     <h3 class="hud" style="margin-top:16px">Voice</h3>
     <select id="eng" style="margin-bottom:6px"><option value="piper" ${c.engine !== "kokoro" ? "selected" : ""}>Piper: fast, works everywhere</option>
@@ -13510,6 +13660,9 @@ async function startAvatarScreen() {
     $("#tapStart").onclick = go; document.addEventListener("keydown", go, { once: true });
   }
   setInterval(pollAvatarEvents, 1000); pollAvatarEvents();
+  $("#alarmUp").onclick = () => alarmAnswer(false); $("#alarmSnooze").onclick = () => alarmAnswer(true);
+  if (isMorning()) store.set("avatarMorning", localDay());      // opening the screen in the morning was the wake-up
+  setInterval(checkAlarms, 20_000); setTimeout(checkAlarms, 3000);
   (function loop() {
     if (AV.avatar) { AV.avatar.setLevel(MIC.rec ? AV.micLevel * 0.6 : SPEAK.level()); if (!MIC.rec) { const v = SPEAK.visemes(); if (v) AV.avatar.setVisemes(v); } updateAvatarState(); }
     requestAnimationFrame(loop);
@@ -14340,7 +14493,7 @@ class AvatarBus:
 
     def post(self, ev):
         state = str(ev.get("state", ""))
-        if state not in ("idle", "listening", "thinking", "talking", "reply"):
+        if state not in ("idle", "listening", "thinking", "talking", "reply", "gesture"):
             raise ValueError("unknown state")
         with self.lock:
             self.seq += 1
@@ -14374,10 +14527,21 @@ def custom_wakewords():
 
 # ---- The avatar "bin": one shared folder on the server with every character and animation.
 #   bin/characters/*.vrm               characters (the newest is used unless you pick one)
-#   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy)
+#   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy,
+#                                      kiss, dance, farewell, wake); "name@greeting+farewell.vrma" plays at both
 # Drop files in (file manager, network share, scp) or upload them on any avatar screen. Every screen checks the
 # bin's revision about once a second and loads what's new; deleted files disappear from every screen.
-ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "off")
+ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "off")
+_WHEN_RX = "|".join(w for w in ANIM_WHEN)
+
+
+def valid_when(when):
+    """One moment ("dance") or several joined with + ("greeting+farewell"); "off" only on its own."""
+    parts = str(when or "").lower().split("+")
+    if parts == ["off"]:
+        return "off"
+    parts = [p for p in dict.fromkeys(parts) if p in ANIM_WHEN and p != "off"]
+    return "+".join(parts) if parts else ""
 BIN_NAME = re.compile(r"[^/\\\x00]{1,120}")
 _REV_CACHE = {"t": 0.0, "rev": ""}
 
@@ -14431,8 +14595,8 @@ def list_animations():
     meta, out = _anim_meta(), []
     for n, v, size in _bin_files("animations", (".vrma", ".fbx")):
         base, ext = os.path.splitext(n)
-        m = re.fullmatch(r"(.*?)@(idle|greeting|quiet|happy|kiss|dance|off)", base, re.I)
-        when = (meta.get(n) or {}).get("when") or (m.group(2).lower() if m else "idle")
+        m = re.fullmatch(rf"(.*?)@((?:{_WHEN_RX})(?:\+(?:{_WHEN_RX}))*)", base, re.I)
+        when = valid_when((meta.get(n) or {}).get("when")) or (valid_when(m.group(2)) if m else "") or "idle"
         out.append({"id": _anim_id(n, v, size), "file": n, "type": ext[1:].lower(), "v": v,
                     "name": (m.group(1) if m else base).replace("_", " ").strip() or base, "when": when})
     return sorted(out, key=lambda a: a["name"].lower())
@@ -14627,7 +14791,7 @@ def add_animation(data, name, when, ext):
     with open(os.path.join(folder, fname), "wb") as f:
         f.write(data)
     meta = _anim_meta()
-    meta[fname] = {"when": when if when in ANIM_WHEN else "idle"}
+    meta[fname] = {"when": valid_when(when) or "idle"}
     _save_anim_meta(meta)
     _REV_CACHE["t"] = 0
     return list_animations()
@@ -14644,8 +14808,8 @@ def update_animation(aid, change):
             except OSError:
                 pass
             meta.pop(a["file"], None)
-        elif change.get("when") in ANIM_WHEN:
-            meta.setdefault(a["file"], {})["when"] = change["when"]
+        elif valid_when(change.get("when")):
+            meta.setdefault(a["file"], {})["when"] = valid_when(change["when"])
         _save_anim_meta(meta)
         _REV_CACHE["t"] = 0
         return list_animations()
@@ -14676,6 +14840,123 @@ def migrate_avatar_files():
             _save_anim_meta(new_meta)
     except OSError as e:
         log(f"avatar: couldn't move old files into the bin: {e}")
+
+
+# ---- Stella's own character and animations, shipped with StellAI ----------------------------------------
+# They live in the repo (server/avatar_defaults/) and in the Windows app. Each server copies them into its bin once:
+# from a local copy when there is one, otherwise downloaded from GitHub. A file you delete stays deleted, and a file
+# you replaced (same name, different contents) is left alone. When a newer version ships, an untouched copy is
+# swapped for it. The first time Stella arrives she becomes the character on every screen.
+DEFAULT_AVATAR = {   # bin path -> sha256 of the shipped file (tests check these match server/avatar_defaults)
+    "characters/Stella.vrm": "d48851d4af1d21ae0ddd00ec42be72dbbbaf2e8484452ec9eb88bca6444343b1",
+    "animations/Peace@greeting+farewell.vrma": "6f66b6b5c0214a7b825498050380ea43a3f782b5ea24ce46f7096acf15866d75",
+    "animations/Twirl@dance.vrma": "f45abc44800c647fa106537a2e31a84cb83b74cf3dd8a0ee71c6915f1555ac57",
+    "animations/Pull_the_trigger@quiet.vrma": "c40c1a7b0dbcac5aa9582f45498474255e4b0ca5642a71ffaf43878c27bedf70",
+    "animations/Jumpscare@wake.vrma": "6322bbe2df7716529dd53e2a61816e67b946416d3761c672b8d50ee2829825bb",
+}
+DEFAULT_AVATAR_REPO = "courier-iot/StellAI"
+DEFAULT_CHARACTER = "Stella.vrm"
+
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _default_avatar_sources():
+    """Folders that may hold a local copy of server/avatar_defaults (repo checkout, setup folder, Windows app)."""
+    here = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0].endswith(".py") else __file__))
+    out = [os.path.join(here, "avatar_defaults"), os.path.join(os.path.dirname(here), "server", "avatar_defaults")]
+    if getattr(sys, "_MEIPASS", ""):
+        out.insert(0, os.path.join(sys._MEIPASS, "avatar_defaults"))
+    return [d for d in out if os.path.isdir(d)]
+
+
+def seed_default_avatar(repo="", fetch=None):
+    """Puts Stella's shipped character and animations into the bin (see above). Returns the files added."""
+    if not AVATAR["dir"]:
+        return []
+    state_path = _avatar_path("defaults.json")
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    first_time = not state
+    added = []
+    for rel, sha in DEFAULT_AVATAR.items():
+        dest = _avatar_path("bin", *rel.split("/"))
+        had = state.get(rel)
+        if had == sha:
+            continue                                        # already have this version (or deleted it on purpose)
+        if had:
+            # an older shipped version: update it only if it's still there and untouched
+            if not os.path.isfile(dest) or _sha256_file(dest) != had:
+                state[rel] = sha
+                continue
+        elif os.path.isfile(dest):
+            state[rel] = sha if _sha256_file(dest) == sha else "user"     # same name already there: keep theirs
+            continue
+        data = None
+        for folder in _default_avatar_sources():
+            src = os.path.join(folder, *rel.split("/")[1:]) if rel.startswith("characters/") else \
+                os.path.join(folder, *rel.split("/"))
+            if os.path.isfile(src) and _sha256_file(src) == sha:
+                with open(src, "rb") as f:
+                    data = f.read()
+                break
+        if data is None:
+            url = (f"{RAW_BASE}/{repo or DEFAULT_AVATAR_REPO}/HEAD/server/avatar_defaults/"
+                   + "/".join(urllib.parse.quote(x) for x in rel.split("/")[1 if rel.startswith("characters/") else 0:]))
+            try:
+                data = (fetch or _fetch)(url, "", 300)
+            except Exception as e:      # offline, GitHub down: try again next start
+                log(f"avatar: couldn't download Stella's {rel.split('/')[-1]}: {e}")
+                continue
+            import hashlib
+            if hashlib.sha256(data).hexdigest() != sha:
+                log(f"avatar: the downloaded {rel.split('/')[-1]} didn't match; skipped")
+                continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest + ".part", "wb") as f:
+            f.write(data)
+        os.replace(dest + ".part", dest)
+        state[rel] = sha
+        added.append(rel)
+    os.makedirs(AVATAR["dir"], exist_ok=True)
+    with open(state_path + ".part", "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(state_path + ".part", state_path)
+    if "characters/" + DEFAULT_CHARACTER in added and (first_time or not state.get("chosen")):
+        # Stella arrives: she becomes the character, shown in 3D
+        try:
+            with open(_avatar_path("config.json")) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            cfg = {}
+        cfg.update(character=DEFAULT_CHARACTER, style="vrm")
+        with open(_avatar_path("config.json.part"), "w") as f:
+            json.dump(cfg, f, indent=1)
+        os.replace(_avatar_path("config.json.part"), _avatar_path("config.json"))
+        state["chosen"] = True
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=1)
+    if added:
+        _REV_CACHE["t"] = 0
+        log("avatar: added Stella's " + ", ".join(r.split("/")[-1] for r in added))
+    return added
+
+
+def _safe_seed(repo):
+    try:
+        seed_default_avatar(repo)
+    except Exception as e:        # never stops the hub from starting
+        log(f"avatar: couldn't add Stella's default files: {e}")
 
 
 AVATAR_JS = r"""// StellAI avatar: an animated space orb (no libraries) or a 3D VRM character (three.js + three-vrm).
@@ -14754,6 +15035,7 @@ export function createAvatar(host, opts = {}) {
     setAnimations(list) { o.animations = list || []; call("setAnimations", o.animations); },
     play(what) { return call("play", what); },
     trigger(tag) { call("trigger", tag); },
+    queue(what) { return call("queue", what); },
     react(text) { call("react", text); },
     fps() { return impl && impl.fps ? impl.fps() : 0; },
     destroy() { destroyed = true; if (impl) impl.destroy(); impl = null; stage.destroy(); host.innerHTML = ""; },
@@ -15137,7 +15419,9 @@ async function createVRM(host, url, o) {
     const sh = bones[sd + "UpperArm"].getWorldPosition(new V3());
     const spot = n => n === "lips" ? head.clone().add(new V3(sx * 0.03 * k, -0.06 * k, 0.13 * k))
       : n === "front" ? sh.clone().add(new V3(sx * 0.1 * k, 0.12 * k, 0.48 * k))
-      : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k)) : head.clone();
+      : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k))
+      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.045 * k, -0.07 * k, 0.15 * k))
+      : head.clone();
     const T = spot(spec.at);
     if (spec.to) T.lerp(spot(spec.to), spec.mix || 0);
     return T;
@@ -15277,11 +15561,11 @@ async function createVRM(host, url, o) {
   let visemes = null, visemesAt = 0; const vshape = {};
   let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
   let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
-  const sm = { lean: 0, tilt: 0, nod: 0 };
+  const sm = { lean: 0, tilt: 0, nod: 0, stance: 0, shift: 0, side: Math.random() < 0.5 ? 1 : -1, switchAt: 6 };
   const emo = { happy: 0, sad: 0, surprised: 0, relaxed: 0 };
   function candidates(tag) {
     const out = [];
-    for (const [id, c] of clips) if (c.when === tag) out.push({ kind: "clip", id, name: c.name, clip: c.clip });
+    for (const [id, c] of clips) if (String(c.when || "").split("+").includes(tag)) out.push({ kind: "clip", id, name: c.name, clip: c.clip });
     if (o.gestures !== false) for (const [name, g] of Object.entries(GESTURES)) if (g.tags.includes(tag)) out.push({ kind: "gesture", name, g });
     // uploaded animations are preferred when there are any for this moment
     const up = out.filter(x => x.kind === "clip");
@@ -15301,15 +15585,25 @@ async function createVRM(host, url, o) {
     if (now) { if (anim.action) anim.action.stop(); anim = null; } else anim.out = true;
   }
   let pending = null;   // a gesture to play as soon as she's finished talking
+  const WAITS = ["kiss", "dance", "wake", "greeting", "farewell"];     // moments worth waiting for
   function trigger(tag) {
-    if (state !== "idle" && tag !== "happy") { if (tag === "kiss" || tag === "dance") pending = tag; return; }
-    const list = candidates(tag);
-    if (list.length) start(list[Math.floor(Math.random() * list.length)]);
+    if (state !== "idle" && tag !== "happy") { if (WAITS.includes(tag)) pending = tag; return false; }
+    let list = candidates(tag);
+    if (!list.length && tag === "wake") list = candidates("greeting");   // no wake-up animation: a hello instead
+    return list.length ? start(list[Math.floor(Math.random() * list.length)]) : false;
   }
   function play(what) {
     for (const [id, c] of clips) if (id === what || c.name === what) return start({ kind: "clip", id, name: c.name, clip: c.clip });
     if (GESTURES[what]) return start({ kind: "gesture", name: what, g: GESTURES[what] });
+    const low = String(what || "").toLowerCase();       // forgiving: "twirl", "peace sign", "jump scare"
+    for (const [id, c] of clips) { const n = c.name.toLowerCase();
+      if (n.replace(/\s+/g, "") === low.replace(/\s+/g, "") || (low.length > 3 && (n.includes(low) || low.includes(n)))) return start({ kind: "clip", id, name: c.name, clip: c.clip }); }
     return false;
+  }
+  // An animation by name or a moment ("wake", "dance"), now if she's free, otherwise once she's finished talking
+  function queue(what) {
+    if (state === "idle" && !anim) return play(what) || trigger(what);
+    pending = what; return true;
   }
   function react(text) {
     const s = String(text || "").toLowerCase();
@@ -15320,7 +15614,44 @@ async function createVRM(host, url, o) {
     if (e) { emotion = e; emotionUntil = t + 3.5; }
     if (/\b(love you|good ?night|sweet dreams|kisses?|xoxo|mwah)\b|💋|😘|😚/.test(s)) pending = "kiss";
     else if (/\b(danc(e|es|ing)|let'?s groove|💃)/.test(s) || /💃/.test(s)) pending = "dance";
+    else if (/(^|[\s"“])boo+!/.test(s)) pending = "wake";
+    else if (/\b(good ?bye|bye( for now)?|see (you|ya)( later| soon| tomorrow)?|talk (to you )?(soon|later)|catch you later|take care)\b/.test(s)) pending = "farewell";
+    else if (/^\W*(hi|hello|hey|hiya|howdy|good (morning|afternoon|evening)|welcome back)\b/.test(s)) pending = "greeting";
     else if (e === "happy" && Math.random() < 0.35) setTimeout(() => trigger("happy"), 400);
+  }
+
+  // Her resting stance (shy and cute): hands loosely clasped in front, toes turned a little in, shoulders up a touch,
+  // head tipped down and to one side. Her weight rests on one hip and moves to the other every 12-25 s: that hip
+  // goes out, the other knee softens, and her spine leans back the other way (a gentle S-curve). She eases out of the
+  // stance whenever a gesture or animation plays, and back into it afterwards.
+  // Directions checked against the standing frames of her shipped .vrma clips (motion-captured): arms down at about
+  // -1.28 / +1.25 rad on z, a soft knee is upper leg -x with lower leg +x, foot +y turns the toes toward her left.
+  function standShy(dt) {
+    sm.stance = lerp(sm.stance, anim ? 0 : 1, 1 - Math.exp(-dt * (anim ? 8 : 2.5)));
+    if (t > sm.switchAt) { sm.side = -sm.side; sm.switchAt = t + 12 + Math.random() * 13; }
+    sm.shift = lerp(sm.shift, sm.side, 1 - Math.exp(-dt * 1.6));     // ~1.5 s to move her weight across
+    const e = sm.stance; if (e < 0.01) return;
+    const shift = sm.shift * e;                                    // + = weight on her left
+    const tilt = 0.07 * shift, twist = 0.035 * shift;
+    const slide = Math.asin(clamp(0.03 * shift / 0.8, -0.2, 0.2));
+    const bentL = Math.max(0, -shift), bentR = Math.max(0, shift);   // the leg without the weight bends
+    const tin = 0.16 * e * rightSign;                                  // toes in
+    P("hips", 0, twist, tilt);
+    if (bones.hips) bones.hips.position.x += -rightSign * 0.03 * shift / vrm.scene.scale.x;
+    if (bones.hips) bones.hips.position.y -= 0.006 * e / vrm.scene.scale.y;
+    P("leftUpperLeg", -0.07 * bentL, 0.4 * tin, -tilt - slide); P("rightUpperLeg", -0.07 * bentR, -0.4 * tin, -tilt - slide);
+    P("leftLowerLeg", 0.17 * bentL, 0, 0); P("rightLowerLeg", 0.17 * bentR, 0, 0);
+    P("leftFoot", -0.1 * bentL, tin, 0); P("rightFoot", -0.1 * bentR, -tin, 0);
+    P("spine", 0.02 * e, -0.5 * twist, -0.6 * tilt); P(bones.chest ? "chest" : "upperChest", 0.01 * e, -0.25 * twist, -0.3 * tilt);
+    P("leftShoulder", 0, 0, 0.05 * e * A); P("rightShoulder", 0, 0, -0.05 * e * A);
+    P("neck", 0.03 * e, 0, -0.2 * tilt + 0.05 * e); P("head", 0.05 * e, -0.03 * e, 0.07 * e);
+    const k = (o.height || 172.7) / 170;
+    for (const sd of ["left", "right"]) {
+      const S = bones[sd + "UpperArm"]; if (!S) continue;
+      const sx = sd === "right" ? rightSign : -rightSign;
+      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.35 * k, -0.25 * k, -0.15 * k));   // elbows out and back
+      reach(sd, ikTargets({ at: "clasp" }, sd), pole, e);
+    }
   }
 
   const qProc = {}; for (const n in bones) qProc[n] = new THREE.Quaternion();
@@ -15334,7 +15665,7 @@ async function createVRM(host, url, o) {
     if (state !== "idle") { lastActive = t; quietDone = false; if (anim && anim.kind === "clip" ? true : anim && !(anim.name === "Bounce" || anim.name === "Head tilt")) stopAnim(false); }
 
     // scheduler: an idle animation every 20–60 s; a stretch after 10 quiet minutes
-    if (state === "idle" && !anim && pending) { const tg = pending; pending = null; trigger(tg); lastActive = t; }
+    if (state === "idle" && !anim && pending) { const tg = pending; pending = null; play(tg) || trigger(tg); lastActive = t; }
     if (state === "idle" && !anim) {
       if (!quietDone && t - lastActive > 600) { quietDone = true; trigger("quiet"); }
       else if (t - lastActive > nextIdleAt) { trigger("idle"); lastActive = t; nextIdleAt = 20 + Math.random() * 40; }
@@ -15351,6 +15682,7 @@ async function createVRM(host, url, o) {
     P("head", sm.nod, 0, 0);
     const sway = Math.sin(t * 0.9) * 0.03;
     P("leftUpperArm", 0, 0, sway * A); P("rightUpperArm", 0, 0, -sway * A);
+    standShy(dt);
 
     // 2. a built-in gesture adds on top; an uploaded clip blends in and out
     let extra = {}, look = 0;
@@ -15430,8 +15762,10 @@ async function createVRM(host, url, o) {
     renderer.render(scene, cam);
   }
   raf = requestAnimationFrame(frame);
-  setTimeout(() => trigger("greeting"), 1200);    // a little wave when the screen opens
-  setAnimations(o.animations);
+  // the screen opens: her wake-up animation (or a little wave), once her animations have loaded (at most 8 s)
+  const loaded = setAnimations(o.animations);
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  Promise.race([Promise.all([loaded, pause(1200)]), pause(8000)]).then(() => { if (raf) trigger("wake"); });
   setNeon(o.neon);
   return {
     setState(s) { state = s; },
@@ -15440,10 +15774,10 @@ async function createVRM(host, url, o) {
     setCamera: m => setCamera(m),
     setHeight,
     setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); cssGlow(); },
-    setNeon, setAnimations, play, trigger, react,
+    setNeon, setAnimations, play, trigger, react, queue,
     fps: () => fps,
     destroy() {
-      cancelAnimationFrame(raf); ro.disconnect(); mixer.stopAllAction();
+      cancelAnimationFrame(raf); raf = 0; ro.disconnect(); mixer.stopAllAction();
       try { VRMUtils.deepDispose && VRMUtils.deepDispose(vrm.scene); } catch {}
       renderer.dispose(); renderer.domElement.remove();
     },
@@ -16293,7 +16627,8 @@ def make_http_handler(cfg, chats):
             data = json.loads(self.read_body(200_000) or b"{}")
             if path == "/reminders":
                 due = int(data["due_at"]) if data.get("due_at") else _parse_when(data.get("when", ""))
-                return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none")))
+                return self.send_json(200, chats.add_reminder(data.get("text", ""), due, data.get("repeat", "none"),
+                                                               alarm=bool(data.get("alarm"))))
             if path == "/github":
                 return self.send_json(200, save_github_config(data))
             m = re.fullmatch(r"/reminders/([0-9a-f]{10})", path)
@@ -17059,6 +17394,9 @@ def start(cfg):
     migrate_avatar_files()
     for kind in ("characters", "animations"):
         os.makedirs(_avatar_path("bin", kind), exist_ok=True)
+    if not os.environ.get("STELLAI_NO_DEFAULT_AVATAR"):     # Stella's own character and animations (see 42_avatar_files)
+        threading.Thread(target=lambda: _safe_seed(getattr(cfg, "update_repo", "")), daemon=True,
+                         name="avatar-defaults").start()
     if getattr(cfg, "model_conf", "") and getattr(cfg, "models_dir", ""):
         SERVER_CONTROL = LinuxServerControl(cfg.model_conf, cfg.models_dir, cfg.llama_pid)
     DEEP["models_dir"] = os.path.abspath(cfg.models_dir) if getattr(cfg, "models_dir", "") else ""
