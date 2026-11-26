@@ -28,7 +28,7 @@ def main():
         shutil.copy(f, dest)
         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ, STELLAI_TEST_FAKES=bin_dir, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""),
-               PYTHONUNBUFFERED="1", STELLAI_UPDATE_INTERVAL="99999")
+               PYTHONUNBUFFERED="1", STELLAI_NO_DEFAULT_AVATAR="1", STELLAI_UPDATE_INTERVAL="99999")
     results = []
     for f in files:
         name = os.path.basename(f)[:-3]

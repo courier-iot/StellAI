@@ -51,6 +51,7 @@ jobs:
           --icon windows/stellai.ico
           --paths server --paths windows
           --add-data "windows/stellai.ico;."
+          --add-data "server/avatar_defaults;avatar_defaults"
           --collect-all schemdraw
           --hidden-import pystray._win32
           --hidden-import matplotlib.backends.backend_agg

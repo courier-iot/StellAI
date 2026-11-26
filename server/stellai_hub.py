@@ -2337,7 +2337,7 @@ TOOL_TRIGGERS = {
                               r"inductor|transistor|mosfet|op.?amp|\bmah\b|frequency|\bhz\b", re.I),
     "avatar": re.compile(r"\bwake me|\balarm|\bwake[- ]?up\b|\bscare me|\bboo\b|jump ?scare|\btwirl|\bspin\b|"
                          r"\bdance|\bpeace sign|finger ?guns?|pull the trigger|\bwave\b|blow (me )?a kiss|"
-                         r"\banimation|\bgesture|\bavatar", re.I),
+                         r"\banimation|\bgesture|\bavatar|surprised? pose|cute pose", re.I),
     "lists": re.compile(r"remind|\blists?\b|shopping|check(ed)? off|tick|cancel|to.?do|groceries|forget|"
                         r"don'?t remember|wrong about", re.I),
     "github": re.compile(r"github|\brepo|commit|branch|pull request|\bpr\b|actions|\bbuild|workflow|\bissues?\b|"
@@ -3315,7 +3315,8 @@ SERVER_TOOLS["set_wake_alarm"] = (tool_set_wake_alarm, _fn(
 SERVER_TOOLS["avatar_gesture"] = (tool_avatar_gesture, _fn(
     "avatar_gesture",
     "Play one of Stella's animations on her avatar screens, when the user asks her to (\"do a twirl\", \"scare me\", "
-    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Wave, Blow a kiss, Hip sway, Bounce, Stretch, "
+    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Cute surprise, Wave, Blow a kiss, Hip sway, "
+    "Bounce, Stretch, "
     "or a moment: dance, wake, greeting, farewell, happy.",
     {"animation": _p("Animation name or moment, e.g. 'Twirl' or 'dance'")}, ["animation"]))
 SERVER_TOOLS["list_reminders"] = (tool_list_reminders, _fn(
@@ -3780,7 +3781,7 @@ COMPACT_TOOLS = {
                        "set_alarm only for the phone's clock app.",
                        {"when": "ISO 8601 with the user's UTC offset", "label": "optional note",
                         "repeat": "none, daily, weekdays, weekly or monthly"}),
-    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, "
+    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, Cute surprise, "
                        "Wave, Blow a kiss, Hip sway, Bounce, Stretch) or a moment (dance, wake, greeting, farewell).",
                        {"animation": "name or moment"}),
     "list_reminders": ("List upcoming reminders.", {}),
@@ -13503,8 +13504,10 @@ async function alarmAnswer(snooze) {
 }
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
 const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
-  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (long quiet)"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"],
-  ["dance", "When asked to dance"], ["off", "Off"]];
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (10 quiet minutes)"], ["happy", "When she's happy"],
+  ["surprise", "When she's surprised"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"],
+  ["sleep", "Sleeping/waiting: settling down (20 quiet minutes)"], ["sleeping", "Sleeping/waiting: the loop"],
+  ["sleepend", "Sleeping/waiting: getting back up"], ["off", "Off"]];
 const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
   .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {
@@ -14528,10 +14531,12 @@ def custom_wakewords():
 # ---- The avatar "bin": one shared folder on the server with every character and animation.
 #   bin/characters/*.vrm               characters (the newest is used unless you pick one)
 #   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy,
-#                                      kiss, dance, farewell, wake); "name@greeting+farewell.vrma" plays at both
+#                                      kiss, dance, farewell, wake, surprise, sleep / sleeping / sleepend);
+#                                      "name@greeting+farewell.vrma" plays at both
 # Drop files in (file manager, network share, scp) or upload them on any avatar screen. Every screen checks the
 # bin's revision about once a second and loads what's new; deleted files disappear from every screen.
-ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "off")
+ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "surprise",
+             "sleeping", "sleepend", "sleep", "off")
 _WHEN_RX = "|".join(w for w in ANIM_WHEN)
 
 
@@ -14853,6 +14858,11 @@ DEFAULT_AVATAR = {   # bin path -> sha256 of the shipped file (tests check these
     "animations/Twirl@dance.vrma": "f45abc44800c647fa106537a2e31a84cb83b74cf3dd8a0ee71c6915f1555ac57",
     "animations/Pull_the_trigger@quiet.vrma": "c40c1a7b0dbcac5aa9582f45498474255e4b0ca5642a71ffaf43878c27bedf70",
     "animations/Jumpscare@wake.vrma": "6322bbe2df7716529dd53e2a61816e67b946416d3761c672b8d50ee2829825bb",
+    # converted from Unity Humanoid clips (tools/unity2vrma.py)
+    "animations/Cute_surprise@surprise.vrma": "60fdb54127f50bd9dd7c3398108cb2de570f7d44fc727e73a54e28aaec31d0e6",
+    "animations/Sleeping_waiting_start@sleep.vrma": "6b4f2c8112960e677cd57c740c11aaa6ab1bf912e2762e200916de5ef8dd1979",
+    "animations/Sleeping_waiting@sleeping.vrma": "5b16c87a021ba36cb4555fd1dbc31d361b7b86bf71b9acee3667002e73890613",
+    "animations/Sleeping_waiting_end@sleepend.vrma": "215ec3a59e2b18cd68c88d58214ced8cdc4e63ae554a0cf9b4f6549f35fd6a0f",
 }
 DEFAULT_AVATAR_REPO = "courier-iot/StellAI"
 DEFAULT_CHARACTER = "Stella.vrm"
@@ -15561,6 +15571,10 @@ async function createVRM(host, url, o) {
   let visemes = null, visemesAt = 0; const vshape = {};
   let blinkAt = 1.5, blinkT = -1, emotion = null, emotionUntil = 0, vowel = "aa", vowelAt = 0, glance = 0, glanceAt = 2;
   let lastActive = performance.now() / 1000, nextIdleAt = 15 + Math.random() * 20, quietDone = false;
+  // lastSeen: the last time anything really happened (talking, a gesture asked for); idle gestures don't count,
+  // so the bored animation (10 quiet minutes) and sleep (20) can come. sleep: null, "dozing" or "asleep".
+  let lastSeen = 0, sleep = null;
+  const BORED_AFTER = 600, SLEEP_AFTER = 1200;
   const sm = { lean: 0, tilt: 0, nod: 0, stance: 0, shift: 0, side: Math.random() < 0.5 ? 1 : -1, switchAt: 6 };
   const emo = { happy: 0, sad: 0, surprised: 0, relaxed: 0 };
   function candidates(tag) {
@@ -15571,21 +15585,40 @@ async function createVRM(host, url, o) {
     const up = out.filter(x => x.kind === "clip");
     return up.length && Math.random() < 0.8 ? up : out;
   }
-  function start(c) {
+  function start(c, opt = {}) {
     if (!c) return false;
     stopAnim(true);
     if (c.kind === "clip") {
-      const action = mixer.clipAction(c.clip); action.reset(); action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; action.play();
-      anim = { ...c, action, t0: t, len: c.clip.duration, w: 0, out: false };
+      const action = mixer.clipAction(c.clip); action.reset();
+      action.setLoop(opt.loop ? THREE.LoopRepeat : THREE.LoopOnce, opt.loop ? Infinity : 1); action.clampWhenFinished = !opt.loop; action.play();
+      // opt.w: start fully blended in (the next part of a sequence); opt.hold: don't fade out at the end (more follows)
+      anim = { ...c, action, t0: t, len: opt.loop ? Infinity : c.clip.duration, w: opt.w || 0, out: false, hold: !!opt.hold, phase: opt.phase || "" };
     } else anim = { ...c, t0: t, len: c.g.len, w: 1, out: false };
     return true;
   }
+  const clipOf = tag => { const l = candidates(tag).filter(x => x.kind === "clip"); return l.length ? l[Math.floor(Math.random() * l.length)] : null; };
+  // Sleeping/waiting: after a long quiet she settles down (the "sleep" part), stays there (the "sleeping" loop),
+  // and gets back up ("sleepend") as soon as something happens; whatever woke her plays after that.
+  function goToSleep() {
+    const a = clipOf("sleep"), b = clipOf("sleeping");
+    if (!a && !b) return false;
+    sleep = a ? "dozing" : "asleep";
+    return a ? start(a, { hold: true, phase: "sleep" }) : start(b, { loop: true, phase: "sleeping" });
+  }
+  function wakeUp() {
+    if (!sleep) return;
+    sleep = null;
+    const c = clipOf("sleepend");
+    // from the loop the get-up part follows on seamlessly; while still settling down she just eases back up
+    if (c && anim && anim.phase === "sleeping") start(c, { w: 1, phase: "sleepend" }); else stopAnim(false);
+  }
+  function noteActivity() { lastSeen = t; quietDone = false; }
   function stopAnim(now) {
     if (!anim) return;
     if (now) { if (anim.action) anim.action.stop(); anim = null; } else anim.out = true;
   }
   let pending = null;   // a gesture to play as soon as she's finished talking
-  const WAITS = ["kiss", "dance", "wake", "greeting", "farewell"];     // moments worth waiting for
+  const WAITS = ["kiss", "dance", "wake", "greeting", "farewell", "surprise"];     // moments worth waiting for
   function trigger(tag) {
     if (state !== "idle" && tag !== "happy") { if (WAITS.includes(tag)) pending = tag; return false; }
     let list = candidates(tag);
@@ -15602,21 +15635,29 @@ async function createVRM(host, url, o) {
   }
   // An animation by name or a moment ("wake", "dance"), now if she's free, otherwise once she's finished talking
   function queue(what) {
+    noteActivity();
+    if (sleep) { pending = what; wakeUp(); return true; }
     if (state === "idle" && !anim) return play(what) || trigger(what);
     pending = what; return true;
+  }
+  function triggerFromOutside(tag) {      // the page asking (a reply, the screen waking): wakes her first if asleep
+    noteActivity();
+    if (sleep) { pending = tag; wakeUp(); return true; }
+    return trigger(tag);
   }
   function react(text) {
     const s = String(text || "").toLowerCase();
     let e = null;
     if (/\b(sorry|unfortunately|sad|can't|cannot|failed|error)\b/.test(s)) e = "sad";
     else if (/(!|\b(great|awesome|glad|love|nice|yay|congrat|happy|perfect|fun)\b)/.test(s)) e = "happy";
-    else if (/\b(wow|whoa|really\?|interesting)\b/.test(s)) e = "surprised";
+    else if (/\b(wow|whoa|really\?|interesting|no way|oh my|omg|surprise)\b|😮|😲/.test(s)) e = "surprised";
     if (e) { emotion = e; emotionUntil = t + 3.5; }
     if (/\b(love you|good ?night|sweet dreams|kisses?|xoxo|mwah)\b|💋|😘|😚/.test(s)) pending = "kiss";
     else if (/\b(danc(e|es|ing)|let'?s groove|💃)/.test(s) || /💃/.test(s)) pending = "dance";
     else if (/(^|[\s"“])boo+!/.test(s)) pending = "wake";
     else if (/\b(good ?bye|bye( for now)?|see (you|ya)( later| soon| tomorrow)?|talk (to you )?(soon|later)|catch you later|take care)\b/.test(s)) pending = "farewell";
     else if (/^\W*(hi|hello|hey|hiya|howdy|good (morning|afternoon|evening)|welcome back)\b/.test(s)) pending = "greeting";
+    else if (e === "surprised" && clipOf("surprise")) pending = "surprise";
     else if (e === "happy" && Math.random() < 0.35) setTimeout(() => trigger("happy"), 400);
   }
 
@@ -15662,12 +15703,17 @@ async function createVRM(host, url, o) {
     if (light && step < (state === "idle" && !anim ? 1 / 25 : 1 / 31)) return;   // light mode: 30 fps (25 when idle)
     const dt = Math.min(0.05, step); last = now; t += dt;
     fps = lerp(fps, 1 / Math.max(step, 1e-3), 0.05);
-    if (state !== "idle") { lastActive = t; quietDone = false; if (anim && anim.kind === "clip" ? true : anim && !(anim.name === "Bounce" || anim.name === "Head tilt")) stopAnim(false); }
+    if (state !== "idle") {
+      lastActive = t; noteActivity();
+      if (sleep) wakeUp();       // she gets up (that part keeps playing while she listens)
+      else if (anim && anim.phase !== "sleepend" && (anim.kind === "clip" ? true : !(anim.name === "Bounce" || anim.name === "Head tilt"))) stopAnim(false);
+    }
 
-    // scheduler: an idle animation every 20–60 s; a stretch after 10 quiet minutes
+    // scheduler: an idle animation every 20–60 s; bored after 10 quiet minutes; sleeping/waiting after 20
     if (state === "idle" && !anim && pending) { const tg = pending; pending = null; play(tg) || trigger(tg); lastActive = t; }
     if (state === "idle" && !anim) {
-      if (!quietDone && t - lastActive > 600) { quietDone = true; trigger("quiet"); }
+      if (t - lastSeen > SLEEP_AFTER && goToSleep()) { /* settling down */ }
+      else if (!quietDone && t - lastSeen > BORED_AFTER) { quietDone = true; trigger("quiet"); lastActive = t; }
       else if (t - lastActive > nextIdleAt) { trigger("idle"); lastActive = t; nextIdleAt = 20 + Math.random() * 40; }
     }
 
@@ -15713,11 +15759,15 @@ async function createVRM(host, url, o) {
         if (bones.hips) hipsProc.copy(bones.hips.position);
         mixer.update(dt);
         anim.w = anim.out ? Math.max(0, anim.w - dt * 4) : Math.min(1, anim.w + dt * 2.5);
-        const fadeEnd = smoothstep((anim.len - (t - anim.t0)) / 0.5);
+        const fadeEnd = anim.hold ? 1 : smoothstep((anim.len - (t - anim.t0)) / 0.5);
         const w = anim.w * fadeEnd;
         for (const n in bones) { const b = bones[n]; const aq = b.quaternion.clone(); b.quaternion.copy(qProc[n]).slerp(aq, w); }
         if (bones.hips) bones.hips.position.lerpVectors(hipsProc, bones.hips.position.clone(), w);
-        if (p >= 1 || (anim.out && anim.w <= 0)) { anim.action.stop(); anim = null; }
+        if (p >= 1 && anim.phase === "sleep" && sleep) {        // settled down: on to the loop
+          const b = clipOf("sleeping");
+          if (b) { sleep = "asleep"; start(b, { loop: true, w: 1, phase: "sleeping" }); }
+          else { sleep = null; anim.hold = false; anim.out = true; }
+        } else if (p >= 1 || (anim.out && anim.w <= 0)) { anim.action.stop(); anim = null; }
       }
     }
 
@@ -15774,7 +15824,7 @@ async function createVRM(host, url, o) {
     setCamera: m => setCamera(m),
     setHeight,
     setLight(on) { light = on; renderer.setPixelRatio(pixelRatio()); resize(); cssGlow(); },
-    setNeon, setAnimations, play, trigger, react, queue,
+    setNeon, setAnimations, play, trigger: triggerFromOutside, react, queue,
     fps: () => fps,
     destroy() {
       cancelAnimationFrame(raf); raf = 0; ro.disconnect(); mixer.stopAllAction();

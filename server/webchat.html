@@ -1965,8 +1965,10 @@ async function alarmAnswer(snooze) {
 }
 const cmToFtIn = cm => { const inches = Math.round(cm / 2.54); return `${Math.floor(inches / 12)}′${inches % 12}″`; };
 const WHEN = [["idle", "While idle"], ["wake", "Waking up (screen opens, mornings, alarms)"], ["greeting", "Saying hello"], ["farewell", "Saying goodbye"],
-  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (long quiet)"], ["happy", "When she's happy"], ["kiss", "Love / goodnight"],
-  ["dance", "When asked to dance"], ["off", "Off"]];
+  ["greeting+farewell", "Hello and goodbye"], ["quiet", "When she's bored (10 quiet minutes)"], ["happy", "When she's happy"],
+  ["surprise", "When she's surprised"], ["kiss", "Love / goodnight"], ["dance", "When asked to dance"],
+  ["sleep", "Sleeping/waiting: settling down (20 quiet minutes)"], ["sleeping", "Sleeping/waiting: the loop"],
+  ["sleepend", "Sleeping/waiting: getting back up"], ["off", "Off"]];
 const whenOptions = cur => (WHEN.some(w => w[0] === cur) || !cur ? WHEN : WHEN.concat([[cur, cur.split("+").map(x => (WHEN.find(w => w[0] === x) || [0, x])[1]).join(" + ")]]))
   .map(([v, l]) => `<option value="${v}" ${cur === v ? "selected" : ""}>${l}</option>`).join("");
 function openAvatarSettings() {

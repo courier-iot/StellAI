@@ -364,7 +364,8 @@ SERVER_TOOLS["set_wake_alarm"] = (tool_set_wake_alarm, _fn(
 SERVER_TOOLS["avatar_gesture"] = (tool_avatar_gesture, _fn(
     "avatar_gesture",
     "Play one of Stella's animations on her avatar screens, when the user asks her to (\"do a twirl\", \"scare me\", "
-    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Wave, Blow a kiss, Hip sway, Bounce, Stretch, "
+    "\"wave\", \"dance\"). Twirl, Peace, Pull the trigger, Jumpscare, Cute surprise, Wave, Blow a kiss, Hip sway, "
+    "Bounce, Stretch, "
     "or a moment: dance, wake, greeting, farewell, happy.",
     {"animation": _p("Animation name or moment, e.g. 'Twirl' or 'dance'")}, ["animation"]))
 SERVER_TOOLS["list_reminders"] = (tool_list_reminders, _fn(

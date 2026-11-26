@@ -2,10 +2,12 @@
 # ---- The avatar "bin": one shared folder on the server with every character and animation.
 #   bin/characters/*.vrm               characters (the newest is used unless you pick one)
 #   bin/animations/*.vrma | *.fbx      animations; "name@greeting.fbx" sets when it plays (idle, greeting, quiet, happy,
-#                                      kiss, dance, farewell, wake); "name@greeting+farewell.vrma" plays at both
+#                                      kiss, dance, farewell, wake, surprise, sleep / sleeping / sleepend);
+#                                      "name@greeting+farewell.vrma" plays at both
 # Drop files in (file manager, network share, scp) or upload them on any avatar screen. Every screen checks the
 # bin's revision about once a second and loads what's new; deleted files disappear from every screen.
-ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "off")
+ANIM_WHEN = ("idle", "greeting", "quiet", "happy", "kiss", "dance", "farewell", "wake", "surprise",
+             "sleeping", "sleepend", "sleep", "off")
 _WHEN_RX = "|".join(w for w in ANIM_WHEN)
 
 
@@ -327,6 +329,11 @@ DEFAULT_AVATAR = {   # bin path -> sha256 of the shipped file (tests check these
     "animations/Twirl@dance.vrma": "f45abc44800c647fa106537a2e31a84cb83b74cf3dd8a0ee71c6915f1555ac57",
     "animations/Pull_the_trigger@quiet.vrma": "c40c1a7b0dbcac5aa9582f45498474255e4b0ca5642a71ffaf43878c27bedf70",
     "animations/Jumpscare@wake.vrma": "6322bbe2df7716529dd53e2a61816e67b946416d3761c672b8d50ee2829825bb",
+    # converted from Unity Humanoid clips (tools/unity2vrma.py)
+    "animations/Cute_surprise@surprise.vrma": "60fdb54127f50bd9dd7c3398108cb2de570f7d44fc727e73a54e28aaec31d0e6",
+    "animations/Sleeping_waiting_start@sleep.vrma": "6b4f2c8112960e677cd57c740c11aaa6ab1bf912e2762e200916de5ef8dd1979",
+    "animations/Sleeping_waiting@sleeping.vrma": "5b16c87a021ba36cb4555fd1dbc31d361b7b86bf71b9acee3667002e73890613",
+    "animations/Sleeping_waiting_end@sleepend.vrma": "215ec3a59e2b18cd68c88d58214ced8cdc4e63ae554a0cf9b4f6549f35fd6a0f",
 }
 DEFAULT_AVATAR_REPO = "courier-iot/StellAI"
 DEFAULT_CHARACTER = "Stella.vrm"

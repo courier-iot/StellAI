@@ -30,7 +30,7 @@ COMPACT_TOOLS = {
                        "set_alarm only for the phone's clock app.",
                        {"when": "ISO 8601 with the user's UTC offset", "label": "optional note",
                         "repeat": "none, daily, weekdays, weekly or monthly"}),
-    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, "
+    "avatar_gesture": ("Play one of Stella's avatar animations when asked (Twirl, Peace, Pull the trigger, Jumpscare, Cute surprise, "
                        "Wave, Blow a kiss, Hip sway, Bounce, Stretch) or a moment (dance, wake, greeting, farewell).",
                        {"animation": "name or moment"}),
     "list_reminders": ("List upcoming reminders.", {}),

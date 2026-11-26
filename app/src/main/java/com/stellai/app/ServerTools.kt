@@ -84,6 +84,8 @@ object ServerTools {
         "web_search" -> "Searching the web"
         "fetch_page" -> "Reading the page"
         "set_reminder", "list_reminders", "cancel_reminder" -> "Updating reminders"
+        "set_wake_alarm" -> "Setting a wake-up alarm"
+        "avatar_gesture" -> "Moving on the avatar screen"
         "add_to_list", "show_list", "check_off" -> "Updating lists"
         "github_commit" -> "Committing to GitHub"
         "github_pull_request" -> "Opening a pull request"

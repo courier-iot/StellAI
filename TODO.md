@@ -58,6 +58,17 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] **Instant phone commands offline** (0.32.4): open apps, timers, alarms… without the model.
 - [ ] **Offline extras** (M): a download notification, photos with a small vision model, chats learned into memory once the server is back, other languages for speech.
 
+### Stella's own look (0.34.0)
+
+- [x] **Stella ships with StellAI**: `server/avatar_defaults/` (Stella.vrm + 4 clips); every server adds them to its bin once and she becomes the character.
+- [x] **New moments**: wake (jumpscare: screen opens or wakes after 5+ min, first chat of the morning, alarms, on request), hello/goodbye (peace), dance (twirl), bored (finger guns).
+- [x] **Wake-up alarms she rings herself** (`set_wake_alarm`): tone, voice and jumpscare on avatar screens; "I'm up" / "Snooze"; phones ring them as reminders.
+- [x] **avatar_gesture tool**: "do a twirl", "scare me".
+- [x] **Shy idle stance**: hands clasped, toes in, weight moving hip to hip.
+- [x] **Unity animations** (0.35.0): `tools/unity2vrma.py` converts Unity Humanoid clips / .unitypackage to .vrma; Cute surprise and Sleeping/waiting (start, loop, get up) ship with her.
+- [x] **Bored and asleep actually come** (0.35.0): idle gestures no longer reset the quiet clock.
+- [ ] **Check on real screens** (S): the stance (and the converted Unity clips: arms/fingers are the least certain part) (hands meeting in front without clipping), clip blending, alarm sound on the phone's avatar screen with the app in the background.
+
 ## Also discussed, not yet built
 
 - [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.

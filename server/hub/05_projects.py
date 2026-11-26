@@ -395,7 +395,7 @@ TOOL_TRIGGERS = {
                               r"inductor|transistor|mosfet|op.?amp|\bmah\b|frequency|\bhz\b", re.I),
     "avatar": re.compile(r"\bwake me|\balarm|\bwake[- ]?up\b|\bscare me|\bboo\b|jump ?scare|\btwirl|\bspin\b|"
                          r"\bdance|\bpeace sign|finger ?guns?|pull the trigger|\bwave\b|blow (me )?a kiss|"
-                         r"\banimation|\bgesture|\bavatar", re.I),
+                         r"\banimation|\bgesture|\bavatar|surprised? pose|cute pose", re.I),
     "lists": re.compile(r"remind|\blists?\b|shopping|check(ed)? off|tick|cancel|to.?do|groceries|forget|"
                         r"don'?t remember|wrong about", re.I),
     "github": re.compile(r"github|\brepo|commit|branch|pull request|\bpr\b|actions|\bbuild|workflow|\bissues?\b|"

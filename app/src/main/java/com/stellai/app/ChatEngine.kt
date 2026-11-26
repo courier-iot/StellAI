@@ -398,7 +398,7 @@ class ChatEngine(private val app: App) {
         fun noteTool(name: String) {
             if (name == "remember" || name == "forget") memoryChanged = true
             if (name == "project_note") projectChanged = true
-            if (name == "set_reminder" || name == "cancel_reminder") remindersChanged = true
+            if (name == "set_reminder" || name == "cancel_reminder" || name == "set_wake_alarm") remindersChanged = true
         }
 
         suspend fun answer(ev: JSONObject, answer: JSONObject) {
@@ -697,7 +697,7 @@ class ChatEngine(private val app: App) {
                     val onServer = ServerTools.has(tc.name)
                     if (tc.name == "remember" || tc.name == "forget") memoryChanged = true
                     if (tc.name == "project_note") projectChanged = true
-                    if (tc.name == "set_reminder" || tc.name == "cancel_reminder") remindersChanged = true
+                    if (tc.name == "set_reminder" || tc.name == "cancel_reminder" || tc.name == "set_wake_alarm") remindersChanged = true
                     status = (if (onServer) ServerTools.displayName(tc.name) else PhoneTools.displayName(tc.name)) + "…"
                     val argsJson = try {
                         JSONObject(tc.arguments.ifBlank { "{}" })
