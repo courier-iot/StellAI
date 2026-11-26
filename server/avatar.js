@@ -459,7 +459,8 @@ async function createVRM(host, url, o) {
     const spot = n => n === "lips" ? head.clone().add(new V3(sx * 0.03 * k, -0.06 * k, 0.13 * k))
       : n === "front" ? sh.clone().add(new V3(sx * 0.1 * k, 0.12 * k, 0.48 * k))
       : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k))
-      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.045 * k, -0.07 * k, 0.15 * k))
+      // hands meet in front of her navel: close enough that the elbows bend and go out instead of locking straight
+      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.06 * k, 0.05 * k, 0.2 * k))
       : head.clone();
     const T = spot(spec.at);
     if (spec.to) T.lerp(spot(spec.to), spec.mix || 0);
@@ -719,7 +720,7 @@ async function createVRM(host, url, o) {
     for (const sd of ["left", "right"]) {
       const S = bones[sd + "UpperArm"]; if (!S) continue;
       const sx = sd === "right" ? rightSign : -rightSign;
-      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.35 * k, -0.25 * k, -0.15 * k));   // elbows out and back
+      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.5 * k, -0.2 * k, -0.05 * k));   // elbows out, clear of her chest
       reach(sd, ikTargets({ at: "clasp" }, sd), pole, e);
     }
   }

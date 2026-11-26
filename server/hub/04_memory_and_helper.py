@@ -2,6 +2,14 @@
 # ---- Long-term memory tools ------------------------------------------------------
 CHATS = None        # ChatDB, set in main()
 LLAMA_URL = "http://127.0.0.1:8080"
+
+
+def llama_port():
+    """The model's port on this computer (from --llama); 8080 unless it had to move off a busy port."""
+    try:
+        return urlparse(LLAMA_URL).port or 8080
+    except ValueError:
+        return 8080
 API_KEY = ""
 
 

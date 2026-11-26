@@ -1651,6 +1651,14 @@ SERVER_TOOLS = {
 # ---- Long-term memory tools ------------------------------------------------------
 CHATS = None        # ChatDB, set in main()
 LLAMA_URL = "http://127.0.0.1:8080"
+
+
+def llama_port():
+    """The model's port on this computer (from --llama); 8080 unless it had to move off a busy port."""
+    try:
+        return urlparse(LLAMA_URL).port or 8080
+    except ValueError:
+        return 8080
 API_KEY = ""
 
 
@@ -4554,8 +4562,13 @@ def run_speed_test(whisper_url="", language="en"):
                 add("write", "Writing", gs, "tokens/s", f"about {gs * 0.75:.0f} words a second; a 150-word answer takes about {200 / gs:.0f} s")
             if not ps and not gs:
                 out["results"].append({"key": "model", "name": "AI model", "error": "it answered without timing figures"})
+        except urllib.error.HTTPError as e:
+            # something answered, so it isn't "unreachable": say who and what (a 404 means another program has the port)
+            hint = (" — another program is answering on that port, not Stella's model" if e.code == 404 else "")
+            out["results"].append({"key": "model", "name": "AI model",
+                                   "error": f"{LLAMA_URL} answered {e.code} {e.reason}{hint}"})
         except (urllib.error.URLError, OSError, ValueError, TypeError) as e:
-            out["results"].append({"key": "model", "name": "AI model", "error": f"not reachable ({e})"})
+            out["results"].append({"key": "model", "name": "AI model", "error": f"not reachable at {LLAMA_URL} ({e})"})
 
         # -- speaking, then hearing that same sentence back (so the transcript can be checked too)
         sentence = "Testing, one two three. The quick brown fox jumps over the lazy dog."
@@ -4565,6 +4578,8 @@ def run_speed_test(whisper_url="", language="en"):
             engine = "Piper"
             t0 = time.time()
             if ac["engine"] == "kokoro" and KOKORO.ready():
+                KOKORO.say("Ready.", ac["kokoro_voice"], 1.0)    # loads the voice first, as in normal use
+                t0 = time.time()
                 spoken, engine = KOKORO.say(sentence, ac["kokoro_voice"], 1.0), "Kokoro"
             elif os.path.isfile(_avatar_path("voices", ac["voice"] + ".onnx")):
                 TTS.say("Ready.", ac["voice"], 1.0)          # loads the voice first, as in normal use
@@ -4574,7 +4589,7 @@ def run_speed_test(whisper_url="", language="en"):
                 took = time.time() - t0
                 _, seconds = _resample_wav(spoken)
                 add("speak", "Speaking", took, "s", f"{engine} made {seconds:.1f} s of speech"
-                    + (f" ({seconds / took:.0f}x faster than real time)" if took > 0 else ""))
+                    + (f" ({_realtime(seconds, took)})" if took > 0 else ""))
         except Exception as e:   # noqa: BLE001 - one part failing shouldn't lose the other figures
             out["results"].append({"key": "speak", "name": "Speaking", "error": str(e)[:200]})
         if whisper_url:
@@ -4623,6 +4638,16 @@ def run_speed_test(whisper_url="", language="en"):
         return out
     finally:
         _SPEED_LOCK.release()
+
+
+def _realtime(seconds, took):
+    """'3.2x faster than real time' / '0.6x real time (slower than real time)'."""
+    r = seconds / took
+    if r >= 1.05:
+        return f"{r:.1f}x faster than real time"
+    if r > 0.95:
+        return "about real time"
+    return f"{r:.1f}x real time (slower than real time)"
 
 
 def speed_text(report):
@@ -15430,7 +15455,8 @@ async function createVRM(host, url, o) {
     const spot = n => n === "lips" ? head.clone().add(new V3(sx * 0.03 * k, -0.06 * k, 0.13 * k))
       : n === "front" ? sh.clone().add(new V3(sx * 0.1 * k, 0.12 * k, 0.48 * k))
       : n === "behindHead" ? head.clone().add(new V3(sx * 0.07 * k, 0.11 * k, -0.07 * k))
-      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.045 * k, -0.07 * k, 0.15 * k))
+      // hands meet in front of her navel: close enough that the elbows bend and go out instead of locking straight
+      : n === "clasp" ? (bones.hips || vrm.scene).getWorldPosition(new V3()).add(new V3(sx * 0.06 * k, 0.05 * k, 0.2 * k))
       : head.clone();
     const T = spot(spec.at);
     if (spec.to) T.lerp(spot(spec.to), spec.mix || 0);
@@ -15690,7 +15716,7 @@ async function createVRM(host, url, o) {
     for (const sd of ["left", "right"]) {
       const S = bones[sd + "UpperArm"]; if (!S) continue;
       const sx = sd === "right" ? rightSign : -rightSign;
-      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.35 * k, -0.25 * k, -0.15 * k));   // elbows out and back
+      const pole = S.getWorldPosition(new V3()).add(new V3(sx * 0.5 * k, -0.2 * k, -0.05 * k));   // elbows out, clear of her chest
       reach(sd, ikTargets({ at: "clasp" }, sd), pole, e);
     }
   }
@@ -16181,7 +16207,7 @@ def _run_move(addr, name, target_key=""):
                 break
         else:
             raise RuntimeError(f"{name} took the data but didn't come back within 15 minutes; check it there")
-        info = {"name": name, "address": addr, "llama_url": f"http://{host}:8080", "hub_url": f"http://{host}:8092",
+        info = {"name": name, "address": addr, "llama_url": f"http://{host}:{llama_port()}", "hub_url": f"http://{host}:8092",
                 "at": int(time.time())}
         with open(_move_path("moved.json"), "w") as f:
             json.dump(info, f)
@@ -16817,7 +16843,8 @@ def make_http_handler(cfg, chats):
 
     @routes.add("GET", "/health", access="first")
     def get_health(self, path, m):
-        return self.send_json(200, {"ok": True})
+        # llama_port: where the model listens on this computer, so phones follow it if it had to move off a busy port
+        return self.send_json(200, {"ok": True, "llama_port": llama_port()})
 
     @routes.add("GET", "/move/hello", access="first")
     def get_move_hello(self, path, m):

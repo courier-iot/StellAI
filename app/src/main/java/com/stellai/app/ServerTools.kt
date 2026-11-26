@@ -31,6 +31,20 @@ object ServerTools {
     /** Server tools that change things outside StellAI (GitHub commits): the user must approve each call. */
     fun needsApproval(name: String) = name in approvalNames
 
+    @Volatile
+    private var portCheckedAt = 0L
+
+    /** Blocking, at most once a minute: if the model moved to another port on the server, follow it. */
+    fun followPort(app: App) {
+        val now = System.currentTimeMillis()
+        if (now - portCheckedAt < 60_000) return
+        portCheckedAt = now
+        val s = app.settings
+        val moved = HubApi.followModelPort(s.serverUrl) ?: return
+        s.serverUrl = moved
+        app.notifyPortMoved(moved)
+    }
+
     /** Blocking. Refreshes the tool list at most every 10 minutes (or when the server changes). */
     fun refresh(app: App) {
         val s = app.settings

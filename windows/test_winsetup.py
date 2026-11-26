@@ -467,6 +467,52 @@ def test_draft_and_deep_args():
     assert "draft_args" in ws.tune.tune.__code__.co_varnames
 
 
+def test_llama_port():
+    """Another program on 8080: the model moves to the next free port, remembers it, and everything follows."""
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    c = ws.Config(tempfile.mkdtemp())
+    c.set(plan={"model_file": "m.gguf", "mmproj_file": "mm.gguf", "context": 8192, "threads": 4, "gpu_args": [],
+                "whisper_file": "w.bin", "backend": "cpu"})
+    assert ws.llama_port(c) == 8080 and ws.pick_llama_port(c, busy=lambda p: False) == (8080, None)
+    busy = {8080, 8081}
+    assert ws.pick_llama_port(c, busy=lambda p: p in busy) == (8082, 8080) and ws.llama_port(c) == 8082
+    assert ws.Config(c.root).get("llama_port") == 8082                       # remembered
+    assert ws.pick_llama_port(c, busy=lambda p: p in busy) == (8082, None)   # stays put while it's free
+    a = ws.llama_args(c, c.get("plan"), "k")
+    assert a[a.index("--port") + 1] == "8082"
+    h = ws.hub_args(c)
+    assert h[h.index("--llama") + 1] == "http://127.0.0.1:8082"
+    # StellAI's own ports are never chosen
+    c2 = ws.Config(tempfile.mkdtemp())
+    taken = set(range(8080, 8092))
+    port, _ = ws.pick_llama_port(c2, busy=lambda p: p in taken)
+    assert port not in (ws.HUB_PORT, ws.WHISPER_PORT, ws.EMBED_PORT, ws.HELPER_PORT) and port == 8096, port
+    # the firewall rule follows the port, and an old rule without it shows as outdated
+    assert "localport=8082,8092" in ws.firewall_add_args(8082)
+    assert ws.firewall_state("LocalPort: 8080,8092\nRemoteIP: LocalSubnet,100.64.0.0/10\n", llama=8082) == "outdated"
+    assert ws.firewall_state("LocalPort:     8082,8092\nRemoteIP: LocalSubnet,100.64.0.0/10\n", llama=8082) == "limited"
+
+    # real sockets: a program listening on 127.0.0.1 makes the port busy; its 404 isn't a healthy model
+    class NotFound(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404); self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = HTTPServer(("127.0.0.1", 0), NotFound)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert ws.port_busy(port)
+        assert not ws._healthy(port, strict=True) and ws._healthy(port)   # the model must answer; Whisper may 404
+    finally:
+        srv.shutdown(); srv.server_close()
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); free = s.getsockname()[1]; s.close()
+    assert not ws.port_busy(free)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

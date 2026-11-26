@@ -106,6 +106,15 @@ class App : Application() {
         }
     }
 
+    /** The server's model moved to another port (another program took the old one): say so once. */
+    fun notifyPortMoved(url: String) {
+        scope.launch(Dispatchers.Main) {
+            android.widget.Toast.makeText(this@App, "Stella's AI moved to a new port on the server: connected at $url",
+                android.widget.Toast.LENGTH_LONG).show()
+            sync.request()
+        }
+    }
+
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
         refreshPeriodicSync()

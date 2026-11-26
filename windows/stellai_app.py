@@ -765,8 +765,8 @@ class App:
         ts, lan = ws.tailscale_ip(), ws.lan_ip()
         opts = []
         if ts:
-            opts.append(f"http://{ts}:{ws.LLAMA_PORT}   (Tailscale: home and away)")
-        opts.append(f"http://{lan}:{ws.LLAMA_PORT}   (home Wi-Fi only)")
+            opts.append(f"http://{ts}:{ws.llama_port(self.cfg)}   (Tailscale: home and away)")
+        opts.append(f"http://{lan}:{ws.llama_port(self.cfg)}   (home Wi-Fi only)")
         self.addr_box.config(values=opts)
         if self.addr_var.get() not in opts:
             self.addr_var.set(opts[0])
@@ -821,6 +821,15 @@ class App:
         if not (hasattr(self, "log_box") and self.log_box.winfo_exists()):
             return
         st = self.servers.state()
+        if self.servers.moved and not getattr(self, "_moved_told", None) == self.servers.moved:
+            self._moved_told = old_new = self.servers.moved
+            self.refresh_addresses() if hasattr(self, "addr_box") else None
+            self._show_firewall_state() if hasattr(self, "fw_label") else None
+            if ws.firewall_state(llama=old_new[1]) in ("outdated", "none") and messagebox.askyesno(
+                    "StellAI", f"Port {old_new[0]} is being used by another program, so Stella's AI moved to port "
+                               f"{old_new[1]}.\n\nPaired phones switch over by themselves. Windows' firewall needs to "
+                               f"allow the new port so they can reach it (one administrator prompt).\n\nOpen it now?"):
+                self.limit_firewall()
         colors = {"running": GREEN, "starting": AMBER, "stopped": MUTED, "crashed": RED}
         words = {"running": "ready", "starting": "loading…", "stopped": "stopped", "crashed": "stopped with an error"}
         for name, (dot, txt, label) in self.status_dots.items():
@@ -938,16 +947,19 @@ class App:
 
     def _show_firewall_state(self):
         def work():
-            state = ws.firewall_state()
+            port = ws.llama_port(self.cfg)
+            state = ws.firewall_state(llama=port)
             text = {"limited": "Firewall: home network and Tailscale only ✓",
                     "open": "Firewall: any address on a private network may connect",
-                    "none": "Firewall: no StellAI rule (phones may not connect)"}.get(state, "")
+                    "none": "Firewall: no StellAI rule (phones may not connect)",
+                    "outdated": f"Firewall: the AI's new port {port} isn't open yet (phones can't reach her)"}.get(state, "")
 
             def show():
                 if not (hasattr(self, "fw_label") and self.fw_label.winfo_exists()):
                     return
                 self.fw_label.config(text=text)
-                if state in ("open", "none"):
+                if state in ("open", "none", "outdated"):
+                    self.fw_btn.config(text=f"Open port {port}" if state == "outdated" else "Limit firewall")
                     self.fw_btn.pack(side="left", padx=(8, 0), before=self.fw_label)
                 else:
                     self.fw_btn.pack_forget()
@@ -955,7 +967,7 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def limit_firewall(self):
-        if not ws.limit_firewall():
+        if not ws.limit_firewall(ws.llama_port(self.cfg)):
             messagebox.showinfo("StellAI", "The firewall rule wasn't changed (the administrator prompt was declined).")
             return
         self.root.after(3000, self._show_firewall_state)

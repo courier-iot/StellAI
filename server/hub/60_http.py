@@ -467,7 +467,8 @@ def make_http_handler(cfg, chats):
 
     @routes.add("GET", "/health", access="first")
     def get_health(self, path, m):
-        return self.send_json(200, {"ok": True})
+        # llama_port: where the model listens on this computer, so phones follow it if it had to move off a busy port
+        return self.send_json(200, {"ok": True, "llama_port": llama_port()})
 
     @routes.add("GET", "/move/hello", access="first")
     def get_move_hello(self, path, m):

@@ -615,6 +615,7 @@ class ChatEngine(private val app: App) {
                     } catch (_: Exception) {
                     }
                 }
+                ServerTools.followPort(app)
                 ServerTools.refresh(app)
             }
             app.memory.refresh()

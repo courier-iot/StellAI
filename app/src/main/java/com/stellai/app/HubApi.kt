@@ -451,6 +451,35 @@ object HubApi {
         }.filter { it.first.isNotBlank() }
     }
 
+    /**
+     * The model's port on the server, from the hub (which never moves): it changes when another program took the
+     * old one. Returns the address to use instead of [serverUrl], or null to keep it. Only switches when the model
+     * really answers on the new port and doesn't on the old one, so proxies and port forwarding aren't disturbed.
+     */
+    fun followModelPort(serverUrl: String): String? = try {
+        val uri = URI(serverUrl.trim())
+        val cur = uri.port
+        val req = Request.Builder().url("${url(serverUrl)}/health").get().build()
+        val want = reachHttp.newCall(req).execute().use { r ->
+            if (r.isSuccessful) JSONObject(r.body?.string().orEmpty()).optInt("llama_port", 0) else 0
+        }
+        if (cur <= 0 || want !in 1..65535 || want == cur || want == PORT) null
+        else {
+            val moved = URI(uri.scheme ?: "http", uri.userInfo, uri.host, want, uri.path, uri.query, uri.fragment).toString()
+            if (modelAnswers(moved) && !modelAnswers(serverUrl)) moved else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** llama-server's /health (no key needed) answers 200 when it's the model, 503 while it loads. */
+    private fun modelAnswers(base: String): Boolean = try {
+        val req = Request.Builder().url("${base.trim().trimEnd('/')}/health").get().build()
+        reachHttp.newCall(req).execute().use { r -> (r.code == 200 || r.code == 503) && r.body?.string().orEmpty().contains("\"status\"") }
+    } catch (e: Exception) {
+        false
+    }
+
     /** True if the hub (sync + voice) answers. */
     fun health(serverUrl: String): Boolean = try {
         val request = Request.Builder().url("${url(serverUrl)}/health").get().build()

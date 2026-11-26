@@ -85,8 +85,13 @@ def run_speed_test(whisper_url="", language="en"):
                 add("write", "Writing", gs, "tokens/s", f"about {gs * 0.75:.0f} words a second; a 150-word answer takes about {200 / gs:.0f} s")
             if not ps and not gs:
                 out["results"].append({"key": "model", "name": "AI model", "error": "it answered without timing figures"})
+        except urllib.error.HTTPError as e:
+            # something answered, so it isn't "unreachable": say who and what (a 404 means another program has the port)
+            hint = (" — another program is answering on that port, not Stella's model" if e.code == 404 else "")
+            out["results"].append({"key": "model", "name": "AI model",
+                                   "error": f"{LLAMA_URL} answered {e.code} {e.reason}{hint}"})
         except (urllib.error.URLError, OSError, ValueError, TypeError) as e:
-            out["results"].append({"key": "model", "name": "AI model", "error": f"not reachable ({e})"})
+            out["results"].append({"key": "model", "name": "AI model", "error": f"not reachable at {LLAMA_URL} ({e})"})
 
         # -- speaking, then hearing that same sentence back (so the transcript can be checked too)
         sentence = "Testing, one two three. The quick brown fox jumps over the lazy dog."
@@ -96,6 +101,8 @@ def run_speed_test(whisper_url="", language="en"):
             engine = "Piper"
             t0 = time.time()
             if ac["engine"] == "kokoro" and KOKORO.ready():
+                KOKORO.say("Ready.", ac["kokoro_voice"], 1.0)    # loads the voice first, as in normal use
+                t0 = time.time()
                 spoken, engine = KOKORO.say(sentence, ac["kokoro_voice"], 1.0), "Kokoro"
             elif os.path.isfile(_avatar_path("voices", ac["voice"] + ".onnx")):
                 TTS.say("Ready.", ac["voice"], 1.0)          # loads the voice first, as in normal use
@@ -105,7 +112,7 @@ def run_speed_test(whisper_url="", language="en"):
                 took = time.time() - t0
                 _, seconds = _resample_wav(spoken)
                 add("speak", "Speaking", took, "s", f"{engine} made {seconds:.1f} s of speech"
-                    + (f" ({seconds / took:.0f}x faster than real time)" if took > 0 else ""))
+                    + (f" ({_realtime(seconds, took)})" if took > 0 else ""))
         except Exception as e:   # noqa: BLE001 - one part failing shouldn't lose the other figures
             out["results"].append({"key": "speak", "name": "Speaking", "error": str(e)[:200]})
         if whisper_url:
@@ -154,6 +161,16 @@ def run_speed_test(whisper_url="", language="en"):
         return out
     finally:
         _SPEED_LOCK.release()
+
+
+def _realtime(seconds, took):
+    """'3.2x faster than real time' / '0.6x real time (slower than real time)'."""
+    r = seconds / took
+    if r >= 1.05:
+        return f"{r:.1f}x faster than real time"
+    if r > 0.95:
+        return "about real time"
+    return f"{r:.1f}x real time (slower than real time)"
 
 
 def speed_text(report):

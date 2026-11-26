@@ -2,7 +2,33 @@
 from helpers import call, check, done, start_hub
 
 h, web, tmp, port = start_hub()
-check(call(port, "GET", "/health", key=None) == (200, {"ok": True}), "health needs no key")
+check(call(port, "GET", "/health", key=None) == (200, {"ok": True, "llama_port": 9}), "health needs no key and says the model's port")
+check(h._realtime(4.1, 7.22) == "0.6x real time (slower than real time)" and h._realtime(10, 2) == "5.0x faster than real time"
+      and h._realtime(4, 4) == "about real time", "the speed test's speaking figure isn't rounded into 'faster'")
+r = h.run_speed_test()
+m = next((x for x in r.get("results", []) if x.get("key") == "model"), {})
+check("not reachable at http://127.0.0.1:9" in m.get("error", ""), "an unreachable model names the address it tried", m)
+import threading as _th
+from http.server import BaseHTTPRequestHandler as _B, HTTPServer as _S
+
+
+class _NotFound(_B):
+    def do_GET(self):
+        self.send_response(404); self.end_headers()
+    do_POST = do_GET
+
+    def log_message(self, *a):
+        pass
+
+
+_srv = _S(("127.0.0.1", 0), _NotFound)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+_old, h.LLAMA_URL = h.LLAMA_URL, f"http://127.0.0.1:{_srv.server_address[1]}"
+m = next((x for x in h.run_speed_test().get("results", []) if x.get("key") == "model"), {})
+check("answered 404" in m.get("error", "") and "another program" in m.get("error", ""),
+      "another program on the model's port is named as such, not 'unreachable'", m)
+h.LLAMA_URL = _old
+_srv.shutdown()
 st, page = call(port, "GET", "/chat", key=None)
 check(st == 200 and b"<html" in page[:200], "the web chat page needs no key")
 check(call(port, "GET", "/memories", key=None)[0] == 401, "data needs the key")

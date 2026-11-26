@@ -761,14 +761,15 @@ FIREWALL_RULE = "StellAI"
 FIREWALL_FROM = "LocalSubnet,100.64.0.0/10"     # this PC's own network(s) + Tailscale's address range
 
 
-def firewall_add_args():
+def firewall_add_args(llama=None):
     return (f'advfirewall firewall add rule name="{FIREWALL_RULE}" dir=in action=allow protocol=TCP '
-            f'localport={LLAMA_PORT},{HUB_PORT} profile=private,domain remoteip={FIREWALL_FROM}')
+            f'localport={llama or LLAMA_PORT},{HUB_PORT} profile=private,domain remoteip={FIREWALL_FROM}')
 
 
-def firewall_state(show=None):
+def firewall_state(show=None, llama=None):
     """'limited' (home network + Tailscale only), 'open' (the older rule: any address on a private network),
-    'none' (no rule: Windows asks or blocks) or 'unknown'. Reading the rule needs no administrator rights."""
+    'none' (no rule: Windows asks or blocks), 'outdated' (the rule doesn't include the AI's current port, after it
+    moved off a busy port) or 'unknown'. Reading the rule needs no administrator rights."""
     if show is None:
         if os.name != "nt":
             return "unknown"
@@ -778,15 +779,19 @@ def firewall_state(show=None):
             show = (r.stdout or "") if r.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError):
             return "unknown"
-    if "100.64.0.0" in show:
-        return "limited"
-    return "open" if re.search(r"\b8092\b", show) else "none"
+    if not re.search(r"\b8092\b", show):
+        return "none"
+    ports = re.search(r"LocalPort:\s*([\d,\- ]+)", show)
+    if ports and str(llama or LLAMA_PORT) not in re.split(r"[,\s]+", ports.group(1).strip()):
+        return "outdated"
+    return "limited" if "100.64.0.0" in show else "open"
 
 
-def limit_firewall():
-    """Replaces the firewall rule with the limited one. Windows asks for administrator approval (one prompt)."""
+def limit_firewall(llama=None):
+    """Replaces the firewall rule with the limited one (for the AI's current port). Windows asks for administrator
+    approval (one prompt)."""
     import ctypes
-    cmd = (f'/c netsh advfirewall firewall delete rule name="{FIREWALL_RULE}" & netsh {firewall_add_args()}')
+    cmd = (f'/c netsh advfirewall firewall delete rule name="{FIREWALL_RULE}" & netsh {firewall_add_args(llama)}')
     return ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", cmd, None, 0) > 32
 
 
@@ -1187,8 +1192,54 @@ def llama_args(cfg, pl, key):
     if pl.get("cache_ram_mb") is not None and "--cache-ram" in flags:
         a += ["--cache-ram", str(int(pl["cache_ram_mb"]))]
     a += ["-fa", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--jinja",
-          "--api-key", key, "--host", "0.0.0.0", "--port", str(LLAMA_PORT)]
+          "--api-key", key, "--host", "0.0.0.0", "--port", str(llama_port(cfg))]
     return a
+
+
+# ---- The AI's port: 8080 unless another program has it ------------------------------------------------------
+# If something else is listening on the port (another server you're working on), Stella's model moves to the next
+# free port from 8081 on and stays there (saved as llama_port), so phones don't have to chase it. Phones learn the
+# new port from the hub (/health) and switch by themselves; the firewall rule needs one administrator prompt.
+def llama_port(cfg):
+    try:
+        return int(cfg.get("llama_port") or LLAMA_PORT)
+    except (TypeError, ValueError):
+        return LLAMA_PORT
+
+
+def port_busy(port):
+    """True if another program is using the port. Two checks, because on Windows a program listening only on
+    127.0.0.1 doesn't stop another from listening on 0.0.0.0, and then this PC's own requests go to the wrong one."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        pass
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        s.bind(("0.0.0.0", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
+def pick_llama_port(cfg, busy=port_busy):
+    """The port to start the model on: the saved one if it's free, otherwise the first free one from 8080 to 8099
+    (skipping StellAI's other ports), saved for next time. Returns (port, the busy port it moved off or None)."""
+    cur = llama_port(cfg)
+    if not busy(cur):
+        return cur, None
+    taken = {HUB_PORT, WHISPER_PORT, EMBED_PORT, HELPER_PORT, SEARXNG_PORT, cur}
+    for port in range(LLAMA_PORT, LLAMA_PORT + 20):
+        if port not in taken and not busy(port):
+            cfg.set(llama_port=port)
+            return port, cur
+    return cur, None        # nothing free: try anyway (llama.cpp's own error then shows in its log)
 
 
 def llama_env(pl):
@@ -1404,7 +1455,7 @@ def install_freecad(cfg, status, cancel=None, get=http_json):
 def hub_args(cfg):
     args = ["--key-file", cfg.p("api-key.txt"), "--db", cfg.p("chats.db"), "--diagram-dir", cfg.p("diagrams"),
             "--image-dir", cfg.p("images"), "--wakeword-dir", cfg.p("wakewords"),
-            "--llama", f"http://127.0.0.1:{LLAMA_PORT}", "--whisper", f"http://127.0.0.1:{WHISPER_PORT}",
+            "--llama", f"http://127.0.0.1:{llama_port(cfg)}", "--whisper", f"http://127.0.0.1:{WHISPER_PORT}",
             "--mmdc", mermaid_exe(cfg) or shutil.which("mmdc") or "mmdc", "--app-port", str(HUB_PORT), "--avatar-dir", cfg.p("avatar")]
     if os.path.isfile(cfg.p("models", EMBED_FILE)):
         args += ["--embed", f"http://127.0.0.1:{EMBED_PORT}"]
@@ -1488,6 +1539,7 @@ class Servers:
         self.job = Job()
         self.lock = threading.Lock()
         self.wanted = False
+        self.moved = None          # (old port, new port) when the AI had to move off a busy port
         self._state = {"llama": "stopped", "whisper": "stopped", "hub": "stopped"}
         self._monitor = None
 
@@ -1510,6 +1562,11 @@ class Servers:
             pl = self.cfg.get("plan")
             key = api_key(self.cfg)
             os.makedirs(self.cfg.p("logs"), exist_ok=True)
+            port, moved_from = pick_llama_port(self.cfg)
+            if moved_from:
+                self.moved = (moved_from, port)
+                self.log(f"Port {moved_from} is being used by another program, so Stella's AI now uses port {port}. "
+                         "Phones switch over by themselves; the firewall needs the new port (see Options).")
             self._spawn("llama", llama_args(self.cfg, pl, key), llama_env(pl))
             ha = helper_args(self.cfg, pl)
             if ha:
@@ -1679,8 +1736,8 @@ class Servers:
             if p.poll() is not None:
                 out[name] = "crashed"
             else:
-                port = LLAMA_PORT if name == "llama" else WHISPER_PORT
-                out[name] = "running" if _healthy(port) else "starting"
+                port = llama_port(self.cfg) if name == "llama" else WHISPER_PORT
+                out[name] = "running" if _healthy(port, strict=name == "llama") else "starting"
         out["hub"] = "running" if self.web else "stopped"
         return out
 
@@ -1692,12 +1749,15 @@ class Servers:
             return ""
 
 
-def _healthy(port):
+def _healthy(port, strict=False):
+    """True when the model (or Whisper) answers its health check. For the model (strict) a 404 isn't healthy: llama.cpp
+    always has /health, so a 404 means some other program is answering on that port (it used to count as up, which
+    hid exactly that). Whisper's server may not have /health, so for it a 404 still means it's up."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.5) as r:
             return r.status == 200
     except urllib.error.HTTPError as e:
-        return e.code in (401, 404)   # up, just strict about the path or key
+        return e.code == 401 or (e.code == 404 and not strict)   # up, just strict about the key (or the path)
     except (urllib.error.URLError, OSError):
         return False
 

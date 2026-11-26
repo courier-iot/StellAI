@@ -207,7 +207,7 @@ def _run_move(addr, name, target_key=""):
                 break
         else:
             raise RuntimeError(f"{name} took the data but didn't come back within 15 minutes; check it there")
-        info = {"name": name, "address": addr, "llama_url": f"http://{host}:8080", "hub_url": f"http://{host}:8092",
+        info = {"name": name, "address": addr, "llama_url": f"http://{host}:{llama_port()}", "hub_url": f"http://{host}:8092",
                 "at": int(time.time())}
         with open(_move_path("moved.json"), "w") as f:
             json.dump(info, f)

@@ -69,6 +69,12 @@ Effort is a rough guide: **S** about an hour, **M** an afternoon, **L** a day or
 - [x] **Bored and asleep actually come** (0.35.0): idle gestures no longer reset the quiet clock.
 - [ ] **Check on real screens** (S): the stance (and the converted Unity clips: arms/fingers are the least certain part) (hands meeting in front without clipping), clip blending, alarm sound on the phone's avatar screen with the app in the background.
 
+### Port clash (0.36.0)
+
+- [x] **The AI moves off a busy port** (Windows): if another program has 8080, the model starts on the next free port (saved), the hub reports it at `/health` (`llama_port`), phones follow after checking the model really answers there; the firewall rule gets the new port (one admin prompt).
+- [x] The model's status no longer counts a 404 as "running"; the speed test names who answered instead of "not reachable", and its speaking figure no longer rounds 0.6x up to "1x faster" (and Kokoro is warmed up first, like Piper).
+- [ ] **Linux/Proxmox** (S): still fixed at 8080 (stellai-setup.sh); same idea there if it's ever needed.
+
 ## Also discussed, not yet built
 
 - [ ] **Pairing computers** (explained, not started): (1) helper machine for voice, search and embeddings; (2) two brains: a fast small model on one machine, the big one on another; (3) one model split across machines with llama.cpp RPC (wired network only). Two graphics cards in one PC beats all three.
